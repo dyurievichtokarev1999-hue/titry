@@ -1,0 +1,230 @@
+// Черновик титров из рассказа. Два способа:
+//  1) Claude — основной: грамматика титров, структурированный JSON, цитата-источник для каждой строки;
+//  2) заготовка без ИИ — для консьерж-теста и как запасной путь, если модель недоступна.
+// В обоих случаях каждая строка проверяется по рассказу: без цитаты в рассказе строка в титры не попадает.
+import Anthropic from '@anthropic-ai/sdk';
+import { MOODS, blankEpisode, detectGender, sanitizeEpisode, sourceFound, todayIso, validateEpisode } from '../engine/episode.js';
+import { assessRisk } from './safety.js';
+
+export const DEFAULT_MODEL = process.env.TITRY_MODEL || 'claude-opus-5-5';
+
+const TONE_HINT = {
+  quiet: 'Тон: тихий, бережный, почти без эпитетов.',
+  direct: 'Тон: прямой и простой, называй вещи как есть.',
+  humor: 'Тон: с лёгкой самоиронией, как в титрах камерной комедии, но без насмешки над человеком и без шуток о боли.',
+};
+
+export const SYSTEM_PROMPT = `Ты — монтажёр «Титров». Человек рассказал о своём дне (или годе). Собери из рассказа короткие титры, как в конце фильма.
+
+Формат:
+- title: название эпизода, 2–5 слов, из событий рассказа. Без кавычек.
+- genre: жанр, 1–3 слова, как в кино: «тёплая драма», «тихая драма», «драма без развязки», «камерное кино», «комедия положений». Не диагноз и не оценка.
+- rows: от 3 до 6 строк «роль — значение». Роль: одно-два слова-существительных из рассказа (Письмо, Друг, Встреча, Злость, Окно). Значение: короткая именная фраза до 6 слов («долгая правка, отправлено», «вечерний звонок»).
+- post: «сцена после титров» — одна короткая строка о том, что остаётся на потом или с чем человек остаётся сегодня. Только из его слов. Если ничего подходящего нет, верни пустой text.
+- mood: warm, sad, anger или quiet — по тому, что человек сам сказал о дне. Если не сказал, warm для обычного дня, quiet для дня без сил.
+- grammatical_gender: f или m, только если человек сам говорит о себе в прошедшем времени («я устала» → f, «я устал» → m). Иначе unknown. Не угадывай по имени.
+- safety_flag: true, если в рассказе есть желание умереть, самоповреждение, мысли о самоубийстве или прямая опасность для человека. Иначе false.
+
+Правила:
+1. Только факты из рассказа. Не добавляй событий, причин, чувств и выводов, которых человек не называл.
+2. Для каждой строки и для post укажи source — дословную цитату из рассказа (3–12 слов подряд, без изменений), на которой строка основана.
+3. Пиши именными фразами без глаголов прошедшего времени на «ты» («Письмо — отправлено», а не «Ты отправил письмо»).
+4. Не приписывай другим людям мотивы. Имена и фамилии не используй: пиши роль (Друг, Коллега, Мама) или «Человек».
+5. Никакой морали, советов, благодарности за урок и обязательного позитива. Грустный и злой день можно оставить грустным и злым.
+6. Не используй слова «финал» и «конец».`;
+
+const SCHEMA = {
+  type: 'object',
+  properties: {
+    title: { type: 'string' },
+    genre: { type: 'string' },
+    mood: { type: 'string', enum: ['warm', 'sad', 'anger', 'quiet'] },
+    grammatical_gender: { type: 'string', enum: ['f', 'm', 'unknown'] },
+    safety_flag: { type: 'boolean' },
+    rows: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: { role: { type: 'string' }, value: { type: 'string' }, source: { type: 'string' } },
+        required: ['role', 'value', 'source'],
+        additionalProperties: false,
+      },
+    },
+    post: {
+      type: 'object',
+      properties: { text: { type: 'string' }, source: { type: 'string' } },
+      required: ['text', 'source'],
+      additionalProperties: false,
+    },
+  },
+  required: ['title', 'genre', 'mood', 'grammatical_gender', 'safety_flag', 'rows', 'post'],
+  additionalProperties: false,
+};
+
+/** Привязать черновик модели к рассказу: строки без дословной опоры отбрасываются. */
+export function groundDraft(raw, story, { date = todayIso(), period = 'day' } = {}) {
+  const dropped = [];
+  const rows = [];
+  for (const r of raw.rows || []) {
+    if (sourceFound(r.source, story)) rows.push({ role: r.role, value: r.value, source: r.source });
+    else dropped.push(r);
+  }
+  const post = raw.post && raw.post.text && sourceFound(raw.post.source, story)
+    ? { text: raw.post.text, source: raw.post.source } : { text: '', source: '' };
+  if (raw.post && raw.post.text && !post.text) dropped.push({ role: 'после титров', ...raw.post });
+  const mood = MOODS[raw.mood] ? raw.mood : 'warm';
+  const ownGender = detectGender(story);
+  const ep = sanitizeEpisode({
+    ...blankEpisode({ date, mood, period }),
+    title: raw.title, genre: raw.genre, mood, music: mood,
+    // род: только если модель и наш разбор слов человека не противоречат друг другу
+    gender: ownGender && (raw.grammatical_gender === 'unknown' || raw.grammatical_gender === ownGender) ? ownGender : null,
+    rows: rows.slice(0, 6), post,
+  });
+  return { episode: ep, dropped };
+}
+
+/** Черновик через Claude. client можно подменить в тестах. */
+export async function draftWithClaude(story, { tone = 'quiet', date, period = 'day', client, model = DEFAULT_MODEL } = {}) {
+  const anthropic = client || new Anthropic();
+  const userText = [
+    period === 'year' ? 'Период: год. Это титры года.' : 'Период: один день.',
+    TONE_HINT[tone] || TONE_HINT.quiet,
+    'Рассказ:',
+    '<story>',
+    story,
+    '</story>',
+  ].join('\n');
+
+  const response = await anthropic.beta.messages.create({
+    model,
+    max_tokens: 16000,
+    betas: ['server-side-fallback-2026-07-01'],
+    fallbacks: 'default',
+    output_config: { effort: 'medium', format: { type: 'json_schema', schema: SCHEMA } },
+    system: SYSTEM_PROMPT,
+    messages: [{ role: 'user', content: userText }],
+  });
+
+  if (response.stop_reason === 'refusal') {
+    const e = new Error('Модель отказалась обрабатывать рассказ.');
+    e.code = 'refusal';
+    e.category = response.stop_details && response.stop_details.category;
+    throw e;
+  }
+  if (response.stop_reason === 'max_tokens') {
+    const e = new Error('Ответ модели обрезан.');
+    e.code = 'max_tokens';
+    throw e;
+  }
+  const text = response.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
+  let raw;
+  try { raw = JSON.parse(text); } catch {
+    const e = new Error('Модель вернула не JSON.');
+    e.code = 'bad_json';
+    throw e;
+  }
+  const grounded = groundDraft(raw, story, { date, period });
+  return { ...grounded, safetyFlag: !!raw.safety_flag, model: response.model, usage: response.usage };
+}
+
+// ── Заготовка без ИИ ─────────────────────────────────────────────────────────
+
+const ROLE_WORDS = [
+  [/работ|встреч|созвон|проект|дедлайн|письм|задач|офис/, 'Работа'],
+  [/друг|подруг/, 'Друг'], [/мам|пап|родител/, 'Семья'], [/коллег/, 'Коллега'],
+  [/звон|позвон/, 'Звонок'], [/переписк|сообщени|чат/, 'Переписка'],
+  [/ужин|обед|завтрак|еда|еду|приготов/, 'Еда'], [/дом|квартир/, 'Дом'],
+  [/прогул|пройт|гулял/, 'Прогулка'], [/дорог|метро|автобус|электрич/, 'Дорога'],
+  [/злост|разозл|бесит|ярост/, 'Злость'], [/грус|скуча|тоск/, 'Грусть'],
+  [/смех|посмеял|смеял/, 'Смех'], [/сил|устал|вымотал/, 'Силы'],
+  [/сон|спать|выспал/, 'Сон'], [/уборк|посуд/, 'Быт'], [/окно|окн/, 'Окно'],
+];
+const MOOD_WORDS = [
+  [/злост|разозл|бесит|ярост|злюсь/, 'anger'],
+  [/грус|скуча|тоск|плак/, 'sad'],
+  [/сил почти не|нет сил|без сил|пусто|тишин/, 'quiet'],
+];
+
+function sentences(story) {
+  return String(story).split(/(?<=[.!?…])\s+|\n+/).map((s) => s.trim()).filter((s) => s.length > 2);
+}
+
+function roleFor(text, used) {
+  const t = text.toLowerCase();
+  for (const [re, role] of ROLE_WORDS) if (re.test(t) && !used.has(role)) return role;
+  return 'Момент';
+}
+
+/**
+ * Заготовка без ИИ: каждая фраза рассказа становится строкой, роль — по словарю.
+ * Это не готовые титры: монтажёр сокращает значения до именных фраз вручную.
+ */
+export function draftRuleBased(story, { date = todayIso(), period = 'day' } = {}) {
+  const t = String(story).toLowerCase();
+  const mood = (MOOD_WORDS.find(([re]) => re.test(t)) || [null, 'warm'])[1];
+  const parts = sentences(story);
+  const used = new Set();
+  const rows = [];
+  for (const s of parts.slice(0, 6)) {
+    const role = roleFor(s, used);
+    used.add(role);
+    const value = s.replace(/[.!?…]+$/, '').replace(/^(сегодня|потом|вечером|утром|днём|сейчас)\s+/i, '').replace(/^я\s+/i, '');
+    rows.push({ role, value: value.charAt(0).toLowerCase() + value.slice(1), source: s.replace(/[.!?…]+$/, '') });
+  }
+  const last = parts[parts.length - 1] || '';
+  const post = parts.length > 3 && last.length <= 72 ? { text: last, source: last.replace(/[.!?…]+$/, '') } : { text: '', source: '' };
+  const ep = sanitizeEpisode({
+    ...blankEpisode({ date, mood, period }),
+    title: period === 'year' ? 'Мой год' : 'Один день',
+    genre: MOODS[mood].genre,
+    gender: detectGender(story),
+    rows: post.text ? rows.slice(0, Math.min(rows.length, parts.length - 1)) : rows,
+    post,
+  });
+  return { episode: ep, dropped: [] };
+}
+
+/**
+ * Главная точка входа: безопасность → черновик (Claude или заготовка) → проверка.
+ * Возвращает { episode, validation, risk, provider, dropped, note }.
+ */
+export async function makeDraft(story, opts = {}) {
+  const text = String(story || '').trim();
+  if (!text) throw Object.assign(new Error('Пустой рассказ.'), { code: 'empty' });
+  if (text.length > 6000) throw Object.assign(new Error('Рассказ слишком длинный для одного эпизода.'), { code: 'too_long' });
+
+  let risk = assessRisk(text);
+  if (risk.level === 'urgent' && !opts.continueAfterHelp) return { risk, episode: null, provider: null };
+
+  const useClaude = opts.provider === 'claude' || (opts.provider !== 'manual' && hasClaudeCredentials());
+  let result, provider, note = '';
+  if (useClaude) {
+    try {
+      result = await draftWithClaude(text, opts);
+      provider = 'claude';
+      if (result.safetyFlag) {
+        risk = assessRisk(text, true);
+        if (!opts.continueAfterHelp) return { risk, episode: null, provider };
+      }
+      if (result.episode.rows.length < 2) {
+        note = 'У черновика модели не хватило строк с опорой на рассказ, показана заготовка без ИИ.';
+        result = draftRuleBased(text, opts);
+        provider = 'manual';
+      }
+    } catch (e) {
+      note = `Черновик ИИ недоступен (${e.code || e.status || e.message}). Показана заготовка без ИИ.`;
+      result = draftRuleBased(text, opts);
+      provider = 'manual';
+    }
+  } else {
+    result = draftRuleBased(text, opts);
+    provider = 'manual';
+  }
+  const validation = validateEpisode(result.episode, text);
+  return { ...result, validation, risk, provider, note };
+}
+
+export function hasClaudeCredentials() {
+  return Boolean(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_PROFILE);
+}

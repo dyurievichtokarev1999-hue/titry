@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-label="Титры">
+  <title>Титры</title>
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="78%" r="70%">
+      <stop offset="0" stop-color="#DCB68C" stop-opacity=".22"/>
+      <stop offset="1" stop-color="#DCB68C" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1024" height="1024" fill="#15120F"/>
+  <rect width="1024" height="1024" fill="url(#glow)"/>
+  <!-- Строки титров по центральной оси; верхняя уходит в темноту, нижняя — тёплый свет -->
+  <rect x="349" y="280" width="326" height="34" rx="17" fill="#F1E9DA" fill-opacity=".32"/>
+  <rect x="256" y="420" width="512" height="34" rx="17" fill="#F1E9DA" fill-opacity=".68"/>
+  <rect x="326" y="560" width="372" height="34" rx="17" fill="#F1E9DA"/>
+  <rect x="396" y="700" width="232" height="34" rx="17" fill="#DCB68C"/>
+</svg>

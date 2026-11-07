@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>render</title>
+<link rel="stylesheet" href="fonts/fonts.css">
+<style>html,body{margin:0;background:#15120F}canvas{display:block}</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<!-- Страница для серверного рендера: Playwright вызывает window.titryRender(...) покадрово. -->
+<script type="module">
+import { drawFrame } from './draw.js';
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let episode = null, options = {};
+
+window.titrySetup = async (ep, opts) => {
+  episode = ep; options = opts;
+  canvas.width = opts.width; canvas.height = opts.height;
+  await Promise.all([
+    document.fonts.load('40px "Forum"', 'Титры'),
+    document.fonts.load('40px "JetBrains Mono"', 'ТИТРЫ'),
+  ]);
+  await document.fonts.ready;
+  return document.fonts.check('40px "Forum"', 'Титры') && document.fonts.check('40px "JetBrains Mono"', 'ТИТРЫ');
+};
+
+// Отдаём несколько кадров за один вызов, чтобы сократить накладные расходы.
+window.titryFrames = (startFrame, count) => {
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const f = startFrame + i;
+    drawFrame(ctx, canvas.width, canvas.height, episode, f / options.fps, { ...options, frame: f });
+    out.push(canvas.toDataURL('image/jpeg', options.quality ?? 0.9).slice(23));
+  }
+  return out;
+};
+window.titryReady = true;
+</script>
+</body>
+</html>

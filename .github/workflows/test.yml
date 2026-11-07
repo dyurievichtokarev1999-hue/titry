@@ -1,0 +1,25 @@
+name: Тесты
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Зависимости
+        run: npm ci
+      - name: Chromium для рендера
+        run: npx playwright install --with-deps chromium
+      - name: Тесты
+        run: npm test

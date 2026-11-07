@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-label="Титры">
+  <title>Титры</title>
+  <rect x="349" y="280" width="326" height="34" rx="17" fill="currentColor" fill-opacity=".35"/>
+  <rect x="256" y="420" width="512" height="34" rx="17" fill="currentColor" fill-opacity=".7"/>
+  <rect x="326" y="560" width="372" height="34" rx="17" fill="currentColor"/>
+  <rect x="396" y="700" width="232" height="34" rx="17" fill="currentColor"/>
+</svg>

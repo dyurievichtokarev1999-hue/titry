@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Монтажная · Титры</title>
+<link rel="icon" href="/brand/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/engine/fonts/fonts.css">
+<link rel="stylesheet" href="/studio.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="wm">ТИТРЫ</span><span class="sub">монтажная</span></div>
+  <div class="status" id="provider">…</div>
+</header>
+
+<main class="layout">
+  <div class="col">
+    <section class="panel" aria-labelledby="h-participant">
+      <h2 id="h-participant">Участник</h2>
+      <div class="grid3">
+        <label>Код<input id="participant" placeholder="p07" autocomplete="off"></label>
+        <label>День теста<input id="day" type="number" min="1" max="14" value="1"></label>
+        <label>Дата эпизода<input id="date" type="date"></label>
+      </div>
+      <label class="check"><input type="checkbox" id="consent"> Участник дал согласие по форме из <code>concierge/согласие.md</code></label>
+      <label class="check"><input type="checkbox" id="keepStory"> Сохранять текст рассказа в журнале (только если участник разрешил отдельно)</label>
+    </section>
+
+    <section class="panel" aria-labelledby="h-story">
+      <h2 id="h-story">Рассказ</h2>
+      <textarea id="story" rows="7" placeholder="Расшифровка голосового или текст участника. Как есть, без правок."></textarea>
+      <div class="row-controls">
+        <label>Период
+          <select id="period"><option value="day">день</option><option value="year">год</option></select>
+        </label>
+        <label>Тон
+          <select id="tone"><option value="quiet">тихо</option><option value="direct">прямо</option><option value="humor">с лёгким юмором</option></select>
+        </label>
+        <label>Пример
+          <select id="example"><option value="">—</option><option value="day-warm">тёплый</option><option value="day-sad">грустный</option><option value="day-anger">злой</option><option value="day-quiet">тихий</option></select>
+        </label>
+      </div>
+      <div class="actions">
+        <button class="primary" id="draftBtn">Собрать черновик</button>
+        <span class="hint" id="draftNote"></span>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="h-edit">
+      <h2 id="h-edit">Монтаж</h2>
+      <div class="grid2">
+        <label>Название<input id="title" maxlength="80"></label>
+        <label>Жанр<input id="genre" maxlength="60"></label>
+      </div>
+      <div class="field">
+        <span class="lbl">Плёнка</span>
+        <div class="chips" id="moods" role="radiogroup" aria-label="Плёнка"></div>
+      </div>
+      <div class="grid3">
+        <label>Саундтрек
+          <select id="music"></select>
+        </label>
+        <label>В главной роли<input id="lead" value="ты" maxlength="24"></label>
+        <label>Род (со слов человека)
+          <select id="gender"><option value="">неизвестен</option><option value="f">женский</option><option value="m">мужской</option></select>
+        </label>
+      </div>
+
+      <div class="rows-head"><span>Роль</span><span>Значение</span><span>Откуда (цитата из рассказа)</span><span></span></div>
+      <div id="rows"></div>
+      <button class="ghost" id="addRow">+ Строка</button>
+
+      <div class="grid2 post">
+        <label>Сцена после титров<input id="postText" maxlength="120"></label>
+        <label>Откуда<input id="postSource" maxlength="400"></label>
+      </div>
+
+      <ul class="checks" id="checks" aria-live="polite"></ul>
+    </section>
+  </div>
+
+  <aside class="col side">
+    <section class="panel stage">
+      <div class="phone"><canvas id="preview" width="540" height="960" aria-label="Предпросмотр титров"></canvas></div>
+      <div class="player">
+        <button id="play" class="primary">Смотреть</button>
+        <input type="range" id="scrub" min="0" max="1000" value="0" aria-label="Позиция">
+        <span id="tc" class="tc">00:00</span>
+      </div>
+      <label class="check"><input type="checkbox" id="still"> Без движения (статичные кадры)</label>
+      <details>
+        <summary>Текстовая версия</summary>
+        <pre id="textVersion"></pre>
+      </details>
+    </section>
+
+    <section class="panel">
+      <h2>Ролик</h2>
+      <div class="row-controls">
+        <label>Качество
+          <select id="preset"><option value="standard">720×1280</option><option value="hd">1080×1920</option><option value="preview">540×960, быстро</option></select>
+        </label>
+        <label class="check inline"><input type="checkbox" id="watermark" checked> Подпись «сделано в титрах»</label>
+      </div>
+      <div class="actions">
+        <button class="primary" id="renderBtn">Собрать MP4</button>
+        <span class="hint" id="renderNote"></span>
+      </div>
+      <div id="result" hidden>
+        <video id="video" controls playsinline></video>
+        <a id="download" download>Скачать MP4</a>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Отклик участника</h2>
+      <div class="chips" id="feedback" role="radiogroup" aria-label="Отклик">
+        <button data-v="fit" aria-pressed="false">Попало</button>
+        <button data-v="miss" aria-pressed="false">Не подходит</button>
+        <button data-v="heavier" aria-pressed="false">Стало тяжелее</button>
+        <button data-v="none" aria-pressed="false">Не ответил</button>
+      </div>
+      <label class="check"><input type="checkbox" id="shared"> Участник сам переслал ролик кому-то</label>
+      <label>Заметки<textarea id="notes" rows="3" placeholder="Что исправил участник, что сказал, вернулся ли на следующий день."></textarea></label>
+      <div class="actions">
+        <button id="logBtn">Сохранить в журнал</button>
+        <span class="hint" id="logNote"></span>
+      </div>
+    </section>
+  </aside>
+</main>
+
+<div class="help" id="help" hidden role="dialog" aria-modal="true" aria-labelledby="helpTitle">
+  <div class="help-box">
+    <h2 id="helpTitle">Сначала — безопасность</h2>
+    <pre id="helpText"></pre>
+    <p class="hint">Ролик не собирается. Свяжитесь с участником лично по протоколу из <code>concierge/протокол.md</code>.</p>
+    <div class="actions">
+      <button id="helpClose">Понятно</button>
+      <button class="ghost" id="helpContinue">Опасности нет, продолжить</button>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="/studio.js"></script>
+</body>
+</html>
