@@ -82,7 +82,7 @@ export async function renderEpisode(ep, options = {}) {
   }
   const preset = { ...PRESETS[options.preset || 'standard'] };
   const duration = options.duration || DEFAULT_DURATION;
-  const T = timeline(duration);
+  const T = timeline(duration, options.timing);
   const frames = Math.round(T.duration * preset.fps);
   const outPath = path.resolve(options.outPath || path.join(ROOT, 'data', 'out', `titry-${Date.now()}.mp4`));
   await fs.mkdir(path.dirname(outPath), { recursive: true });
@@ -97,6 +97,7 @@ export async function renderEpisode(ep, options = {}) {
     const fontsOk = await page.evaluate(([e, o]) => window.titrySetup(e, o), [ep, {
       width: preset.width, height: preset.height, fps: preset.fps, quality: preset.quality,
       duration: T.duration, still: !!options.still, watermark: options.watermark ?? false,
+      timing: options.timing || 'v1', typo: options.typo || 'v1', ease: options.ease || 'smooth',
     }]);
     if (!fontsOk) throw new Error('Шрифты бренда не загрузились, рендер остановлен, чтобы не выпустить ролик с системным шрифтом.');
 

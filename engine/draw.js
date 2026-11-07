@@ -16,23 +16,62 @@ const F = {
   mono: '"JetBrains Mono", Menlo, Consolas, monospace',
 };
 
-/** Таймлайн ролика в секундах. Всё считается от общей длительности. */
-export function timeline(duration = DEFAULT_DURATION) {
+/**
+ * Таймлайн ролика в секундах. Всё считается от общей длительности.
+ * v1 — исходный; v2 — по разбору моушн-дизайнера GPT (7.11): ровно 1,5 с пустой темноты
+ * между уходом титров и сценой после титров и 3,5 с полной видимости последней фразы.
+ */
+export function timeline(duration = DEFAULT_DURATION, variant = 'v1') {
   const d = Math.max(14, duration);
+  if (variant === 'v2') {
+    return {
+      duration: d, variant,
+      fadeIn: 0.8,
+      titleHold: 3.2,
+      rollEnd: d - 7.8,          // «Конец сцены» в центре
+      endHold: 1.2,
+      blackStart: d - 6.6,       // начало ухода титров
+      sceneFade: 0.6,            // титры полностью ушли к d - 6.0
+      postStart: d - 4.5,        // ровно 1,5 с пустой темноты
+      postFadeIn: 0.5,           // полная видимость с d - 4.0 до d - 0.5 = 3,5 с
+      fadeOut: 0.5,
+    };
+  }
   return {
-    duration: d,
+    duration: d, variant: 'v1',
     fadeIn: 0.8,
     titleHold: 3.2,              // название стоит, титры ещё не поехали
     rollEnd: d - 6.2,            // «Конец сцены» доезжает до центра
     endHold: 1.3,                // пауза на «Конец сцены»
     blackStart: d - 4.9,         // уход в темноту
+    sceneFade: 0.9,
     postStart: d - 3.4,          // сцена после титров
+    postFadeIn: 0.7,
     fadeOut: 0.5,
   };
 }
 
+// Типографика строк: v1 — исходная; v2 — роли крупнее (≈10,7 px при показе шириной 320 px), значения ≈18 px.
+export const TYPO = {
+  v1: { role: 28, roleLh: 38, value: 54, valueLh: 60 },
+  v2: { role: 34, roleLh: 44, value: 58, valueLh: 64 },
+};
+
+/**
+ * Положение прокрутки 0..1. smooth — исходная S-кривая (в середине до 1,5× средней скорости);
+ * linear — ровная скорость с короткими разгоном и торможением по краям (ramp — доля времени).
+ */
+export function rollPosition(u, ease = 'smooth', ramp = 0.08) {
+  u = Math.min(1, Math.max(0, u));
+  if (ease !== 'linear') return u * u * (3 - 2 * u);
+  const r = Math.min(0.4, Math.max(0.001, ramp));
+  const v = 1 / (1 - r);
+  if (u < r) return (v * u * u) / (2 * r);
+  if (u > 1 - r) return 1 - (v * (1 - u) * (1 - u)) / (2 * r);
+  return v * (u - r / 2);
+}
+
 const clamp = (v, a = 0, b = 1) => Math.min(b, Math.max(a, v));
-const smooth = (u) => u * u * (3 - 2 * u);
 
 function rgba(hex, a) {
   const n = parseInt(hex.slice(1), 16);
@@ -78,8 +117,9 @@ function grainTile(size = 192) {
 
 /** Раскладка всех элементов ролика по вертикали в «бумажных» координатах (до прокрутки). */
 let layoutCache = { key: '', value: null };
-export function layout(ctx, ep, w, h) {
-  const key = `${w}x${h}|${ep.period}|${ep.date}|${ep.title}|${ep.genre}|${ep.lead}|${ep.music}|`
+export function layout(ctx, ep, w, h, typo = 'v1') {
+  const ty = TYPO[typo] || TYPO.v1;
+  const key = `${typo}|${w}x${h}|${ep.period}|${ep.date}|${ep.title}|${ep.genre}|${ep.lead}|${ep.music}|`
     + JSON.stringify((ep.rows || []).map((r) => [r.role, r.value])) + `|${ep.post && ep.post.text}`;
   if (layoutCache.key === key) return layoutCache.value;
 
@@ -104,13 +144,13 @@ export function layout(ctx, ep, w, h) {
   push({ kind: 'head', text: 'В РОЛЯХ', size: 26 * s, h: 80 * s });
 
   for (const row of creditRows(ep)) {
-    setFont(ctx, 28 * s, F.mono, 4 * s);
+    setFont(ctx, ty.role * s, F.mono, 4 * s);
     const roleLines = wrap(ctx, row.role.toUpperCase(), colW);
-    setFont(ctx, 54 * s, F.display);
+    setFont(ctx, ty.value * s, F.display);
     const valueLines = wrap(ctx, row.value, colW);
-    const lh = 60 * s;
-    const rh = Math.max(valueLines.length * lh, roleLines.length * 38 * s);
-    push({ kind: 'row', roleLines, valueLines, lh, axis, gap, h: rh + 44 * s });
+    const lh = ty.valueLh * s;
+    const rh = Math.max(valueLines.length * lh, roleLines.length * ty.roleLh * s);
+    push({ kind: 'row', roleLines, valueLines, lh, axis, gap, ty, h: rh + 44 * s });
   }
 
   y += 160 * s;
@@ -185,7 +225,7 @@ function drawChrome(ctx, w, h, ep, s, alpha, opts) {
   ctx.restore();
 }
 
-function drawItems(ctx, w, h, L, offset, accent) {
+function drawItems(ctx, w, h, L, offset, accent, baseAlpha = 1) {
   const s = L.s;
   const top = 150 * s;
   const bottom = h - 150 * s;
@@ -198,7 +238,7 @@ function drawItems(ctx, w, h, L, offset, accent) {
     const a = clamp(edge / (150 * s));
     if (a <= 0) continue;
     ctx.save();
-    ctx.globalAlpha = a;
+    ctx.globalAlpha = a * baseAlpha; // общая прозрачность сцены умножается, а не затирается
     ctx.textBaseline = 'top';
     if (it.kind === 'label') {
       setFont(ctx, it.size, F.mono, 6 * s); ctx.fillStyle = C.dust; ctx.textAlign = 'center';
@@ -212,9 +252,9 @@ function drawItems(ctx, w, h, L, offset, accent) {
     } else if (it.kind === 'row') {
       ctx.fillStyle = C.axis;
       ctx.fillRect(it.axis - 0.75 * s, y + 4 * s, Math.max(1, 1.5 * s), it.h - 44 * s);
-      setFont(ctx, 28 * s, F.mono, 4 * s); ctx.fillStyle = C.role; ctx.textAlign = 'right';
-      it.roleLines.forEach((ln, i) => ctx.fillText(ln, it.axis - it.gap, y + 16 * s + i * 38 * s));
-      setFont(ctx, 54 * s, F.display); ctx.fillStyle = C.light; ctx.textAlign = 'left';
+      setFont(ctx, it.ty.role * s, F.mono, 4 * s); ctx.fillStyle = C.role; ctx.textAlign = 'right';
+      it.roleLines.forEach((ln, i) => ctx.fillText(ln, it.axis - it.gap, y + 16 * s + i * it.ty.roleLh * s));
+      setFont(ctx, it.ty.value * s, F.display); ctx.fillStyle = C.light; ctx.textAlign = 'left';
       it.valueLines.forEach((ln, i) => ctx.fillText(ln, it.axis + it.gap, y + i * it.lh));
     } else if (it.kind === 'end') {
       setFont(ctx, it.size, F.display); ctx.fillStyle = C.light; ctx.textAlign = 'center';
@@ -262,13 +302,14 @@ function stillOffset(L, h, t, T) {
 
 /**
  * Нарисовать кадр.
- * opts: { duration, still (без движения), watermark (строка или false), frame (номер для зерна) }
+ * opts: { duration, still (без движения), watermark (строка или false), frame (номер для зерна),
+ *         timing: 'v1'|'v2', typo: 'v1'|'v2', ease: 'smooth'|'linear' }
  */
 export function drawFrame(ctx, w, h, ep, t, opts = {}) {
-  const T = timeline(opts.duration || DEFAULT_DURATION);
+  const T = timeline(opts.duration || DEFAULT_DURATION, opts.timing);
   const mood = MOODS[ep.mood] || MOODS.warm;
   const accent = mood.accent;
-  const L = layout(ctx, ep, w, h);
+  const L = layout(ctx, ep, w, h, opts.typo);
   const frame = opts.frame ?? Math.round(t * 30);
 
   drawBackground(ctx, w, h, accent, t, opts);
@@ -280,25 +321,22 @@ export function drawFrame(ctx, w, h, ep, t, opts = {}) {
     const u = clamp((t - T.titleHold) / (T.rollEnd - T.titleHold));
     const from = h / 2 - L.titleCenter;
     const to = h / 2 - L.endCenter;
-    offset = from + (to - from) * smooth(u);
+    offset = from + (to - from) * rollPosition(u, opts.ease, 0.8 / Math.max(1, T.rollEnd - T.titleHold));
   }
 
   const sceneIn = opts.still ? (t > 0 ? 1 : 0) : clamp(t / T.fadeIn);
-  const sceneOut = opts.still ? (t < T.blackStart ? 1 : 0) : 1 - clamp((t - T.blackStart) / 0.9);
+  const sceneOut = opts.still ? (t < T.blackStart ? 1 : 0) : 1 - clamp((t - T.blackStart) / T.sceneFade);
   const sceneA = Math.min(sceneIn, sceneOut);
 
   if (sceneA > 0) {
-    ctx.save();
-    ctx.globalAlpha = sceneA;
-    drawItems(ctx, w, h, L, offset, accent);
-    ctx.restore();
+    drawItems(ctx, w, h, L, offset, accent, sceneA);
   }
 
   const hasPost = L.postLines.length > 0;
   let postA = 0;
   if (hasPost) {
     postA = opts.still ? (t >= T.postStart ? 1 : 0)
-      : clamp((t - T.postStart) / 0.7) * (1 - clamp((t - (T.duration - T.fadeOut)) / T.fadeOut));
+      : clamp((t - T.postStart) / T.postFadeIn) * (1 - clamp((t - (T.duration - T.fadeOut)) / T.fadeOut));
     drawPost(ctx, w, h, L, accent, postA);
   }
 
@@ -309,5 +347,5 @@ export function drawFrame(ctx, w, h, ep, t, opts = {}) {
 
 /** Кадр-афиша для фильмотеки и превью: название на своём месте. */
 export function drawPoster(ctx, w, h, ep, opts = {}) {
-  drawFrame(ctx, w, h, ep, timeline(opts.duration).titleHold - 0.5, { ...opts, frame: 0 });
+  drawFrame(ctx, w, h, ep, timeline(opts.duration, opts.timing).titleHold - 0.5, { ...opts, frame: 0 });
 }
