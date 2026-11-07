@@ -124,13 +124,13 @@ export function draftMessage(ep, validation) {
   return lines.join('\n');
 }
 
-export function draftKeyboard(ep) {
+export function draftKeyboard(ep, draftId = 0) {
   const nextMood = MOODS[MOOD_ORDER[(MOOD_ORDER.indexOf(ep.mood) + 1) % MOOD_ORDER.length]];
   const nextMusic = TRACKS[MUSIC_ORDER[(MUSIC_ORDER.indexOf(ep.music) + 1) % MUSIC_ORDER.length]];
   return {
     inline_keyboard: [
-      [{ text: '▶ Смотреть титры', callback_data: 'play' }],
-      [{ text: `Плёнка: ${nextMood.film}`, callback_data: 'mood' }, { text: `Музыка: ${nextMusic.file ? nextMusic.title : 'тишина'}`, callback_data: 'music' }],
+      [{ text: '▶ Смотреть титры', callback_data: `play:${draftId}` }],
+      [{ text: `Плёнка: ${nextMood.film}`, callback_data: `mood:${draftId}` }, { text: `Музыка: ${nextMusic.file ? nextMusic.title : 'тишина'}`, callback_data: `music:${draftId}` }],
       [{ text: 'Как поправить строку', callback_data: 'edit' }],
     ],
   };
@@ -168,6 +168,8 @@ export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), sal
 
 export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, render = renderEpisode, transcribe = transcribeOgg, now = () => new Date() } = {}) {
   const sessions = new Map();
+  // Ключ рассказа: запрет по безопасности привязан к самому рассказу, а не к интерфейсу.
+  const storyKey = (story) => crypto.createHash('sha256').update(String(story).toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim()).digest('hex');
   let queue = Promise.resolve();
   let waiting = 0;
 
@@ -185,11 +187,34 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
 
   async function showDraft(chatId, s) {
     s.validation = validateEpisode(s.episode, s.story);
-    await tg.send(chatId, draftMessage(s.episode, s.validation), { parse_mode: 'HTML', reply_markup: draftKeyboard(s.episode) });
+    await tg.send(chatId, draftMessage(s.episode, s.validation), { parse_mode: 'HTML', reply_markup: draftKeyboard(s.episode, s.draftId) });
+  }
+
+  // Остановка по безопасности: прежний черновик уничтожается, рассказ запоминается как запрещённый.
+  async function stopForSafety(chatId, s, level, extra = {}) {
+    s.episode = null;
+    s.verdict = 'blocked';
+    s.draftId = (s.draftId || 0) + 1; // кнопки всех прежних черновиков перестают работать
+    s.stage = 'help';
+    if (s.story) {
+      s.blocked = s.blocked || new Set();
+      s.blocked.add(storyKey(s.originalStory || s.story));
+    }
+    await metrics.log(chatId, 'safety', { level, ...extra });
+    await tg.send(chatId, helpMessage('urgent'));
   }
 
   async function handleStory(chatId, s, story, source) {
+    // Новый рассказ сразу отменяет прежний черновик: его кнопки больше ничего не запускают.
+    s.episode = null;
+    s.verdict = null;
+    s.draftId = (s.draftId || 0) + 1;
     s.story = story;
+    s.originalStory = story;
+    s.stage = 'drafting';
+    if (s.blocked && s.blocked.has(storyKey(story))) {
+      return stopForSafety(chatId, s, 'urgent', { at: 'repeat' });
+    }
     await tg.action(chatId, 'typing');
     await tg.send(chatId, TEXT.working);
     let r;
@@ -197,18 +222,15 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
       r = await draft(story, { date: todayIso(now()), period: s.period, tone: 'quiet' });
     } catch (e) {
       console.error('draft', e);
+      s.stage = 'idle';
       await tg.send(chatId, TEXT.draftFail);
       return;
     }
     await metrics.log(chatId, 'story', { source, period: s.period, chars: Math.round(story.length / 50) * 50 });
-    if (!r.episode) {
-      s.stage = 'help';
-      await metrics.log(chatId, 'safety', { level: r.risk.level, byModel: r.risk.byModel });
-      await tg.send(chatId, helpMessage(r.risk.level));
-      return;
-    }
+    if (!r.episode) return stopForSafety(chatId, s, r.risk.level, { byModel: r.risk.byModel });
     if (r.risk.level === 'concern') await tg.send(chatId, helpMessage('concern'));
     s.episode = r.episode;
+    s.verdict = 'ok';
     s.edits = 0;
     s.stage = 'draft';
     await metrics.log(chatId, 'draft', { provider: r.provider, rows: r.episode.rows.length, dropped: (r.dropped || []).length });
@@ -217,13 +239,9 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
 
   async function doRender(chatId, s) {
     // Правки после черновика тоже проверяются: опасная строка не попадёт в ролик.
+    if (s.verdict !== 'ok' || !s.episode) return tg.send(chatId, TEXT.noDraft);
     const risk = assessEpisodeRisk(s.story, s.episode);
-    if (risk.level === 'urgent') {
-      s.stage = 'help';
-      await metrics.log(chatId, 'safety', { level: risk.level, at: 'render' });
-      await tg.send(chatId, helpMessage('urgent'));
-      return;
-    }
+    if (risk.level === 'urgent') return stopForSafety(chatId, s, 'urgent', { at: 'render' });
     const v = validateEpisode(s.episode, s.story);
     if (!v.ok) { await showDraft(chatId, s); return; }
     s.stage = 'rendering';
@@ -308,12 +326,15 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
       if (v === 'heavier') { await tg.send(chatId, TEXT.heavier); return tg.send(chatId, helpMessage('concern')); }
       return tg.send(chatId, v === 'fit' ? TEXT.fit : TEXT.miss);
     }
-    if (!s.episode) return tg.send(chatId, TEXT.noDraft);
-    if (s.stage === 'rendering') return tg.send(chatId, TEXT.rendering);
-    if (data === 'play') return doRender(chatId, s);
-    if (data === 'mood') { s.episode.mood = MOOD_ORDER[(MOOD_ORDER.indexOf(s.episode.mood) + 1) % MOOD_ORDER.length]; s.stage = 'draft'; return showDraft(chatId, s); }
-    if (data === 'music') { s.episode.music = MUSIC_ORDER[(MUSIC_ORDER.indexOf(s.episode.music) + 1) % MUSIC_ORDER.length]; s.stage = 'draft'; return showDraft(chatId, s); }
     if (data === 'edit') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });
+    const [action, idPart] = data.split(':');
+    if (s.stage === 'rendering') return tg.send(chatId, TEXT.rendering);
+    // Кнопка работает только для текущего черновика, прошедшего проверку безопасности.
+    const current = s.episode && s.verdict === 'ok' && (s.stage === 'draft' || s.stage === 'watched') && Number(idPart) === s.draftId;
+    if (!current) return tg.send(chatId, s.stage === 'help' ? helpMessage('urgent') : TEXT.noDraft);
+    if (action === 'play') return doRender(chatId, s);
+    if (action === 'mood') { s.episode.mood = MOOD_ORDER[(MOOD_ORDER.indexOf(s.episode.mood) + 1) % MOOD_ORDER.length]; s.stage = 'draft'; return showDraft(chatId, s); }
+    if (action === 'music') { s.episode.music = MUSIC_ORDER[(MUSIC_ORDER.indexOf(s.episode.music) + 1) % MUSIC_ORDER.length]; s.stage = 'draft'; return showDraft(chatId, s); }
   }
 
   async function handleUpdate(u) {

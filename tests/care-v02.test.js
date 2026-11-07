@@ -147,11 +147,16 @@ test('журнал монтажной не содержит текста рас�
 
 // ── Бот ──────────────────────────────────────────────────────────────────────
 
+const playId = (tg) => {
+  const kb = [...(tg.sent.extras || [])].reverse().find((e) => e && e.reply_markup && e.reply_markup.inline_keyboard);
+  return kb.reply_markup.inline_keyboard[0][0].callback_data.split(':')[1];
+};
+
 function fakeTelegram() {
   const sent = [];
   return {
     sent,
-    send: async (chat, text) => { sent.push(text); },
+    send: async (chat, text, extra) => { sent.push(text); sent.extras = sent.extras || []; sent.extras.push(extra); },
     action: async () => {}, answer: async () => {},
     fileBuffer: async () => Buffer.from(''),
     sendVideo: async () => { sent.push('VIDEO'); },
@@ -177,13 +182,13 @@ test('бот: правка от самого человека становитс
   const chat = { id: 6, type: 'private' };
   await bot.handleUpdate({ message: { chat, text: SAFE_STORY } });
   await bot.handleUpdate({ message: { chat, text: '1: Работа — обсуждение жирафа' } });
-  await bot.handleUpdate({ callback_query: { id: 'a', data: 'play', message: { chat } } });
+  await bot.handleUpdate({ callback_query: { id: 'a', data: `play:${playId(tg)}`, message: { chat } } });
   assert.equal(rendered.length, 1);
   assert.equal(rendered[0].ep.rows[0].value, 'обсуждение жирафа');
   assert.ok(rendered[0].opts.story.includes('обсуждение жирафа'), 'правка человека — часть опоры');
 
   await bot.handleUpdate({ message: { chat, text: '2: не хочу больше жить' } });
-  await bot.handleUpdate({ callback_query: { id: 'b', data: 'play', message: { chat } } });
+  await bot.handleUpdate({ callback_query: { id: 'b', data: `play:${playId(tg)}`, message: { chat } } });
   assert.equal(rendered.length, 1, 'второй рендер не запускался');
   assert.ok(tg.sent.some((t) => /Сейчас важнее не титры/.test(t)));
 });

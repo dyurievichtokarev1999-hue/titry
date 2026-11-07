@@ -29,6 +29,11 @@ test('правки применяются и соблюдают лимиты', (
   assert.match(draftMessage(episode), /Похоже на твой день/);
 });
 
+const playId = (tg) => {
+  const kb = [...tg.sent].reverse().find((m) => m.extra && m.extra.reply_markup && m.extra.reply_markup.inline_keyboard);
+  return kb.extra.reply_markup.inline_keyboard[0][0].callback_data.split(':')[1];
+};
+
 function fakeTelegram() {
   const sent = [];
   return {
@@ -55,8 +60,8 @@ test('сценарий бота: рассказ → правка → ролик 
   await bot.handleUpdate({ message: { chat, text: story } });
   assert.ok(tg.sent.some((m) => /Похоже на твой день/.test(m.text)));
   await bot.handleUpdate({ message: { chat, text: '1: Письмо — отправлено' } });
-  await bot.handleUpdate({ callback_query: { id: 'q1', data: 'mood', message: { chat } } });
-  await bot.handleUpdate({ callback_query: { id: 'q2', data: 'play', message: { chat } } });
+  await bot.handleUpdate({ callback_query: { id: 'q1', data: `mood:${playId(tg)}`, message: { chat } } });
+  await bot.handleUpdate({ callback_query: { id: 'q2', data: `play:${playId(tg)}`, message: { chat } } });
   assert.equal(rendered.length, 1);
   assert.equal(rendered[0].rows[0].value, 'отправлено');
   assert.equal(rendered[0].mood, 'sad');

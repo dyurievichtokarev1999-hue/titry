@@ -7,7 +7,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { MOODS, TRACKS, sanitizeEpisode, validateEpisode, episodeToText } from '../engine/episode.js';
-import { makeDraft, hasClaudeCredentials, DEFAULT_MODEL } from './draft.js';
+import { makeDraft, hasClaudeCredentials, DEFAULT_MODEL, modelSafetyCheck } from './draft.js';
 import { renderEpisode, ROOT } from './render.js';
 import { loadHelp, helpMessage, assessEpisodeRisk } from './safety.js';
 
@@ -52,18 +52,29 @@ function safeName(s, fallback) {
 }
 
 const int = (v, min, max) => (Number.isInteger(v) && v >= min && v <= max ? v : null);
+
+/** Строгая календарная дата ГГГГ-ММ-ДД, иначе null. */
+export function strictDate(v) {
+  if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return null;
+  const d = new Date(`${v}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v ? v : null;
+}
+
+const storyKey = (story) => crypto.createHash('sha256').update(String(story).toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim()).digest('hex');
 const bool = (v) => v === true;
 
 /** Запись журнала: только разрешённые поля, без текстов. */
 export function logRecord(body) {
   const ep = sanitizeEpisode(body.episode);
+  const date = strictDate(body.episode && body.episode.date);
+  if (!date) throw Object.assign(new Error('Некорректная дата эпизода: нужен формат ГГГГ-ММ-ДД.'), { status: 400 });
   const fb = body.feedback && typeof body.feedback === 'object' ? body.feedback : {};
   const edits = fb.edits && typeof fb.edits === 'object' ? fb.edits : {};
   return {
     savedAt: new Date().toISOString(),
     participant: safeName(body.participant, ''),
     day: int(Number(body.day), 1, 30),
-    date: ep.date,
+    date,
     provider: PROVIDERS.includes(body.provider) ? body.provider : null,
     mood: MOODS[ep.mood] ? ep.mood : null,
     music: TRACKS[ep.music] ? ep.music : null,
@@ -83,9 +94,15 @@ export function logRecord(body) {
  * Создать сервер монтажной. Параметры нужны для тестов:
  * render — функция рендера (по умолчанию настоящий renderEpisode), dataDir — папка данных.
  */
-export function createApp({ render = renderEpisode, dataDir = path.join(ROOT, 'data') } = {}) {
+export function createApp({
+  render = renderEpisode,
+  dataDir = path.join(ROOT, 'data'),
+  // Второй слой безопасности для прямого пути рендера: true — опасно, false — нет, null — модель недоступна.
+  safetyCheck = async (story) => (hasClaudeCredentials() ? modelSafetyCheck(story) : null),
+} = {}) {
   const OUT = path.join(dataDir, 'out');
   const LOG = path.join(dataDir, 'concierge');
+  const blocked = new Set(); // рассказы, остановленные моделью в этой сессии монтажной
   let rendering = Promise.resolve();
 
   const routes = {
@@ -100,7 +117,10 @@ export function createApp({ render = renderEpisode, dataDir = path.join(ROOT, 'd
       const result = await makeDraft(body.story, {
         date: body.date, period: body.period, tone: body.tone, provider: body.provider,
       });
-      if (!result.episode) return { risk: result.risk, help: helpMessage(result.risk.level) };
+      if (!result.episode) {
+        if (result.risk.byModel) blocked.add(storyKey(body.story));
+        return { risk: result.risk, help: helpMessage(result.risk.level) };
+      }
       return {
         episode: result.episode, validation: result.validation, risk: result.risk,
         provider: result.provider, note: result.note, dropped: result.dropped,
@@ -118,10 +138,17 @@ export function createApp({ render = renderEpisode, dataDir = path.join(ROOT, 'd
       const body = await readJson(req);
       const ep = sanitizeEpisode(body.episode);
       const story = String(body.story || '');
+      const stop = (risk) => ({ status: 422, body: { error: 'Ролик не собирается: сработал фильтр безопасности.', risk, help: helpMessage('urgent') } });
       const risk = assessEpisodeRisk(story, ep);
-      if (risk.level === 'urgent') return { status: 422, body: { error: 'Ролик не собирается: сработал фильтр безопасности.', risk, help: helpMessage('urgent') } };
+      if (risk.level === 'urgent') return stop(risk);
       const v = validateEpisode(ep, story);
       if (!v.ok) return { status: 422, body: { error: 'Исправьте ошибки перед рендером.', validation: v } };
+      // Вердикт модели привязан к рассказу: повторный запрос его не снимает.
+      if (blocked.has(storyKey(story))) return stop({ level: 'urgent', byModel: true, matches: [] });
+      let flagged;
+      try { flagged = await safetyCheck(`${story}\n${episodeToText(ep)}`); }
+      catch { return { status: 503, body: { error: 'Не удалось проверить рассказ на безопасность. Ролик не собирается, попробуйте позже.' } }; }
+      if (flagged === true) { blocked.add(storyKey(story)); return stop({ level: 'urgent', byModel: true, matches: [] }); }
       const id = `${ep.date}-${safeName(body.participant, 'p')}-${crypto.randomBytes(3).toString('hex')}`;
       const job = rendering.then(() => render(ep, {
         story,
@@ -140,9 +167,11 @@ export function createApp({ render = renderEpisode, dataDir = path.join(ROOT, 'd
       if (!body.consent) return { status: 400, body: { error: 'Нет отметки о согласии участника.' } };
       const record = logRecord(body);
       if (!record.participant) return { status: 400, body: { error: 'Укажите код участника латиницей, например p07.' } };
-      const dir = path.join(LOG, record.participant);
+      const dir = path.resolve(LOG, record.participant);
+      // Имя файла — только служебное; путь обязан остаться внутри каталога журнала.
+      const file = path.join(dir, `${Date.now()}-${crypto.randomBytes(3).toString('hex')}.json`);
+      if (!dir.startsWith(path.resolve(LOG) + path.sep)) return { status: 400, body: { error: 'Некорректный код участника.' } };
       await fs.mkdir(dir, { recursive: true });
-      const file = path.join(dir, `${record.date}-${Date.now()}.json`);
       await fs.writeFile(file, JSON.stringify(record, null, 2));
       return { saved: path.relative(dataDir, file) };
     },
