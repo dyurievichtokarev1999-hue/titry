@@ -206,6 +206,17 @@ $('renderBtn').addEventListener('click', async () => {
   } finally { showChecks(); }
 });
 
+$('sentBtn').addEventListener('click', async () => {
+  const video = $('video').getAttribute('src');
+  if (!video) return;
+  try {
+    await api('/api/out/delete', { video });
+    $('video').removeAttribute('src'); $('video').load();
+    $('result').hidden = true;
+    $('renderNote').textContent = 'Ролик удалён из монтажной.';
+  } catch (e) { $('renderNote').textContent = e.message; }
+});
+
 for (const b of $('feedback').children) {
   b.addEventListener('click', () => {
     state.feedback = b.dataset.v;

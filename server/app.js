@@ -53,6 +53,26 @@ function safeName(s, fallback) {
 
 const int = (v, min, max) => (Number.isInteger(v) && v >= min && v <= max ? v : null);
 
+export const OUT_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+
+/**
+ * Удалить ролики и постеры старше maxAgeMs (0 — все). Ролик удаляется после отправки кнопкой
+ * в монтажной; это страховка для забытых, неотправленных и недособранных файлов.
+ */
+export async function purgeOut(dir, maxAgeMs = OUT_MAX_AGE_MS, now = Date.now()) {
+  let removed = 0;
+  let names = [];
+  try { names = await fs.readdir(dir); } catch { return 0; }
+  for (const name of names) {
+    const file = path.join(dir, name);
+    try {
+      const st = await fs.stat(file);
+      if (st.isFile() && now - st.mtimeMs >= maxAgeMs) { await fs.rm(file, { force: true }); removed++; }
+    } catch { /* файл уже удалён */ }
+  }
+  return removed;
+}
+
 /** Строгая календарная дата ГГГГ-ММ-ДД, иначе null. */
 export function strictDate(v) {
   if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return null;
@@ -104,6 +124,10 @@ export function createApp({
   const LOG = path.join(dataDir, 'concierge');
   const blocked = new Set(); // рассказы, остановленные моделью в этой сессии монтажной
   let rendering = Promise.resolve();
+  // Ролики не переживают перезапуск монтажной и не лежат дольше 2 часов.
+  purgeOut(OUT, 0).catch(() => {});
+  const sweeper = setInterval(() => purgeOut(OUT).catch(() => {}), 10 * 60 * 1000);
+  sweeper.unref();
 
   const routes = {
     'GET /api/config': async () => ({
@@ -182,6 +206,15 @@ export function createApp({
         return modelStop();
       }
       return { video: `/out/${id}.mp4`, poster: `/out/${id}.jpg`, seconds: r.seconds, validation: v };
+    },
+
+    // Ролик отправлен участнику — удалить рабочие копии (видео и постер).
+    'POST /api/out/delete': async (req) => {
+      const body = await readJson(req);
+      const m = /^\/out\/([0-9a-z-]+)\.mp4$/.exec(String(body.video || ''));
+      if (!m) return { status: 400, body: { error: 'Некорректный путь к ролику.' } };
+      for (const ext of ['.mp4', '.jpg']) await fs.rm(path.join(OUT, m[1] + ext), { force: true });
+      return { deleted: true };
     },
 
     // Журнал консьерж-теста: только события и числа (см. logRecord). Хранится локально в data/concierge.
