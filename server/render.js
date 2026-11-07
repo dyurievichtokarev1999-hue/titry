@@ -7,6 +7,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { TRACKS, validateEpisode } from '../engine/episode.js';
 import { DEFAULT_DURATION, timeline } from '../engine/draw.js';
+import { assessEpisodeRisk } from './safety.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const ROOT = path.resolve(here, '..');
@@ -63,11 +64,17 @@ function runFfmpeg(args, feed) {
 
 /**
  * Отрендерить эпизод в MP4.
- * options: { outPath, preset: 'preview'|'standard'|'hd', duration, still, watermark, posterPath }
+ * options: { story (обязательно), outPath, preset: 'preview'|'standard'|'hd', duration, still, watermark, posterPath }
+ * story — опора эпизода: рассказ человека и его собственные правки. Без неё рендер не запускается.
  * Возвращает { outPath, posterPath, seconds, frames }.
  */
 export async function renderEpisode(ep, options = {}) {
-  const check = validateEpisode(ep);
+  // Последняя линия защиты для любого пути (монтажная, бот, CLI): опасные темы — без ролика.
+  const risk = assessEpisodeRisk(options.story, ep);
+  if (risk.level === 'urgent') {
+    throw Object.assign(new Error('Рендер остановлен фильтром безопасности: в рассказе или строках есть опасные темы.'), { code: 'safety', risk });
+  }
+  const check = validateEpisode(ep, options.story);
   if (!check.ok) {
     const e = new Error('Эпизод не готов к рендеру: ' + check.errors.map((x) => x.msg).join(' '));
     e.validation = check;

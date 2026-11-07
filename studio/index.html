@@ -24,7 +24,7 @@
         <label>Дата эпизода<input id="date" type="date"></label>
       </div>
       <label class="check"><input type="checkbox" id="consent"> Участник дал согласие по форме из <code>concierge/согласие.md</code></label>
-      <label class="check"><input type="checkbox" id="keepStory"> Сохранять текст рассказа в журнале (только если участник разрешил отдельно)</label>
+      <p class="hint">Рассказ остаётся только в этой вкладке. В журнал попадают события и числа, без текстов.</p>
     </section>
 
     <section class="panel" aria-labelledby="h-story">
@@ -122,7 +122,14 @@
         <button data-v="none" aria-pressed="false">Не ответил</button>
       </div>
       <label class="check"><input type="checkbox" id="shared"> Участник сам переслал ролик кому-то</label>
-      <label>Заметки<textarea id="notes" rows="3" placeholder="Что исправил участник, что сказал, вернулся ли на следующий день."></textarea></label>
+      <div class="field">
+        <span class="lbl">Участник просил поправить</span>
+        <label class="check"><input type="checkbox" name="requested" value="words"> слова</label>
+        <label class="check"><input type="checkbox" name="requested" value="genre"> жанр или название</label>
+        <label class="check"><input type="checkbox" name="requested" value="film"> плёнку</label>
+        <label class="check"><input type="checkbox" name="requested" value="music"> музыку</label>
+      </div>
+      <p class="hint">Свободный текст и цитаты в журнал не пишутся. Наблюдения без цитат — в таблицу <code>concierge/metrics.csv</code>.</p>
       <div class="actions">
         <button id="logBtn">Сохранить в журнал</button>
         <span class="hint" id="logNote"></span>
@@ -135,10 +142,9 @@
   <div class="help-box">
     <h2 id="helpTitle">Сначала — безопасность</h2>
     <pre id="helpText"></pre>
-    <p class="hint">Ролик не собирается. Свяжитесь с участником лично по протоколу из <code>concierge/протокол.md</code>.</p>
+    <p class="hint">Ролик по этому рассказу не собирается, обойти остановку нельзя. Свяжитесь с участником лично по протоколу из <code>concierge/протокол.md</code>.</p>
     <div class="actions">
       <button id="helpClose">Понятно</button>
-      <button class="ghost" id="helpContinue">Опасности нет, продолжить</button>
     </div>
   </div>
 </div>

@@ -7,7 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS } from '../engine/episode.js';
 import { makeDraft } from './draft.js';
-import { helpMessage } from './safety.js';
+import { helpMessage, assessEpisodeRisk } from './safety.js';
 import { renderEpisode, ROOT } from './render.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS } from './stt.js';
 
@@ -78,21 +78,28 @@ export function applyEdit(ep, cmd) {
       rows.splice(idx, 1); return null;
     case 'add':
       if (rows.length >= LIMITS.rowsMax) return `Больше ${LIMITS.rowsMax} строк не поместится. Сначала убери одну.`;
-      rows.push({ role: cmd.role.slice(0, LIMITS.role), value: cmd.value.slice(0, LIMITS.value), source: '' }); return null;
+      rows.push({ role: cmd.role.slice(0, LIMITS.role), value: cmd.value.slice(0, LIMITS.value), source: cmd.value.slice(0, LIMITS.value) }); return null;
     case 'row':
       if (idx < 0 || idx >= rows.length) return `Строки ${cmd.n} нет.`;
       if (cmd.role) rows[idx].role = cmd.role.slice(0, LIMITS.role);
       rows[idx].value = cmd.value.slice(0, LIMITS.value);
-      rows[idx].source = ''; // теперь это слова самого человека
+      rows[idx].source = rows[idx].value; // слова самого человека; бот добавляет правку в опору (editCorpus)
       return null;
     case 'title': if (!cmd.value) return 'Название не может быть пустым.'; ep.title = cmd.value.slice(0, LIMITS.title); return null;
     case 'genre': if (!cmd.value) return 'Жанр не может быть пустым.'; ep.genre = cmd.value.slice(0, LIMITS.genre); return null;
     case 'lead': ep.lead = (cmd.value || 'ты').slice(0, 24); return null;
     case 'post':
-      ep.post = cmd.value === '-' || !cmd.value ? { text: '', source: '' } : { text: cmd.value.slice(0, LIMITS.post), source: '' };
+      ep.post = cmd.value === '-' || !cmd.value ? { text: '', source: '' } : { text: cmd.value.slice(0, LIMITS.post), source: cmd.value.slice(0, LIMITS.post) };
       return null;
     default: return 'Не понял правку.';
   }
+}
+
+/** Текст правки, который становится частью опоры: человек написал его сам. */
+export function editCorpus(cmd) {
+  if (cmd.op === 'delete') return '';
+  if (cmd.op === 'post' && (cmd.value === '-' || !cmd.value)) return '';
+  return [cmd.role, cmd.value].filter(Boolean).join(' ');
 }
 
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -187,7 +194,7 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
     await tg.send(chatId, TEXT.working);
     let r;
     try {
-      r = await draft(story, { date: todayIso(now()), period: s.period, tone: 'quiet', continueAfterHelp: s.stage === 'help-continue' });
+      r = await draft(story, { date: todayIso(now()), period: s.period, tone: 'quiet' });
     } catch (e) {
       console.error('draft', e);
       await tg.send(chatId, TEXT.draftFail);
@@ -209,6 +216,14 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
   }
 
   async function doRender(chatId, s) {
+    // Правки после черновика тоже проверяются: опасная строка не попадёт в ролик.
+    const risk = assessEpisodeRisk(s.story, s.episode);
+    if (risk.level === 'urgent') {
+      s.stage = 'help';
+      await metrics.log(chatId, 'safety', { level: risk.level, at: 'render' });
+      await tg.send(chatId, helpMessage('urgent'));
+      return;
+    }
     const v = validateEpisode(s.episode, s.story);
     if (!v.ok) { await showDraft(chatId, s); return; }
     s.stage = 'rendering';
@@ -216,10 +231,11 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
     waiting++;
     await tg.send(chatId, ahead ? TEXT.queue(ahead) : TEXT.rendering);
     const ep = structuredClone(s.episode);
+    const story = s.story;
     const out = path.join(ROOT, 'data', 'tmp', `${metrics.hash(chatId)}-${Date.now()}.mp4`);
     const job = queue.then(async () => {
       await tg.action(chatId, 'upload_video');
-      return render(ep, { outPath: out, preset: process.env.BOT_PRESET || 'standard', watermark: WATERMARK || false });
+      return render(ep, { story, outPath: out, preset: process.env.BOT_PRESET || 'standard', watermark: WATERMARK || false });
     });
     queue = job.catch(() => {});
     try {
@@ -250,12 +266,6 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
 
     if (s.stage === 'rendering') return tg.send(chatId, TEXT.rendering);
 
-    if (s.stage === 'help' && /^продолжить$/i.test(text) && s.story) {
-      s.stage = 'help-continue';
-      await metrics.log(chatId, 'safety_continue');
-      return handleStory(chatId, s, s.story, 'continue');
-    }
-
     if (msg.voice) {
       if (!sttAvailable() && transcribe === transcribeOgg) return tg.send(chatId, TEXT.voiceOff);
       if (msg.voice.duration > MAX_VOICE_SECONDS) return tg.send(chatId, TEXT.voiceLong);
@@ -274,6 +284,8 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
       if (cmd) {
         const err = applyEdit(s.episode, cmd);
         if (err) return tg.send(chatId, err);
+        const own = editCorpus(cmd);
+        if (own) s.story = `${s.story}\n${own}`; // опора хранится только в памяти сессии
         s.edits = (s.edits || 0) + 1;
         s.stage = 'draft';
         return showDraft(chatId, s);

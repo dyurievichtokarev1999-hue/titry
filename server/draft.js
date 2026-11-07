@@ -194,8 +194,9 @@ export async function makeDraft(story, opts = {}) {
   if (!text) throw Object.assign(new Error('Пустой рассказ.'), { code: 'empty' });
   if (text.length > 6000) throw Object.assign(new Error('Рассказ слишком длинный для одного эпизода.'), { code: 'too_long' });
 
+  // Остановка безусловная: никакой флаг запроса её не отменяет (решение базы, задача координатора 7.11).
   let risk = assessRisk(text);
-  if (risk.level === 'urgent' && !opts.continueAfterHelp) return { risk, episode: null, provider: null };
+  if (risk.level === 'urgent') return { risk, episode: null, provider: null };
 
   const useClaude = opts.provider === 'claude' || (opts.provider !== 'manual' && hasClaudeCredentials());
   let result, provider, note = '';
@@ -205,7 +206,7 @@ export async function makeDraft(story, opts = {}) {
       provider = 'claude';
       if (result.safetyFlag) {
         risk = assessRisk(text, true);
-        if (!opts.continueAfterHelp) return { risk, episode: null, provider };
+        return { risk, episode: null, provider };
       }
       if (result.episode.rows.length < 2) {
         note = 'У черновика модели не хватило строк с опорой на рассказ, показана заготовка без ИИ.';

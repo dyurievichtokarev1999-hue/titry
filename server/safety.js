@@ -29,7 +29,7 @@ const URGENT = [
   /попрощаться\s+со\s+всеми\s+навсегда/,
 ];
 
-// Угрозы другим и насилие: спокойная пауза с предложением помощи, но без запрета продолжить.
+// Угрозы другим и насилие: черновик собирается, но рядом показываются контакты помощи.
 const CONCERN = [
   /(убью|прибью|убить\s+готова?)\s+(его|е[её]|их|тебя)/,
   /меня\s+(бь[её]т|избил|избила|ударил|ударила)/,
@@ -54,6 +54,20 @@ export function assessRisk(text, modelFlag = false) {
   return { level: 'none', matches: [], byModel: false };
 }
 
+/**
+ * Проверка перед рендером: рассказ и все тексты эпизода вместе.
+ * Правки после черновика тоже проверяются — опасная строка не попадёт в ролик.
+ */
+export function assessEpisodeRisk(story, ep) {
+  const parts = [story];
+  if (ep) {
+    parts.push(ep.title, ep.genre, ep.lead);
+    for (const r of ep.rows || []) parts.push(r.role, r.value);
+    if (ep.post) parts.push(ep.post.text);
+  }
+  return assessRisk(parts.filter(Boolean).join('\n'));
+}
+
 export function loadHelp(file = path.join(here, '..', 'config', 'help.json')) {
   const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
   const contacts = [cfg.emergency, ...(cfg.contacts || [])].filter((c) => c && c.verified && c.phone);
@@ -69,13 +83,12 @@ export function helpMessage(level, help = loadHelp()) {
       'В рассказе есть слова о том, что жить не хочется или есть опасность. Я не буду делать из этого ролик.',
       'Если есть риск прямо сейчас, позвони по одному из номеров или попроси кого-то рядом побыть с тобой:',
       list,
-      'Если это не про тебя и опасности нет, напиши «продолжить».',
+      'Когда захочется, можно прислать новый рассказ о дне.',
     ].join('\n\n');
   }
   return [
     'Похоже, в этом дне было что-то опасное или очень тяжёлое.',
     'Если тебе или кому-то рядом угрожает опасность, лучше обратиться за живой помощью:',
     list,
-    'Если хочешь, можно продолжить и собрать титры: напиши «продолжить».',
   ].join('\n\n');
 }

@@ -121,7 +121,9 @@ const OTHERS_MOTIVES = [/специально/i, /нарочно/i, /хотел[
 
 /**
  * Проверка эпизода. errors — не даём рендерить, warnings — показываем монтажёру.
- * story — исходный рассказ; если передан, каждая строка сверяется с ним.
+ * story — опора: исходный рассказ (и правки, которые человек написал сам).
+ * Без опоры эпизод не проходит: нельзя проверить, что строки взяты из слов человека.
+ * Вымышленные примеры (examples/) проходят тот же путь — у них есть свой рассказ.
  */
 export function validateEpisode(ep, story) {
   const errors = [];
@@ -129,6 +131,8 @@ export function validateEpisode(ep, story) {
   const field = (path, msg) => ({ path, msg });
 
   if (!ep || typeof ep !== 'object') return { ok: false, errors: [field('', 'Нет эпизода.')], warnings };
+  const hasStory = typeof story === 'string' && story.trim().length > 0;
+  if (!hasStory) errors.push(field('story', 'Нет исходного рассказа: без него нельзя проверить, что строки взяты из слов человека.'));
   if (!MOODS[ep.mood]) errors.push(field('mood', 'Неизвестная плёнка.'));
   if (!TRACKS[ep.music]) errors.push(field('music', 'Неизвестный саундтрек.'));
   if (!PERIODS[ep.period]) errors.push(field('period', 'Неизвестный период.'));
@@ -158,17 +162,17 @@ export function validateEpisode(ep, story) {
     else if (role.length > LIMITS.roleSoft) warnings.push(field(`${p}.role`, `Строка ${i + 1}: роль лучше сократить до одного-двух слов.`));
     if (value.length > LIMITS.value) errors.push(field(`${p}.value`, `Строка ${i + 1}: текст длиннее ${LIMITS.value} знаков.`));
     else if (value.length > LIMITS.valueSoft) warnings.push(field(`${p}.value`, `Строка ${i + 1}: длинная строка займёт три линии, лучше сократить.`));
-    if (story != null) {
-      if (!String(r.source || '').trim()) warnings.push(field(`${p}.source`, `Строка ${i + 1}: не указано, из каких слов рассказа она взялась.`));
-      else if (!sourceFound(r.source, story)) errors.push(field(`${p}.source`, `Строка ${i + 1}: цитата не найдена в рассказе. В титрах только то, что человек сказал сам.`));
-    }
+    if (!String(r.source || '').trim()) errors.push(field(`${p}.source`, `Строка ${i + 1}: нет цитаты из рассказа. В титрах только то, что человек сказал сам.`));
+    else if (hasStory && !sourceFound(r.source, story)) errors.push(field(`${p}.source`, `Строка ${i + 1}: цитата не найдена в рассказе. В титрах только то, что человек сказал сам.`));
     texts.push(role, value);
   });
 
   const post = ep.post || {};
   const postText = String(post.text || '').trim();
   if (postText.length > LIMITS.post) errors.push(field('post.text', `Сцена после титров длиннее ${LIMITS.post} знаков.`));
-  if (postText && story != null && post.source && !sourceFound(post.source, story)) {
+  if (postText && !String(post.source || '').trim()) {
+    errors.push(field('post.source', 'У сцены после титров нет цитаты из рассказа.'));
+  } else if (postText && hasStory && !sourceFound(post.source, story)) {
     errors.push(field('post.source', 'Цитата для сцены после титров не найдена в рассказе.'));
   }
   texts.push(postText);

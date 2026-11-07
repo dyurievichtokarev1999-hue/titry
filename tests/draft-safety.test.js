@@ -29,7 +29,7 @@ test('makeDraft не делает титры при срочном риске', 
   assert.equal(r.episode, null);
   assert.equal(r.risk.level, 'urgent');
   const r2 = await makeDraft('Всё плохо, весь день думал, что не хочу жить. Потом позвонил друг.', { provider: 'manual', continueAfterHelp: true });
-  assert.ok(r2.episode, 'после явного «продолжить» черновик собирается');
+  assert.equal(r2.episode, null, 'флаг продолжения остановку не отменяет');
 });
 
 test('заготовка без ИИ опирается на рассказ и угадывает плёнку по словам человека', () => {

@@ -20,7 +20,7 @@ test('правки применяются и соблюдают лимиты', (
   const { episode } = draftRuleBased('Утром работа. Днём встреча с другом. Вечером ужин. Потом прогулка.', { date: '2026-11-05' });
   const n = episode.rows.length;
   assert.equal(applyEdit(episode, { op: 'row', n: 1, role: 'Утро', value: 'работа' }), null);
-  assert.equal(episode.rows[0].source, '', 'отредактированная строка — слова самого человека');
+  assert.equal(episode.rows[0].source, 'работа', 'отредактированная строка опирается на слова самого человека');
   assert.equal(applyEdit(episode, { op: 'delete', n: 99 }), 'Строки 99 нет.');
   assert.equal(applyEdit(episode, { op: 'delete', n: 1 }), null);
   assert.equal(episode.rows.length, n - 1);
