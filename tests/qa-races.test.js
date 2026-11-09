@@ -279,3 +279,55 @@ test('R2: обычный путь не сломан — черновик, кно
   assert.ok(tg.sent.some((x) => x.text === 'VIDEO'));
   assert.equal(bot.sessions.get(chat.id).stage, 'watched');
 });
+
+// ── R3 (ревью QA 9.11.2026): окно между проверкой и стартом рендера, пока ждём tg.action ─────────
+
+for (const mode of ['поздняя остановка', '/delete']) {
+  test(`R3: ${mode} во время tg.action('upload_video') — рендер не начинается`, async () => {
+    const actionEntered = deferred(), actionGo = deferred(), firstDraft = deferred(), firstStarted = deferred();
+    let drafts = 0, renders = 0;
+    const tg = fakeTelegram();
+    tg.action = async (c, a) => { if (a === 'upload_video') { actionEntered.resolve(); await actionGo.promise; } };
+    const bot = createBot({
+      tg, metrics,
+      draft: async () => {
+        if (mode === 'поздняя остановка' && ++drafts === 1) { firstStarted.resolve(); return firstDraft.promise; }
+        return good();
+      },
+      render: async (e, o) => { renders++; return { outPath: o.outPath, seconds: 1, duration: 24 }; },
+    });
+    let old;
+    if (mode === 'поздняя остановка') { old = bot.handleUpdate(message()); await firstStarted.promise; }
+    await bot.handleUpdate(message());
+    const play = keyboards(tg).at(-1).extra.reply_markup.inline_keyboard[0][0].callback_data;
+    const playing = bot.handleUpdate(click(play));
+    await actionEntered.promise;
+    if (mode === 'поздняя остановка') {
+      firstDraft.resolve(blockedDraft()); await old;
+      assert.equal(bot.sessions.get(chat.id).stage, 'help');
+    } else {
+      await bot.handleUpdate(message('/delete'));
+      assert.equal(bot.sessions.size, 0);
+    }
+    actionGo.resolve(); await playing;
+    assert.equal(renders, 0, 'рендер не должен стартовать после остановки или удаления');
+    assert.ok(!tg.sent.some((x) => x.text === 'VIDEO'));
+  });
+}
+
+test('R3: /delete во время sendVideo — после forget запись render не появляется', async () => {
+  const sendEntered = deferred(), sendGo = deferred();
+  const events = [];
+  const m = { hash: () => 'qa-fictional', log: async (c, ev) => { events.push(ev); }, forget: async () => { events.push('forget'); } };
+  const tg = fakeTelegram();
+  tg.sendVideo = async () => { sendEntered.resolve(); await sendGo.promise; tg.sent.push({ text: 'VIDEO' }); };
+  const bot = createBot({ tg, metrics: m, draft: async () => good(), render: async (e, o) => ({ outPath: o.outPath, seconds: 1, duration: 24 }) });
+  await bot.handleUpdate(message());
+  const play = keyboards(tg).at(-1).extra.reply_markup.inline_keyboard[0][0].callback_data;
+  const playing = bot.handleUpdate(click(play));
+  await sendEntered.promise;
+  await bot.handleUpdate(message('/delete'));
+  sendGo.resolve(); await playing;
+  assert.ok(!events.slice(events.indexOf('forget')).includes('render'));
+  assert.equal(bot.sessions.size, 0);
+});
