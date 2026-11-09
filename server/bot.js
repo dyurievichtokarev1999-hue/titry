@@ -283,6 +283,8 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
         // Перед стартом из очереди: черновик мог быть остановлен или удалён, пока задача ждала.
         if (!current()) return STALE;
         await tg.action(chatId, 'upload_video');
+        // R3 (ревью QA 9.11): пока ждали tg.action, могла прийти остановка или /delete — рендер не начинается.
+        if (!current()) return STALE;
         return render(ep, { story, outPath: out, preset: process.env.BOT_PRESET || 'standard', watermark: WATERMARK || false });
       });
       queue = job.catch(() => {});
@@ -290,6 +292,8 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
       // После рендера: если черновик остановлен или сессия удалена, видео не отправляется (файл удалится ниже).
       if (r === STALE || !current()) return;
       await tg.sendVideo(chatId, r.outPath, { caption: 'Конец сцены.', width: 720, height: 1280, duration: Math.round(r.duration), reply_markup: FEEDBACK_KB });
+      // /delete во время отправки: после metrics.forget новая запись о человеке не появляется.
+      if (!alive(chatId, s)) return;
       await metrics.log(chatId, 'render', { seconds: Math.round(r.seconds), mood: ep.mood, music: ep.music, edits: s.edits || 0 });
       if (current()) s.stage = 'watched';
     } catch (e) {
