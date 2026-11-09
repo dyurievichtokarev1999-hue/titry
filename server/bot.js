@@ -204,17 +204,23 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
     await tg.send(chatId, helpMessage('urgent'));
   }
 
+  // Сессия ещё та же: не удалена через /delete и не заменена новой после истечения срока.
+  const alive = (chatId, s) => sessions.get(chatId) === s;
+  const isBlocked = (s, story) => !!(s.blocked && s.blocked.has(storyKey(story)));
+
   async function handleStory(chatId, s, story, source) {
     // Новый рассказ сразу отменяет прежний черновик: его кнопки больше ничего не запускают.
     s.episode = null;
     s.verdict = null;
     s.draftId = (s.draftId || 0) + 1;
+    const gen = s.draftId; // поколение: результат ожидания применяется, только если оно всё ещё текущее
     s.story = story;
     s.originalStory = story;
     s.stage = 'drafting';
-    if (s.blocked && s.blocked.has(storyKey(story))) {
+    if (isBlocked(s, story)) {
       return stopForSafety(chatId, s, 'urgent', { at: 'repeat' });
     }
+    const current = () => alive(chatId, s) && s.draftId === gen && !isBlocked(s, story);
     await tg.action(chatId, 'typing');
     await tg.send(chatId, TEXT.working);
     let r;
@@ -222,18 +228,34 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
       r = await draft(story, { date: todayIso(now()), period: s.period, tone: 'quiet' });
     } catch (e) {
       console.error('draft', e);
+      if (!current()) return;
       s.stage = 'idle';
       await tg.send(chatId, TEXT.draftFail);
       return;
     }
+    if (!alive(chatId, s)) return; // удалённая сессия не оживает из отложенного ответа
+    if (!r.episode) {
+      // Остановка важнее всего, даже если ответ устарел: рассказ запоминается как запрещённый.
+      if (s.draftId === gen) return stopForSafety(chatId, s, r.risk.level, { byModel: r.risk.byModel });
+      s.blocked = s.blocked || new Set();
+      s.blocked.add(storyKey(story));
+      // Если сейчас в работе тот же рассказ, его черновик тоже уничтожается.
+      if (s.verdict !== 'blocked' && s.originalStory && storyKey(s.originalStory) === storyKey(story)) {
+        return stopForSafety(chatId, s, r.risk.level, { byModel: r.risk.byModel, at: 'late' });
+      }
+      return;
+    }
+    if (!current()) return; // устаревший «можно» молча отбрасывается
     await metrics.log(chatId, 'story', { source, period: s.period, chars: Math.round(story.length / 50) * 50 });
-    if (!r.episode) return stopForSafety(chatId, s, r.risk.level, { byModel: r.risk.byModel });
+    if (!current()) return;
     if (r.risk.level === 'concern') await tg.send(chatId, helpMessage('concern'));
+    if (!current()) return;
     s.episode = r.episode;
     s.verdict = 'ok';
     s.edits = 0;
     s.stage = 'draft';
     await metrics.log(chatId, 'draft', { provider: r.provider, rows: r.episode.rows.length, dropped: (r.dropped || []).length });
+    if (!current()) return;
     await showDraft(chatId, s);
   }
 
@@ -244,27 +266,38 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
     if (risk.level === 'urgent') return stopForSafety(chatId, s, 'urgent', { at: 'render' });
     const v = validateEpisode(s.episode, s.story);
     if (!v.ok) { await showDraft(chatId, s); return; }
+    const gen = s.draftId;
+    const original = s.originalStory || s.story;
+    const current = () => alive(chatId, s) && s.draftId === gen && s.verdict === 'ok' && !isBlocked(s, original);
     s.stage = 'rendering';
     const ahead = waiting;
     waiting++;
-    await tg.send(chatId, ahead ? TEXT.queue(ahead) : TEXT.rendering);
     const ep = structuredClone(s.episode);
     const story = s.story;
     const out = path.join(ROOT, 'data', 'tmp', `${metrics.hash(chatId)}-${Date.now()}.mp4`);
-    const job = queue.then(async () => {
-      await tg.action(chatId, 'upload_video');
-      return render(ep, { story, outPath: out, preset: process.env.BOT_PRESET || 'standard', watermark: WATERMARK || false });
-    });
-    queue = job.catch(() => {});
+    const STALE = Symbol('stale');
+    let job;
     try {
+      await tg.send(chatId, ahead ? TEXT.queue(ahead) : TEXT.rendering);
+      job = queue.then(async () => {
+        // Перед стартом из очереди: черновик мог быть остановлен или удалён, пока задача ждала.
+        if (!current()) return STALE;
+        await tg.action(chatId, 'upload_video');
+        return render(ep, { story, outPath: out, preset: process.env.BOT_PRESET || 'standard', watermark: WATERMARK || false });
+      });
+      queue = job.catch(() => {});
       const r = await job;
+      // После рендера: если черновик остановлен или сессия удалена, видео не отправляется (файл удалится ниже).
+      if (r === STALE || !current()) return;
       await tg.sendVideo(chatId, r.outPath, { caption: 'Конец сцены.', width: 720, height: 1280, duration: Math.round(r.duration), reply_markup: FEEDBACK_KB });
       await metrics.log(chatId, 'render', { seconds: Math.round(r.seconds), mood: ep.mood, music: ep.music, edits: s.edits || 0 });
-      s.stage = 'watched';
+      if (current()) s.stage = 'watched';
     } catch (e) {
       console.error('render', e);
-      s.stage = 'draft';
-      await tg.send(chatId, TEXT.renderFail);
+      if (current()) {
+        s.stage = 'draft';
+        await tg.send(chatId, TEXT.renderFail);
+      }
     } finally {
       waiting--;
       await fs.rm(out, { force: true });
@@ -291,6 +324,7 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
       let story = '';
       try { story = await transcribe(await tg.fileBuffer(msg.voice.file_id), { duration: msg.voice.duration }); }
       catch (e) { console.error('stt', e); }
+      if (!alive(chatId, s)) return; // /delete во время распознавания: ничего не отвечаем
       if (!story) return tg.send(chatId, TEXT.voiceEmpty);
       await tg.send(chatId, `Расшифровка:\n«${story}»`);
       return handleStory(chatId, s, story, 'voice');

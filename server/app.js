@@ -114,13 +114,18 @@ export function createApp({
 
     'POST /api/draft': async (req) => {
       const body = await readJson(req);
+      const key = storyKey(body.story);
+      const stopped = () => ({ risk: { level: 'urgent', byModel: true, matches: [] }, help: helpMessage('urgent') });
+      if (blocked.has(key)) return stopped();
       const result = await makeDraft(body.story, {
         date: body.date, period: body.period, tone: body.tone, provider: body.provider,
       });
       if (!result.episode) {
-        if (result.risk.byModel) blocked.add(storyKey(body.story));
+        if (result.risk.byModel) blocked.add(key);
         return { risk: result.risk, help: helpMessage(result.risk.level) };
       }
+      // Остановка, пришедшая из параллельного запроса, пока модель писала черновик, важнее черновика.
+      if (blocked.has(key)) return stopped();
       return {
         episode: result.episode, validation: result.validation, risk: result.risk,
         provider: result.provider, note: result.note, dropped: result.dropped,
@@ -144,20 +149,38 @@ export function createApp({
       const v = validateEpisode(ep, story);
       if (!v.ok) return { status: 422, body: { error: 'Исправьте ошибки перед рендером.', validation: v } };
       // Вердикт модели привязан к рассказу: повторный запрос его не снимает.
-      if (blocked.has(storyKey(story))) return stop({ level: 'urgent', byModel: true, matches: [] });
+      // Инвариант: после остановки по ключу рассказа ни один запрос с этим ключом не запускает рендер и не отдаёт ролик.
+      // Ответ «можно» никогда не снимает остановку — ни повторный, ни пришедший позже из параллельного запроса.
+      const key = storyKey(story);
+      const modelStop = () => stop({ level: 'urgent', byModel: true, matches: [] });
+      if (blocked.has(key)) return modelStop();
       let flagged;
       try { flagged = await safetyCheck(`${story}\n${episodeToText(ep)}`); }
       catch { return { status: 503, body: { error: 'Не удалось проверить рассказ на безопасность. Ролик не собирается, попробуйте позже.' } }; }
-      if (flagged === true) { blocked.add(storyKey(story)); return stop({ level: 'urgent', byModel: true, matches: [] }); }
+      if (flagged === true) blocked.add(key);
+      // Проверка после ожидания: остановка могла прийти из параллельного запроса, пока ждали модель.
+      if (blocked.has(key)) return modelStop();
       const id = `${ep.date}-${safeName(body.participant, 'p')}-${crypto.randomBytes(3).toString('hex')}`;
-      const job = rendering.then(() => render(ep, {
-        story,
-        outPath: path.join(OUT, `${id}.mp4`), posterPath: path.join(OUT, `${id}.jpg`),
-        preset: ['preview', 'standard', 'hd'].includes(body.preset) ? body.preset : 'standard',
-        still: !!body.still, watermark: body.watermark ? 'сделано в титрах' : false,
-      }));
+      const files = [path.join(OUT, `${id}.mp4`), path.join(OUT, `${id}.jpg`)];
+      const STOPPED = Symbol('stopped');
+      const job = rendering.then(() => {
+        // Проверка при запуске из очереди: остановка могла прийти, пока задача ждала.
+        if (blocked.has(key)) return STOPPED;
+        return render(ep, {
+          story,
+          outPath: files[0], posterPath: files[1],
+          preset: ['preview', 'standard', 'hd'].includes(body.preset) ? body.preset : 'standard',
+          still: !!body.still, watermark: body.watermark ? 'сделано в титрах' : false,
+        });
+      });
       rendering = job.catch(() => {});
       const r = await job;
+      if (r === STOPPED) return modelStop();
+      // Остановка во время рендера: готовый файл удаляется и никому не отдаётся.
+      if (blocked.has(key)) {
+        await Promise.all(files.map((f) => fs.rm(f, { force: true })));
+        return modelStop();
+      }
       return { video: `/out/${id}.mp4`, poster: `/out/${id}.jpg`, seconds: r.seconds, validation: v };
     },
 
