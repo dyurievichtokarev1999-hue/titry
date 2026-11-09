@@ -53,7 +53,8 @@ async function getBrowser() {
 }
 
 export async function closeRenderer() {
-  if (browserPromise) { const b = await browserPromise; browserPromise = null; await b.close(); }
+  // После неудачного запуска закрывать нечего: ошибку уже получил рендер, здесь её не повторяем.
+  if (browserPromise) { const b = await browserPromise.catch(() => null); browserPromise = null; if (b) await b.close(); }
 }
 
 function runFfmpeg(args, feed) {
