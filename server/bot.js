@@ -148,18 +148,41 @@ const FEEDBACK_KB = {
 
 export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), salt = process.env.METRICS_SALT || 'titry-dev-salt') {
   const hash = (id) => crypto.createHmac('sha256', salt).update(String(id)).digest('hex').slice(0, 16);
+  // ИР-06 (критик реализации 9.11): завершённый forget — барьер для уже принятых записей.
+  // 1) Чтение-перезапись и дозапись файла идут одной очередью — строка другого человека не теряется.
+  // 2) forget сразу поднимает поколение человека; запись, принятая до него, проверяет поколение
+  //    уже внутри очереди и не попадает в файл. forget не ждёт зависшую запись.
+  let ops = Promise.resolve();
+  const serial = (fn) => {
+    const run = ops.then(fn);
+    ops = run.catch(() => {});
+    return run;
+  };
+  const generation = new Map(); // хэш → номер поколения; текстов здесь нет
   return {
     hash,
     async log(chatId, event, extra = {}) {
-      await fs.mkdir(path.dirname(file), { recursive: true });
-      await fs.appendFile(file, JSON.stringify({ at: new Date().toISOString(), user: hash(chatId), event, ...extra }) + '\n');
-    },
-    async forget(chatId) {
       const h = hash(chatId);
-      let text = '';
-      try { text = await fs.readFile(file, 'utf8'); } catch { return; }
-      const kept = text.split('\n').filter((l) => l && !l.includes(`"user":"${h}"`));
-      await fs.writeFile(file, kept.length ? kept.join('\n') + '\n' : '');
+      const gen = generation.get(h) || 0;
+      const row = JSON.stringify({ at: new Date().toISOString(), user: h, event, ...extra }) + '\n';
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      return serial(async () => {
+        if ((generation.get(h) || 0) !== gen) return; // человек удалил данные, пока запись ждала
+        await fs.appendFile(file, row);
+      });
+    },
+    forget(chatId) {
+      const h = hash(chatId);
+      generation.set(h, (generation.get(h) || 0) + 1);
+      return serial(async () => {
+        let text = '';
+        try { text = await fs.readFile(file, 'utf8'); } catch { return; }
+        const kept = text.split('\n').filter((l) => l && !l.includes(`"user":"${h}"`));
+        // Атомарно: временный файл и rename — сбой посреди записи не обрезает строки других людей.
+        const tmpFile = `${file}.tmp-${process.pid}`;
+        await fs.writeFile(tmpFile, kept.length ? kept.join('\n') + '\n' : '');
+        await fs.rename(tmpFile, file);
+      });
     },
   };
 }
