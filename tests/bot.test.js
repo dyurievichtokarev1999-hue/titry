@@ -71,7 +71,9 @@ test('сценарий бота: рассказ → правка → ролик 
 
   const log = await fs.readFile(path.join(dir, 'm.jsonl'), 'utf8');
   assert.ok(!log.includes('письмо'), 'текст рассказа не попадает в метрики');
-  assert.ok(!log.includes('"42"') && !log.includes(':42'), 'id чата не хранится в открытом виде');
+  // Проверяем значения полей построчно: подстрока «:42» бывает и во времени поля at (нестабильный тест до 10.11).
+  const values = log.split('\n').filter(Boolean).flatMap((l) => Object.values(JSON.parse(l)).map(String));
+  assert.ok(!values.includes('42'), 'id чата не хранится в открытом виде');
   assert.match(log, /"event":"feedback","value":"heavier"/);
 
   await bot.handleUpdate({ message: { chat, text: '/delete' } });

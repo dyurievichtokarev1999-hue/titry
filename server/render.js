@@ -42,7 +42,12 @@ async function getBrowser() {
     const require = createRequire(import.meta.url);
     const { chromium } = require('playwright');
     const executablePath = process.env.TITRY_CHROMIUM || undefined;
-    browserPromise = chromium.launch(executablePath ? { executablePath } : {});
+    // Неудачный запуск не кэшируем: следующий рендер попробует снова, а ошибка понятна без стека Playwright.
+    browserPromise = chromium.launch(executablePath ? { executablePath } : {}).catch((cause) => {
+      browserPromise = null;
+      const where = executablePath ? `TITRY_CHROMIUM=${executablePath}` : 'браузер Playwright по умолчанию';
+      throw Object.assign(new Error(`Chromium не запустился (${where}). Укажите установленный Chromium в TITRY_CHROMIUM или установите браузер под версию Playwright из package-lock.json.`), { code: 'browser', cause });
+    });
   }
   return browserPromise;
 }
@@ -87,11 +92,13 @@ export async function renderEpisode(ep, options = {}) {
   const outPath = path.resolve(options.outPath || path.join(ROOT, 'data', 'out', `titry-${Date.now()}.mp4`));
   await fs.mkdir(path.dirname(outPath), { recursive: true });
 
-  const server = await serveEngine();
+  // Сначала браузер, потом сервер: если Chromium не запустился, открытого сервера не остаётся и процесс завершается сам.
   const browser = await getBrowser();
-  const page = await browser.newPage({ viewport: { width: 200, height: 200 } });
+  const server = await serveEngine();
+  let page = null;
   const started = Date.now();
   try {
+    page = await browser.newPage({ viewport: { width: 200, height: 200 } });
     await page.goto(`http://127.0.0.1:${server.address().port}/render.html`);
     await page.waitForFunction(() => window.titryReady === true);
     const fontsOk = await page.evaluate(([e, o]) => window.titrySetup(e, o), [ep, {
@@ -132,7 +139,7 @@ export async function renderEpisode(ep, options = {}) {
     }
     return { outPath, posterPath, seconds: (Date.now() - started) / 1000, frames, duration: T.duration };
   } finally {
-    await page.close();
     server.close();
+    if (page) await page.close().catch(() => {});
   }
 }
