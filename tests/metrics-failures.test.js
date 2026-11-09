@@ -89,3 +89,89 @@ test('карта поколений не растёт: после заверше
     assert.equal(metrics.trackedUsers, 0);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
+
+// Критик реализации 10.11: двойной отказ (rename и удаление временной копии) не скрывается,
+// копия удаляется позже, после перезапуска — тоже; повторы ограничены.
+const tmpNames = async (dir) => (await fs.readdir(dir)).filter((n) => n.includes('.tmp-'));
+const fault = (code) => Object.assign(new Error('подставной отказ'), { code });
+
+test('rename и удаление копии оба отказали: честная ошибка, сигнал оператору без пути, копия убирается позже', async (t) => {
+  const dir = await tmp('titry-mf-double-');
+  const errors = t.mock.method(console, 'error', () => {});
+  try {
+    const file = path.join(dir, 'm.jsonl');
+    const metrics = makeMetrics(file, 'mf-salt');
+    await metrics.log(101, 'start');
+    await metrics.log(202, 'start');
+    const origRename = fs.rename, origRm = fs.rm;
+    fs.rename = async (a, b) => { if (b === file) throw fault('EIO'); return origRename.call(fs, a, b); };
+    fs.rm = async (p, o) => { if (String(p).includes('.tmp-')) throw fault('EACCES'); return origRm.call(fs, p, o); };
+    try {
+      await assert.rejects(metrics.forget(101), (e) => e.code === 'EIO' && e.tmpCleanup === 'failed');
+    } finally { fs.rename = origRename; fs.rm = origRm; }
+    assert.equal((await tmpNames(dir)).length, 1, 'копия осталась — и это известно');
+    assert.equal(metrics.pendingTmpCleanup, 1);
+    const msgs = errors.mock.calls.map((c) => c.arguments.join(' '));
+    assert.ok(msgs.some((m) => m.includes('metrics_tmp_cleanup_failed')));
+    assert.ok(msgs.every((m) => !m.includes(dir) && !m.includes(metrics.hash(101)) && !m.includes(metrics.hash(202))), 'без пути и хэшей');
+    // Отказ снят: следующая операция убирает копию, данные второго человека на месте.
+    await metrics.log(202, 'render');
+    assert.deepEqual(await tmpNames(dir), []);
+    assert.equal(metrics.pendingTmpCleanup, 0);
+    const users = (await fs.readFile(file, 'utf8')).split('\n').filter(Boolean).map((l) => JSON.parse(l).user);
+    assert.ok(users.filter((u) => u === metrics.hash(202)).length === 2);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('частичная запись копии и отказ её удаления: ошибка честная, копия убирается позже', async (t) => {
+  const dir = await tmp('titry-mf-partial-');
+  t.mock.method(console, 'error', () => {});
+  try {
+    const file = path.join(dir, 'm.jsonl');
+    const metrics = makeMetrics(file, 'mf-salt');
+    await metrics.log(101, 'start');
+    const origWrite = fs.writeFile, origRm = fs.rm;
+    fs.writeFile = async (p, data, ...rest) => { if (String(p).includes('.tmp-')) { await origWrite.call(fs, p, String(data).slice(0, 5)); throw fault('ENOSPC'); } return origWrite.call(fs, p, data, ...rest); };
+    fs.rm = async (p, o) => { if (String(p).includes('.tmp-')) throw fault('EACCES'); return origRm.call(fs, p, o); };
+    try {
+      await assert.rejects(metrics.forget(101), (e) => e.code === 'ENOSPC' && e.tmpCleanup === 'failed');
+    } finally { fs.writeFile = origWrite; fs.rm = origRm; }
+    assert.equal((await tmpNames(dir)).length, 1);
+    await metrics.forget(101); // повтор без отказов: копия убрана, строки человека удалены
+    assert.deepEqual(await tmpNames(dir), []);
+    assert.equal(await fs.readFile(file, 'utf8'), '');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('после перезапуска оставшаяся копия этого журнала удаляется при первой операции', async () => {
+  const dir = await tmp('titry-mf-restart-');
+  try {
+    const file = path.join(dir, 'm.jsonl');
+    await fs.writeFile(`${file}.tmp-99999`, '{"user":"synthetic"}\n');
+    await fs.writeFile(path.join(dir, 'other.jsonl.tmp-1'), 'x'); // чужой файл не трогаем
+    const metrics = makeMetrics(file, 'mf-salt');
+    await metrics.log(1, 'start');
+    assert.deepEqual((await fs.readdir(dir)).sort(), ['m.jsonl', 'other.jsonl.tmp-1']);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('постоянный отказ удаления копии: попыток не больше трёх, оператору сообщено, бесконечных повторов нет', async (t) => {
+  const dir = await tmp('titry-mf-exhaust-');
+  const errors = t.mock.method(console, 'error', () => {});
+  try {
+    const file = path.join(dir, 'm.jsonl');
+    await fs.writeFile(`${file}.tmp-99999`, 'x');
+    const metrics = makeMetrics(file, 'mf-salt');
+    const origRm = fs.rm;
+    let rmCalls = 0;
+    fs.rm = async (p, o) => { if (String(p).includes('.tmp-')) { rmCalls++; throw fault('EACCES'); } return origRm.call(fs, p, o); };
+    try {
+      for (let i = 0; i < 6; i++) await metrics.log(1, 'start');
+    } finally { fs.rm = origRm; }
+    assert.equal(rmCalls, 3);
+    assert.equal(metrics.pendingTmpCleanup, 1, 'очистка остаётся неподтверждённой');
+    assert.equal(errors.mock.calls.filter((c) => String(c.arguments[0]).includes('metrics_tmp_cleanup_exhausted')).length, 1);
+    const rows = (await fs.readFile(file, 'utf8')).split('\n').filter(Boolean);
+    assert.equal(rows.length, 6, 'записи метрик не страдают от отказа очистки');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});

@@ -164,6 +164,32 @@ export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), sal
   // G0-fixes: запись поколения нужна, только пока есть незавершённые log/forget этого человека.
   // Когда их нет, запись удаляется — карта не растёт с каждым /delete.
   const busy = new Map(); // хэш → число незавершённых операций
+  // Временные копии журнала (критик реализации 10.11): если копию не удалось удалить, это не скрывается.
+  // Копии запоминаются и удаляются при следующих операциях — ограниченное число попыток. После перезапуска
+  // оставшиеся копии этого журнала находятся по имени при первой операции. В журнал ошибок — только код,
+  // без пути, хэшей и текстов.
+  const TMP_CLEANUP_ATTEMPTS = 3;
+  const tmpPrefix = path.basename(file) + '.tmp-';
+  const leftovers = new Map(); // имя временной копии → число неудачных попыток удаления
+  let scanned = false;
+  const cleanupFailed = () => console.error('metrics: временная копия журнала не удалена (metrics_tmp_cleanup_failed)');
+  async function cleanLeftovers() {
+    if (!scanned) {
+      scanned = true;
+      try {
+        for (const name of await fs.readdir(path.dirname(file))) if (name.startsWith(tmpPrefix)) leftovers.set(path.join(path.dirname(file), name), 0);
+      } catch { /* папки ещё нет — копий тоже */ }
+    }
+    for (const [tmp, failures] of leftovers) {
+      if (failures >= TMP_CLEANUP_ATTEMPTS) continue; // попытки исчерпаны: уже сообщено, бесконечно не повторяем
+      try { await fs.rm(tmp, { force: true }); leftovers.delete(tmp); }
+      catch {
+        leftovers.set(tmp, failures + 1);
+        if (failures + 1 === TMP_CLEANUP_ATTEMPTS) console.error('metrics: временная копия журнала не удалена после повторов (metrics_tmp_cleanup_exhausted)');
+      }
+    }
+  }
+  const serialClean = (fn) => serial(async () => { await cleanLeftovers(); return fn(); });
   const enter = (h) => busy.set(h, (busy.get(h) || 0) + 1);
   const leave = (h) => {
     const n = (busy.get(h) || 1) - 1;
@@ -175,6 +201,8 @@ export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), sal
     hash,
     /** Только для тестов: сколько людей сейчас держат запись поколения. */
     get trackedUsers() { return generation.size; },
+    /** Только для тестов и диагностики: сколько временных копий ждут удаления. */
+    get pendingTmpCleanup() { return leftovers.size; },
     async log(chatId, event, extra = {}) {
       const h = hash(chatId);
       enter(h);
@@ -182,7 +210,7 @@ export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), sal
         const gen = generation.get(h) || 0;
         const row = JSON.stringify({ at: new Date().toISOString(), user: h, event, ...extra }) + '\n';
         await fs.mkdir(path.dirname(file), { recursive: true });
-        return await serial(async () => {
+        return await serialClean(async () => {
           if ((generation.get(h) || 0) !== gen) return; // человек удалил данные, пока запись ждала
           await fs.appendFile(file, row);
         });
@@ -197,7 +225,7 @@ export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), sal
       const h = hash(chatId);
       enter(h);
       generation.set(h, (generation.get(h) || 0) + 1);
-      const run = serial(async () => {
+      const run = serialClean(async () => {
         let text = '';
         try { text = await fs.readFile(file, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return; throw e; }
         const kept = text.split('\n').filter((l) => l && !l.includes(`"user":"${h}"`));
@@ -207,7 +235,9 @@ export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), sal
           await fs.writeFile(tmpFile, kept.length ? kept.join('\n') + '\n' : '');
           await fs.rename(tmpFile, file);
         } catch (e) {
-          await fs.rm(tmpFile, { force: true }).catch(() => {}); // не оставляем копию чужих строк
+          // Не оставляем копию чужих строк. Если и удалить её не вышло — сообщаем оператору и повторим позже.
+          try { await fs.rm(tmpFile, { force: true }); }
+          catch { leftovers.set(tmpFile, 1); cleanupFailed(); e.tmpCleanup = 'failed'; }
           throw e;
         }
       }).finally(() => leave(h));
