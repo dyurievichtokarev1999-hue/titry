@@ -87,7 +87,7 @@ for (const id of ['title', 'genre', 'music', 'lead', 'gender', 'postText', 'post
 // ── Проверки ─────────────────────────────────────────────────────────────────
 function showChecks() {
   const story = $('story').value.trim();
-  const v = validateEpisode(state.episode, story ? story : undefined);
+  const v = validateEpisode(state.episode, story);
   const ul = $('checks');
   ul.textContent = '';
   const add = (cls, msg) => { const li = document.createElement('li'); li.className = cls; li.textContent = msg; ul.append(li); };
@@ -162,14 +162,12 @@ api('/api/config').then((c) => {
     : 'черновики: <b>заготовка без ИИ</b> · ключ API не задан';
 }).catch(() => { $('provider').textContent = 'сервер недоступен'; });
 
-let continueAfterHelp = false;
 async function requestDraft() {
   const story = $('story').value.trim();
   if (!story) { $('draftNote').textContent = 'Вставьте рассказ участника.'; return; }
   $('draftBtn').disabled = true; $('draftNote').textContent = 'Собираю черновик…';
   try {
-    const r = await api('/api/draft', { story, date: $('date').value, period: $('period').value, tone: $('tone').value, continueAfterHelp });
-    continueAfterHelp = false;
+    const r = await api('/api/draft', { story, date: $('date').value, period: $('period').value, tone: $('tone').value });
     if (!r.episode) { showHelp(r.help); $('draftNote').textContent = 'Черновик остановлен фильтром безопасности.'; return; }
     state.episode = r.episode; state.draft = structuredClone(r.episode); state.provider = r.provider;
     fillForm(state.episode); changed();
@@ -184,7 +182,6 @@ $('draftBtn').addEventListener('click', requestDraft);
 
 function showHelp(text) { $('helpText').textContent = text; $('help').hidden = false; $('helpClose').focus(); }
 $('helpClose').addEventListener('click', () => { $('help').hidden = true; });
-$('helpContinue').addEventListener('click', () => { $('help').hidden = true; continueAfterHelp = true; requestDraft(); });
 
 $('example').addEventListener('change', async () => {
   const id = $('example').value;
@@ -230,10 +227,11 @@ $('logBtn').addEventListener('click', async () => {
   try {
     const r = await api('/api/log', {
       participant: $('participant').value, day: Number($('day').value), consent: $('consent').checked,
-      keepStory: $('keepStory').checked, story: $('story').value, episode: state.episode, draft: state.draft,
-      provider: state.provider,
-      feedback: { reaction: state.feedback, shared: $('shared').checked, edits: countEdits(state.draft, state.episode) },
-      notes: $('notes').value,
+      episode: state.episode, provider: state.provider,
+      feedback: {
+        reaction: state.feedback, shared: $('shared').checked, edits: countEdits(state.draft, state.episode),
+        requested: [...document.querySelectorAll('input[name=requested]:checked')].map((x) => x.value),
+      },
     });
     $('logNote').textContent = `Сохранено: ${r.saved}`;
   } catch (e) { $('logNote').textContent = e.message; }

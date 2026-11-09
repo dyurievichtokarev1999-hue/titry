@@ -6,6 +6,13 @@ import path from 'node:path';
 import { applyEdit, createBot, draftMessage, makeMetrics, parseEdit } from '../server/bot.js';
 import { draftRuleBased } from '../server/draft.js';
 
+// Есть ли значение id среди значений полей журнала (рекурсивно). Подстроку не ищем:
+// «:42» бывает во времени поля at — из-за этого тест падал по часам (QA, 10.11).
+function logHasValue(log, id) {
+  const walk = (v) => (v !== null && typeof v === 'object' ? Object.values(v).some(walk) : String(v) === String(id));
+  return log.split('\n').filter(Boolean).some((line) => walk(JSON.parse(line)));
+}
+
 test('разбор правок', () => {
   assert.deepEqual(parseEdit('2: вечерний звонок'), { op: 'row', n: 2, value: 'вечерний звонок' });
   assert.deepEqual(parseEdit('2: Друг — вечерний звонок'), { op: 'row', n: 2, role: 'Друг', value: 'вечерний звонок' });
@@ -20,7 +27,7 @@ test('правки применяются и соблюдают лимиты', (
   const { episode } = draftRuleBased('Утром работа. Днём встреча с другом. Вечером ужин. Потом прогулка.', { date: '2026-11-05' });
   const n = episode.rows.length;
   assert.equal(applyEdit(episode, { op: 'row', n: 1, role: 'Утро', value: 'работа' }), null);
-  assert.equal(episode.rows[0].source, '', 'отредактированная строка — слова самого человека');
+  assert.equal(episode.rows[0].source, 'работа', 'отредактированная строка опирается на слова самого человека');
   assert.equal(applyEdit(episode, { op: 'delete', n: 99 }), 'Строки 99 нет.');
   assert.equal(applyEdit(episode, { op: 'delete', n: 1 }), null);
   assert.equal(episode.rows.length, n - 1);
@@ -28,6 +35,11 @@ test('правки применяются и соблюдают лимиты', (
   assert.equal(episode.post.text, '');
   assert.match(draftMessage(episode), /Похоже на твой день/);
 });
+
+const playId = (tg) => {
+  const kb = [...tg.sent].reverse().find((m) => m.extra && m.extra.reply_markup && m.extra.reply_markup.inline_keyboard);
+  return kb.extra.reply_markup.inline_keyboard[0][0].callback_data.split(':')[1];
+};
 
 function fakeTelegram() {
   const sent = [];
@@ -55,8 +67,8 @@ test('сценарий бота: рассказ → правка → ролик 
   await bot.handleUpdate({ message: { chat, text: story } });
   assert.ok(tg.sent.some((m) => /Похоже на твой день/.test(m.text)));
   await bot.handleUpdate({ message: { chat, text: '1: Письмо — отправлено' } });
-  await bot.handleUpdate({ callback_query: { id: 'q1', data: 'mood', message: { chat } } });
-  await bot.handleUpdate({ callback_query: { id: 'q2', data: 'play', message: { chat } } });
+  await bot.handleUpdate({ callback_query: { id: 'q1', data: `mood:${playId(tg)}`, message: { chat } } });
+  await bot.handleUpdate({ callback_query: { id: 'q2', data: `play:${playId(tg)}`, message: { chat } } });
   assert.equal(rendered.length, 1);
   assert.equal(rendered[0].rows[0].value, 'отправлено');
   assert.equal(rendered[0].mood, 'sad');
@@ -66,7 +78,7 @@ test('сценарий бота: рассказ → правка → ролик 
 
   const log = await fs.readFile(path.join(dir, 'm.jsonl'), 'utf8');
   assert.ok(!log.includes('письмо'), 'текст рассказа не попадает в метрики');
-  assert.ok(!log.includes('"42"') && !log.includes(':42'), 'id чата не хранится в открытом виде');
+  assert.ok(!logHasValue(log, 42), 'id чата не хранится в открытом виде');
   assert.match(log, /"event":"feedback","value":"heavier"/);
 
   await bot.handleUpdate({ message: { chat, text: '/delete' } });
@@ -84,4 +96,17 @@ test('бот: срочный риск — без ролика, с экраном
   const before = tg.sent.length;
   await bot.handleUpdate({ message: { chat: { id: 8, type: 'group' }, text: 'Длинная история про день в группе' } });
   assert.equal(tg.sent.length, before);
+});
+
+test('метрики: проверка id не путает время «:42» с id чата (воспроизводимо, фиксированное время)', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-10T00:42:42.042Z') });
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-test-42-'));
+  try {
+    const metrics = makeMetrics(path.join(dir, 'm.jsonl'), 'salt');
+    await metrics.log(42, 'start');
+    const log = await fs.readFile(path.join(dir, 'm.jsonl'), 'utf8');
+    assert.ok(log.includes(':42'), 'время в поле at действительно содержит «:42»');
+    assert.ok(!logHasValue(log, 42), 'id чата в открытом виде нет');
+    assert.ok(logHasValue(log, metrics.hash(42)), 'вместо id — хэш');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });

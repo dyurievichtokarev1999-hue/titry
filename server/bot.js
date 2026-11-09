@@ -7,7 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS } from '../engine/episode.js';
 import { makeDraft } from './draft.js';
-import { helpMessage } from './safety.js';
+import { helpMessage, assessEpisodeRisk } from './safety.js';
 import { renderEpisode, ROOT } from './render.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS } from './stt.js';
 
@@ -78,21 +78,28 @@ export function applyEdit(ep, cmd) {
       rows.splice(idx, 1); return null;
     case 'add':
       if (rows.length >= LIMITS.rowsMax) return `Больше ${LIMITS.rowsMax} строк не поместится. Сначала убери одну.`;
-      rows.push({ role: cmd.role.slice(0, LIMITS.role), value: cmd.value.slice(0, LIMITS.value), source: '' }); return null;
+      rows.push({ role: cmd.role.slice(0, LIMITS.role), value: cmd.value.slice(0, LIMITS.value), source: cmd.value.slice(0, LIMITS.value) }); return null;
     case 'row':
       if (idx < 0 || idx >= rows.length) return `Строки ${cmd.n} нет.`;
       if (cmd.role) rows[idx].role = cmd.role.slice(0, LIMITS.role);
       rows[idx].value = cmd.value.slice(0, LIMITS.value);
-      rows[idx].source = ''; // теперь это слова самого человека
+      rows[idx].source = rows[idx].value; // слова самого человека; бот добавляет правку в опору (editCorpus)
       return null;
     case 'title': if (!cmd.value) return 'Название не может быть пустым.'; ep.title = cmd.value.slice(0, LIMITS.title); return null;
     case 'genre': if (!cmd.value) return 'Жанр не может быть пустым.'; ep.genre = cmd.value.slice(0, LIMITS.genre); return null;
     case 'lead': ep.lead = (cmd.value || 'ты').slice(0, 24); return null;
     case 'post':
-      ep.post = cmd.value === '-' || !cmd.value ? { text: '', source: '' } : { text: cmd.value.slice(0, LIMITS.post), source: '' };
+      ep.post = cmd.value === '-' || !cmd.value ? { text: '', source: '' } : { text: cmd.value.slice(0, LIMITS.post), source: cmd.value.slice(0, LIMITS.post) };
       return null;
     default: return 'Не понял правку.';
   }
+}
+
+/** Текст правки, который становится частью опоры: человек написал его сам. */
+export function editCorpus(cmd) {
+  if (cmd.op === 'delete') return '';
+  if (cmd.op === 'post' && (cmd.value === '-' || !cmd.value)) return '';
+  return [cmd.role, cmd.value].filter(Boolean).join(' ');
 }
 
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -117,13 +124,13 @@ export function draftMessage(ep, validation) {
   return lines.join('\n');
 }
 
-export function draftKeyboard(ep) {
+export function draftKeyboard(ep, draftId = 0) {
   const nextMood = MOODS[MOOD_ORDER[(MOOD_ORDER.indexOf(ep.mood) + 1) % MOOD_ORDER.length]];
   const nextMusic = TRACKS[MUSIC_ORDER[(MUSIC_ORDER.indexOf(ep.music) + 1) % MUSIC_ORDER.length]];
   return {
     inline_keyboard: [
-      [{ text: '▶ Смотреть титры', callback_data: 'play' }],
-      [{ text: `Плёнка: ${nextMood.film}`, callback_data: 'mood' }, { text: `Музыка: ${nextMusic.file ? nextMusic.title : 'тишина'}`, callback_data: 'music' }],
+      [{ text: '▶ Смотреть титры', callback_data: `play:${draftId}` }],
+      [{ text: `Плёнка: ${nextMood.film}`, callback_data: `mood:${draftId}` }, { text: `Музыка: ${nextMusic.file ? nextMusic.title : 'тишина'}`, callback_data: `music:${draftId}` }],
       [{ text: 'Как поправить строку', callback_data: 'edit' }],
     ],
   };
@@ -141,18 +148,41 @@ const FEEDBACK_KB = {
 
 export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), salt = process.env.METRICS_SALT || 'titry-dev-salt') {
   const hash = (id) => crypto.createHmac('sha256', salt).update(String(id)).digest('hex').slice(0, 16);
+  // ИР-06 (критик реализации 9.11): завершённый forget — барьер для уже принятых записей.
+  // 1) Чтение-перезапись и дозапись файла идут одной очередью — строка другого человека не теряется.
+  // 2) forget сразу поднимает поколение человека; запись, принятая до него, проверяет поколение
+  //    уже внутри очереди и не попадает в файл. forget не ждёт зависшую запись.
+  let ops = Promise.resolve();
+  const serial = (fn) => {
+    const run = ops.then(fn);
+    ops = run.catch(() => {});
+    return run;
+  };
+  const generation = new Map(); // хэш → номер поколения; текстов здесь нет
   return {
     hash,
     async log(chatId, event, extra = {}) {
-      await fs.mkdir(path.dirname(file), { recursive: true });
-      await fs.appendFile(file, JSON.stringify({ at: new Date().toISOString(), user: hash(chatId), event, ...extra }) + '\n');
-    },
-    async forget(chatId) {
       const h = hash(chatId);
-      let text = '';
-      try { text = await fs.readFile(file, 'utf8'); } catch { return; }
-      const kept = text.split('\n').filter((l) => l && !l.includes(`"user":"${h}"`));
-      await fs.writeFile(file, kept.length ? kept.join('\n') + '\n' : '');
+      const gen = generation.get(h) || 0;
+      const row = JSON.stringify({ at: new Date().toISOString(), user: h, event, ...extra }) + '\n';
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      return serial(async () => {
+        if ((generation.get(h) || 0) !== gen) return; // человек удалил данные, пока запись ждала
+        await fs.appendFile(file, row);
+      });
+    },
+    forget(chatId) {
+      const h = hash(chatId);
+      generation.set(h, (generation.get(h) || 0) + 1);
+      return serial(async () => {
+        let text = '';
+        try { text = await fs.readFile(file, 'utf8'); } catch { return; }
+        const kept = text.split('\n').filter((l) => l && !l.includes(`"user":"${h}"`));
+        // Атомарно: временный файл и rename — сбой посреди записи не обрезает строки других людей.
+        const tmpFile = `${file}.tmp-${process.pid}`;
+        await fs.writeFile(tmpFile, kept.length ? kept.join('\n') + '\n' : '');
+        await fs.rename(tmpFile, file);
+      });
     },
   };
 }
@@ -161,6 +191,8 @@ export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), sal
 
 export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, render = renderEpisode, transcribe = transcribeOgg, now = () => new Date() } = {}) {
   const sessions = new Map();
+  // Ключ рассказа: запрет по безопасности привязан к самому рассказу, а не к интерфейсу.
+  const storyKey = (story) => crypto.createHash('sha256').update(String(story).toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim()).digest('hex');
   let queue = Promise.resolve();
   let waiting = 0;
 
@@ -178,59 +210,121 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
 
   async function showDraft(chatId, s) {
     s.validation = validateEpisode(s.episode, s.story);
-    await tg.send(chatId, draftMessage(s.episode, s.validation), { parse_mode: 'HTML', reply_markup: draftKeyboard(s.episode) });
+    await tg.send(chatId, draftMessage(s.episode, s.validation), { parse_mode: 'HTML', reply_markup: draftKeyboard(s.episode, s.draftId) });
   }
 
+  // Остановка по безопасности: прежний черновик уничтожается, рассказ запоминается как запрещённый.
+  async function stopForSafety(chatId, s, level, extra = {}) {
+    s.episode = null;
+    s.verdict = 'blocked';
+    s.draftId = (s.draftId || 0) + 1; // кнопки всех прежних черновиков перестают работать
+    s.stage = 'help';
+    if (s.story) {
+      s.blocked = s.blocked || new Set();
+      s.blocked.add(storyKey(s.originalStory || s.story));
+    }
+    await metrics.log(chatId, 'safety', { level, ...extra });
+    await tg.send(chatId, helpMessage('urgent'));
+  }
+
+  // Сессия ещё та же: не удалена через /delete и не заменена новой после истечения срока.
+  const alive = (chatId, s) => sessions.get(chatId) === s;
+  const isBlocked = (s, story) => !!(s.blocked && s.blocked.has(storyKey(story)));
+
   async function handleStory(chatId, s, story, source) {
+    // Новый рассказ сразу отменяет прежний черновик: его кнопки больше ничего не запускают.
+    s.episode = null;
+    s.verdict = null;
+    s.draftId = (s.draftId || 0) + 1;
+    const gen = s.draftId; // поколение: результат ожидания применяется, только если оно всё ещё текущее
     s.story = story;
+    s.originalStory = story;
+    s.stage = 'drafting';
+    if (isBlocked(s, story)) {
+      return stopForSafety(chatId, s, 'urgent', { at: 'repeat' });
+    }
+    const current = () => alive(chatId, s) && s.draftId === gen && !isBlocked(s, story);
     await tg.action(chatId, 'typing');
     await tg.send(chatId, TEXT.working);
     let r;
     try {
-      r = await draft(story, { date: todayIso(now()), period: s.period, tone: 'quiet', continueAfterHelp: s.stage === 'help-continue' });
+      r = await draft(story, { date: todayIso(now()), period: s.period, tone: 'quiet' });
     } catch (e) {
       console.error('draft', e);
+      if (!current()) return;
+      s.stage = 'idle';
       await tg.send(chatId, TEXT.draftFail);
       return;
     }
-    await metrics.log(chatId, 'story', { source, period: s.period, chars: Math.round(story.length / 50) * 50 });
+    if (!alive(chatId, s)) return; // удалённая сессия не оживает из отложенного ответа
     if (!r.episode) {
-      s.stage = 'help';
-      await metrics.log(chatId, 'safety', { level: r.risk.level, byModel: r.risk.byModel });
-      await tg.send(chatId, helpMessage(r.risk.level));
+      // Остановка важнее всего, даже если ответ устарел: рассказ запоминается как запрещённый.
+      if (s.draftId === gen) return stopForSafety(chatId, s, r.risk.level, { byModel: r.risk.byModel });
+      s.blocked = s.blocked || new Set();
+      s.blocked.add(storyKey(story));
+      // Если сейчас в работе тот же рассказ, его черновик тоже уничтожается.
+      if (s.verdict !== 'blocked' && s.originalStory && storyKey(s.originalStory) === storyKey(story)) {
+        return stopForSafety(chatId, s, r.risk.level, { byModel: r.risk.byModel, at: 'late' });
+      }
       return;
     }
+    if (!current()) return; // устаревший «можно» молча отбрасывается
+    await metrics.log(chatId, 'story', { source, period: s.period, chars: Math.round(story.length / 50) * 50 });
+    if (!current()) return;
     if (r.risk.level === 'concern') await tg.send(chatId, helpMessage('concern'));
+    if (!current()) return;
     s.episode = r.episode;
+    s.verdict = 'ok';
     s.edits = 0;
     s.stage = 'draft';
     await metrics.log(chatId, 'draft', { provider: r.provider, rows: r.episode.rows.length, dropped: (r.dropped || []).length });
+    if (!current()) return;
     await showDraft(chatId, s);
   }
 
   async function doRender(chatId, s) {
+    // Правки после черновика тоже проверяются: опасная строка не попадёт в ролик.
+    if (s.verdict !== 'ok' || !s.episode) return tg.send(chatId, TEXT.noDraft);
+    const risk = assessEpisodeRisk(s.story, s.episode);
+    if (risk.level === 'urgent') return stopForSafety(chatId, s, 'urgent', { at: 'render' });
     const v = validateEpisode(s.episode, s.story);
     if (!v.ok) { await showDraft(chatId, s); return; }
+    const gen = s.draftId;
+    const original = s.originalStory || s.story;
+    const current = () => alive(chatId, s) && s.draftId === gen && s.verdict === 'ok' && !isBlocked(s, original);
     s.stage = 'rendering';
     const ahead = waiting;
     waiting++;
-    await tg.send(chatId, ahead ? TEXT.queue(ahead) : TEXT.rendering);
     const ep = structuredClone(s.episode);
+    const story = s.story;
     const out = path.join(ROOT, 'data', 'tmp', `${metrics.hash(chatId)}-${Date.now()}.mp4`);
-    const job = queue.then(async () => {
-      await tg.action(chatId, 'upload_video');
-      return render(ep, { outPath: out, preset: process.env.BOT_PRESET || 'standard', watermark: WATERMARK || false });
-    });
-    queue = job.catch(() => {});
+    const STALE = Symbol('stale');
+    let job;
     try {
+      await tg.send(chatId, ahead ? TEXT.queue(ahead) : TEXT.rendering);
+      job = queue.then(async () => {
+        // Перед стартом из очереди: черновик мог быть остановлен или удалён, пока задача ждала.
+        if (!current()) return STALE;
+        await tg.action(chatId, 'upload_video');
+        // R3 (ревью QA 9.11): пока ждали tg.action, могла прийти остановка или /delete — рендер не начинается.
+        if (!current()) return STALE;
+        return render(ep, { story, outPath: out, preset: process.env.BOT_PRESET || 'standard', watermark: WATERMARK || false });
+      });
+      queue = job.catch(() => {});
       const r = await job;
+      // После рендера: если черновик остановлен или сессия удалена, видео не отправляется (файл удалится ниже).
+      if (r === STALE || !current()) return;
       await tg.sendVideo(chatId, r.outPath, { caption: 'Конец сцены.', width: 720, height: 1280, duration: Math.round(r.duration), reply_markup: FEEDBACK_KB });
+      // /delete во время отправки: после metrics.forget новая запись о человеке не появляется.
+      if (!alive(chatId, s)) return;
       await metrics.log(chatId, 'render', { seconds: Math.round(r.seconds), mood: ep.mood, music: ep.music, edits: s.edits || 0 });
-      s.stage = 'watched';
+      if (current()) s.stage = 'watched';
     } catch (e) {
       console.error('render', e);
-      s.stage = 'draft';
-      await tg.send(chatId, TEXT.renderFail);
+      if (current()) {
+        s.stage = 'draft';
+        await tg.send(chatId, TEXT.renderFail);
+      }
     } finally {
       waiting--;
       await fs.rm(out, { force: true });
@@ -250,12 +344,6 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
 
     if (s.stage === 'rendering') return tg.send(chatId, TEXT.rendering);
 
-    if (s.stage === 'help' && /^продолжить$/i.test(text) && s.story) {
-      s.stage = 'help-continue';
-      await metrics.log(chatId, 'safety_continue');
-      return handleStory(chatId, s, s.story, 'continue');
-    }
-
     if (msg.voice) {
       if (!sttAvailable() && transcribe === transcribeOgg) return tg.send(chatId, TEXT.voiceOff);
       if (msg.voice.duration > MAX_VOICE_SECONDS) return tg.send(chatId, TEXT.voiceLong);
@@ -263,6 +351,7 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
       let story = '';
       try { story = await transcribe(await tg.fileBuffer(msg.voice.file_id), { duration: msg.voice.duration }); }
       catch (e) { console.error('stt', e); }
+      if (!alive(chatId, s)) return; // /delete во время распознавания: ничего не отвечаем
       if (!story) return tg.send(chatId, TEXT.voiceEmpty);
       await tg.send(chatId, `Расшифровка:\n«${story}»`);
       return handleStory(chatId, s, story, 'voice');
@@ -274,6 +363,8 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
       if (cmd) {
         const err = applyEdit(s.episode, cmd);
         if (err) return tg.send(chatId, err);
+        const own = editCorpus(cmd);
+        if (own) s.story = `${s.story}\n${own}`; // опора хранится только в памяти сессии
         s.edits = (s.edits || 0) + 1;
         s.stage = 'draft';
         return showDraft(chatId, s);
@@ -296,12 +387,15 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
       if (v === 'heavier') { await tg.send(chatId, TEXT.heavier); return tg.send(chatId, helpMessage('concern')); }
       return tg.send(chatId, v === 'fit' ? TEXT.fit : TEXT.miss);
     }
-    if (!s.episode) return tg.send(chatId, TEXT.noDraft);
-    if (s.stage === 'rendering') return tg.send(chatId, TEXT.rendering);
-    if (data === 'play') return doRender(chatId, s);
-    if (data === 'mood') { s.episode.mood = MOOD_ORDER[(MOOD_ORDER.indexOf(s.episode.mood) + 1) % MOOD_ORDER.length]; s.stage = 'draft'; return showDraft(chatId, s); }
-    if (data === 'music') { s.episode.music = MUSIC_ORDER[(MUSIC_ORDER.indexOf(s.episode.music) + 1) % MUSIC_ORDER.length]; s.stage = 'draft'; return showDraft(chatId, s); }
     if (data === 'edit') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });
+    const [action, idPart] = data.split(':');
+    if (s.stage === 'rendering') return tg.send(chatId, TEXT.rendering);
+    // Кнопка работает только для текущего черновика, прошедшего проверку безопасности.
+    const current = s.episode && s.verdict === 'ok' && (s.stage === 'draft' || s.stage === 'watched') && Number(idPart) === s.draftId;
+    if (!current) return tg.send(chatId, s.stage === 'help' ? helpMessage('urgent') : TEXT.noDraft);
+    if (action === 'play') return doRender(chatId, s);
+    if (action === 'mood') { s.episode.mood = MOOD_ORDER[(MOOD_ORDER.indexOf(s.episode.mood) + 1) % MOOD_ORDER.length]; s.stage = 'draft'; return showDraft(chatId, s); }
+    if (action === 'music') { s.episode.music = MUSIC_ORDER[(MUSIC_ORDER.indexOf(s.episode.music) + 1) % MUSIC_ORDER.length]; s.stage = 'draft'; return showDraft(chatId, s); }
   }
 
   async function handleUpdate(u) {

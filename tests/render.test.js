@@ -16,7 +16,7 @@ test('рендер: MP4 9:16 со звуком нужной длительнос
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-render-'));
   const out = path.join(dir, 'x.mp4');
   try {
-    const r = await renderEpisode(ex.episode, { outPath: out, preset: 'preview', duration: 16, posterPath: path.join(dir, 'x.jpg') });
+    const r = await renderEpisode(ex.episode, { story: ex.story, outPath: out, preset: 'preview', duration: 16, posterPath: path.join(dir, 'x.jpg') });
     const probe = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', out]).toString());
     const v = probe.streams.find((s) => s.codec_type === 'video');
     const a = probe.streams.find((s) => s.codec_type === 'audio');
