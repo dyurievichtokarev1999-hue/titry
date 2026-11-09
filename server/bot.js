@@ -215,7 +215,10 @@ export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), sal
       const timeout = new Promise((_, reject) => {
         timer = setTimeout(() => reject(Object.assign(new Error('Удаление метрик не подтверждено за отведённое время.'), { code: 'timeout' })), forgetTimeoutMs);
       });
-      return Promise.race([run, timeout]).finally(() => clearTimeout(timer));
+      // Если удаление упадёт уже после тайм-аута, оператор должен об этом узнать: только код ошибки, без хэша и текстов.
+      let timedOut = false;
+      run.catch((e) => { if (timedOut) console.error(`metrics.forget: удаление после тайм-аута не выполнено (${e?.code || 'error'})`); });
+      return Promise.race([run, timeout]).catch((e) => { if (e?.code === 'timeout') timedOut = true; throw e; }).finally(() => clearTimeout(timer));
     },
   };
 }

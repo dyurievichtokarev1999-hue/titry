@@ -64,9 +64,11 @@ test('зависшая запись: forget отклоняется по тайм
     const metrics = makeMetrics(file, 'mf-salt', { forgetTimeoutMs: 50 });
     await metrics.log(chat.id, 'start');
     let pending;
-    await withPatched('appendFile', (orig) => async (...args) => { await hold; return orig.call(fs, ...args); }, async () => {
+    let entered;
+    const inAppend = new Promise((r) => { entered = r; });
+    await withPatched('appendFile', (orig) => async (...args) => { entered(); await hold; return orig.call(fs, ...args); }, async () => {
       pending = metrics.log(2, 'start'); // очередь занята зависшей записью другого человека
-      await new Promise((r) => setTimeout(r, 10));
+      await inAppend; // сигнал, а не таймер: запись точно в очереди и висит
       await assert.rejects(metrics.forget(chat.id), { code: 'timeout' });
       release();
       await pending;
