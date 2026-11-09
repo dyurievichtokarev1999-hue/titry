@@ -170,15 +170,19 @@ export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), sal
   // без пути, хэшей и текстов.
   const TMP_CLEANUP_ATTEMPTS = 3;
   // Только копии этого журнала: «<имя>.tmp-<pid>». Посторонние файлы с похожим именем не трогаем.
+  file = path.resolve(file); // один вид пути для копий из папки и для своей копии
   const tmpPattern = new RegExp('^' + path.basename(file).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\.tmp-\\d+$');
   const leftovers = new Map(); // имя временной копии → число неудачных попыток удаления
   let scanned = false;
   let scanFailures = 0;
   const cleanupFailed = () => console.error('metrics: временная копия журнала не удалена (metrics_tmp_cleanup_failed)');
-  async function cleanLeftovers() {
-    if (!scanned && scanFailures < TMP_CLEANUP_ATTEMPTS) {
+  // explicit = вызов из forget: человек сам просит удалить данные, поэтому пробуем и сверх лимита.
+  // Лимит действует только на фоновые попытки при записи метрик — без бесконечных повторов в каждом log.
+  async function cleanLeftovers(explicit = false) {
+    if (!scanned && (explicit || scanFailures < TMP_CLEANUP_ATTEMPTS)) {
       try {
-        for (const name of await fs.readdir(path.dirname(file))) if (tmpPattern.test(name)) leftovers.set(path.join(path.dirname(file), name), 0);
+        const entries = await fs.readdir(path.dirname(file), { withFileTypes: true });
+        for (const d of entries) if (d.isFile() && tmpPattern.test(d.name)) leftovers.set(path.join(path.dirname(file), d.name), 0);
         scanned = true;
       } catch (e) {
         if (e.code === 'ENOENT') scanned = true; // папки ещё нет — копий тоже
@@ -191,7 +195,7 @@ export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), sal
       }
     }
     for (const [tmp, failures] of leftovers) {
-      if (failures >= TMP_CLEANUP_ATTEMPTS) continue; // попытки исчерпаны: уже сообщено, бесконечно не повторяем
+      if (failures >= TMP_CLEANUP_ATTEMPTS && !explicit) continue; // фоновые попытки исчерпаны: уже сообщено
       try { await fs.rm(tmp, { force: true }); leftovers.delete(tmp); }
       catch {
         leftovers.set(tmp, failures + 1);
@@ -199,7 +203,7 @@ export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), sal
       }
     }
   }
-  const serialClean = (fn) => serial(async () => { await cleanLeftovers(); return fn(); });
+  const serialClean = (fn, explicit = false) => serial(async () => { await cleanLeftovers(explicit); return fn(); });
   // Удаление подтверждено, только если копий журнала не осталось и папка проверена:
   // в копии могут лежать строки этого же человека.
   const cleanupPending = () => !scanned || leftovers.size > 0;
@@ -260,7 +264,7 @@ export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), sal
           throw e;
         }
         if (cleanupPending()) throw pendingError();
-      }).finally(() => leave(h));
+      }, true).finally(() => leave(h));
       let timer;
       const timeout = new Promise((_, reject) => {
         timer = setTimeout(() => reject(Object.assign(new Error('Удаление метрик не подтверждено за отведённое время.'), { code: 'timeout' })), forgetTimeoutMs);

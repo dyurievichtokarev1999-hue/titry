@@ -230,3 +230,31 @@ test('папку не удалось проверить (не ENOENT): сигн�
     assert.equal(await fs.readFile(file, 'utf8'), '');
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
+
+// Разбор 10.11: после исчерпания фоновых попыток явный /delete снова пробует очистку — повтор помогает без перезапуска.
+test('после исчерпания попыток отказ снят: явный forget убирает копию и подтверждает удаление', async (t) => {
+  const dir = await tmp('titry-mf-retry-');
+  t.mock.method(console, 'error', () => {});
+  try {
+    const file = path.join(dir, 'm.jsonl');
+    await fs.writeFile(`${file}.tmp-77`, 'x');
+    await fs.mkdir(path.join(dir, 'm.jsonl.tmp-88')); // папка с похожим именем — не копия, не мешает
+    const metrics = makeMetrics(file, 'mf-salt');
+    const origRm = fs.rm, origReaddir = fs.readdir;
+    fs.rm = async (p, o) => { if (String(p).includes('.tmp-')) throw fault('EACCES'); return origRm.call(fs, p, o); };
+    try {
+      for (let i = 0; i < 4; i++) await metrics.log(1, 'start'); // фоновые попытки исчерпаны
+      await assert.rejects(metrics.forget(1), { code: 'tmp_cleanup_pending' });
+    } finally { fs.rm = origRm; }
+    await metrics.forget(1);
+    assert.deepEqual((await fs.readdir(dir)).sort(), ['m.jsonl', 'm.jsonl.tmp-88']);
+    // То же для проверки папки.
+    const m2 = makeMetrics(path.join(dir, 'n.jsonl'), 'mf-salt');
+    fs.readdir = async (p, ...rest) => { if (p === dir) throw fault('EACCES'); return origReaddir.call(fs, p, ...rest); };
+    try {
+      for (let i = 0; i < 4; i++) await m2.log(1, 'start');
+      await assert.rejects(m2.forget(1), { code: 'tmp_cleanup_pending' });
+    } finally { fs.readdir = origReaddir; }
+    await m2.forget(1);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
