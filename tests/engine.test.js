@@ -6,8 +6,8 @@ import { detectGender, validateEpisode, sanitizeEpisode, dateLabel, creditRows, 
 const examples = fs.readdirSync(new URL('../examples/', import.meta.url))
   .map((f) => JSON.parse(fs.readFileSync(new URL(`../examples/${f}`, import.meta.url), 'utf8')));
 
-test('все четыре примера проходят проверку без ошибок и предупреждений', () => {
-  assert.equal(examples.length, 4);
+test('все примеры проходят проверку без ошибок и предупреждений', () => {
+  assert.ok(examples.length >= 4);
   for (const ex of examples) {
     const v = validateEpisode(ex.episode, ex.story);
     assert.deepEqual(v.errors, [], ex.episode.title);
