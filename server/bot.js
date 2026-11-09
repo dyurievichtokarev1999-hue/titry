@@ -169,16 +169,26 @@ export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), sal
   // оставшиеся копии этого журнала находятся по имени при первой операции. В журнал ошибок — только код,
   // без пути, хэшей и текстов.
   const TMP_CLEANUP_ATTEMPTS = 3;
-  const tmpPrefix = path.basename(file) + '.tmp-';
+  // Только копии этого журнала: «<имя>.tmp-<pid>». Посторонние файлы с похожим именем не трогаем.
+  const tmpPattern = new RegExp('^' + path.basename(file).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\.tmp-\\d+$');
   const leftovers = new Map(); // имя временной копии → число неудачных попыток удаления
   let scanned = false;
+  let scanFailures = 0;
   const cleanupFailed = () => console.error('metrics: временная копия журнала не удалена (metrics_tmp_cleanup_failed)');
   async function cleanLeftovers() {
-    if (!scanned) {
-      scanned = true;
+    if (!scanned && scanFailures < TMP_CLEANUP_ATTEMPTS) {
       try {
-        for (const name of await fs.readdir(path.dirname(file))) if (name.startsWith(tmpPrefix)) leftovers.set(path.join(path.dirname(file), name), 0);
-      } catch { /* папки ещё нет — копий тоже */ }
+        for (const name of await fs.readdir(path.dirname(file))) if (tmpPattern.test(name)) leftovers.set(path.join(path.dirname(file), name), 0);
+        scanned = true;
+      } catch (e) {
+        if (e.code === 'ENOENT') scanned = true; // папки ещё нет — копий тоже
+        else {
+          scanFailures++;
+          console.error(scanFailures < TMP_CLEANUP_ATTEMPTS
+            ? 'metrics: не удалось проверить временные копии журнала (metrics_tmp_scan_failed)'
+            : 'metrics: проверка временных копий журнала не удалась после повторов (metrics_tmp_scan_exhausted)');
+        }
+      }
     }
     for (const [tmp, failures] of leftovers) {
       if (failures >= TMP_CLEANUP_ATTEMPTS) continue; // попытки исчерпаны: уже сообщено, бесконечно не повторяем
@@ -190,6 +200,9 @@ export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), sal
     }
   }
   const serialClean = (fn) => serial(async () => { await cleanLeftovers(); return fn(); });
+  // Удаление подтверждено, только если копий журнала не осталось и папка проверена:
+  // в копии могут лежать строки этого же человека.
+  const cleanupPending = () => !scanned || leftovers.size > 0;
   const enter = (h) => busy.set(h, (busy.get(h) || 0) + 1);
   const leave = (h) => {
     const n = (busy.get(h) || 1) - 1;
@@ -227,19 +240,26 @@ export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), sal
       generation.set(h, (generation.get(h) || 0) + 1);
       const run = serialClean(async () => {
         let text = '';
-        try { text = await fs.readFile(file, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return; throw e; }
+        const pendingError = () => Object.assign(new Error('Строки удалены из журнала, но временные копии журнала не убраны.'), { code: 'tmp_cleanup_pending', tmpCleanup: 'pending' });
+        try { text = await fs.readFile(file, 'utf8'); } catch (e) {
+          if (e.code !== 'ENOENT') throw e;
+          if (cleanupPending()) throw pendingError(); // журнала нет, но копия может хранить строки человека
+          return;
+        }
         const kept = text.split('\n').filter((l) => l && !l.includes(`"user":"${h}"`));
         // Атомарно: временный файл и rename — сбой посреди записи не обрезает строки других людей.
         const tmpFile = `${file}.tmp-${process.pid}`;
         try {
           await fs.writeFile(tmpFile, kept.length ? kept.join('\n') + '\n' : '');
           await fs.rename(tmpFile, file);
+          leftovers.delete(tmpFile); // копию с этим именем унёс rename
         } catch (e) {
           // Не оставляем копию чужих строк. Если и удалить её не вышло — сообщаем оператору и повторим позже.
-          try { await fs.rm(tmpFile, { force: true }); }
-          catch { leftovers.set(tmpFile, 1); cleanupFailed(); e.tmpCleanup = 'failed'; }
+          try { await fs.rm(tmpFile, { force: true }); leftovers.delete(tmpFile); }
+          catch { if (!leftovers.has(tmpFile)) leftovers.set(tmpFile, 1); cleanupFailed(); e.tmpCleanup = 'failed'; }
           throw e;
         }
+        if (cleanupPending()) throw pendingError();
       }).finally(() => leave(h));
       let timer;
       const timeout = new Promise((_, reject) => {

@@ -175,3 +175,58 @@ test('постоянный отказ удаления копии: попыто�
     assert.equal(rows.length, 6, 'записи метрик не страдают от отказа очистки');
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
+
+// Разбор 10.11: forget не подтверждает удаление, пока копия журнала (возможно, со строками человека) не убрана.
+test('копия после перезапуска не удаляется: forget не подтверждает удаление, /delete не пишет «удалено»', async (t) => {
+  const dir = await tmp('titry-mf-pending-');
+  t.mock.method(console, 'error', () => {});
+  try {
+    const file = path.join(dir, 'm.jsonl');
+    const metrics0 = makeMetrics(file, 'mf-salt');
+    await fs.writeFile(`${file}.tmp-99999`, JSON.stringify({ user: metrics0.hash(chat.id), event: 'start' }) + '\n');
+    const metrics = makeMetrics(file, 'mf-salt');
+    const sent = [];
+    const bot = createBot({ tg: fakeTg(sent), metrics });
+    const origRm = fs.rm;
+    fs.rm = async (p, o) => { if (String(p).includes('.tmp-')) throw fault('EACCES'); return origRm.call(fs, p, o); };
+    try {
+      await bot.handleUpdate({ message: { chat, text: '/delete' } });
+      assert.equal(sent.at(-1), 'Сессия удалена, а удаление статистики по тебе подтвердить не получилось. Попробуй /delete ещё раз чуть позже.');
+      await assert.rejects(metrics.forget(chat.id), { code: 'tmp_cleanup_pending' });
+    } finally { fs.rm = origRm; }
+    await bot.handleUpdate({ message: { chat, text: '/delete' } }); // отказ снят
+    assert.equal(sent.at(-1), 'Готово: сессия и статистика по тебе удалены.');
+    assert.deepEqual(await tmpNames(dir), []);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('посторонние файлы с похожим именем не трогаются', async () => {
+  const dir = await tmp('titry-mf-names-');
+  try {
+    const file = path.join(dir, 'm.jsonl');
+    const keep = ['m.jsonl.tmp-old.jsonl', 'm.jsonl.tmp-backup', 'xm.jsonl.tmp-1'];
+    for (const n of keep) await fs.writeFile(path.join(dir, n), 'x');
+    await fs.writeFile(`${file}.tmp-123`, 'x');
+    const metrics = makeMetrics(file, 'mf-salt');
+    await metrics.log(1, 'start');
+    assert.deepEqual((await fs.readdir(dir)).sort(), ['m.jsonl', ...keep].sort());
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('папку не удалось проверить (не ENOENT): сигнал оператору, удаление не подтверждается, проверка повторяется', async (t) => {
+  const dir = await tmp('titry-mf-scan-');
+  const errors = t.mock.method(console, 'error', () => {});
+  try {
+    const file = path.join(dir, 'm.jsonl');
+    const metrics = makeMetrics(file, 'mf-salt');
+    const origReaddir = fs.readdir;
+    fs.readdir = async (p, ...rest) => { if (p === dir) throw fault('EACCES'); return origReaddir.call(fs, p, ...rest); };
+    try {
+      await metrics.log(1, 'start');
+      await assert.rejects(metrics.forget(1), { code: 'tmp_cleanup_pending' });
+    } finally { fs.readdir = origReaddir; }
+    assert.ok(errors.mock.calls.some((c) => String(c.arguments[0]).includes('metrics_tmp_scan_failed')));
+    await metrics.forget(1); // проверка удалась — удаление подтверждено
+    assert.equal(await fs.readFile(file, 'utf8'), '');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
