@@ -46,6 +46,8 @@ export const TEXT = {
   miss: 'Понятно. Можно поправить строки, плёнку или музыку и собрать заново. Или просто закончить на сегодня.',
   heavier: 'Спасибо за честный ответ. Можно остановиться прямо сейчас, это нормально.',
   deleted: 'Готово: сессия и статистика по тебе удалены.',
+  // Черновик текста, на вычитку редактору повествования: честно, без «всё удалено», без обещаний сроков.
+  deleteFailed: 'Сессия удалена, а удаление статистики по тебе подтвердить не получилось. Попробуй /delete ещё раз чуть позже.',
   renderFail: 'Не получилось собрать ролик. Попробуй ещё раз чуть позже.',
   draftFail: 'Не получилось собрать черновик. Попробуй ещё раз чуть позже.',
 };
@@ -146,7 +148,7 @@ const FEEDBACK_KB = {
 
 // ── Метрики без содержимого рассказов ────────────────────────────────────────
 
-export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), salt = process.env.METRICS_SALT || 'titry-dev-salt') {
+export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), salt = process.env.METRICS_SALT || 'titry-dev-salt', { forgetTimeoutMs = 10000 } = {}) {
   const hash = (id) => crypto.createHmac('sha256', salt).update(String(id)).digest('hex').slice(0, 16);
   // ИР-06 (критик реализации 9.11): завершённый forget — барьер для уже принятых записей.
   // 1) Чтение-перезапись и дозапись файла идут одной очередью — строка другого человека не теряется.
@@ -159,30 +161,61 @@ export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), sal
     return run;
   };
   const generation = new Map(); // хэш → номер поколения; текстов здесь нет
+  // G0-fixes: запись поколения нужна, только пока есть незавершённые log/forget этого человека.
+  // Когда их нет, запись удаляется — карта не растёт с каждым /delete.
+  const busy = new Map(); // хэш → число незавершённых операций
+  const enter = (h) => busy.set(h, (busy.get(h) || 0) + 1);
+  const leave = (h) => {
+    const n = (busy.get(h) || 1) - 1;
+    if (n > 0) { busy.set(h, n); return; }
+    busy.delete(h);
+    generation.delete(h);
+  };
   return {
     hash,
+    /** Только для тестов: сколько людей сейчас держат запись поколения. */
+    get trackedUsers() { return generation.size; },
     async log(chatId, event, extra = {}) {
       const h = hash(chatId);
-      const gen = generation.get(h) || 0;
-      const row = JSON.stringify({ at: new Date().toISOString(), user: h, event, ...extra }) + '\n';
-      await fs.mkdir(path.dirname(file), { recursive: true });
-      return serial(async () => {
-        if ((generation.get(h) || 0) !== gen) return; // человек удалил данные, пока запись ждала
-        await fs.appendFile(file, row);
-      });
+      enter(h);
+      try {
+        const gen = generation.get(h) || 0;
+        const row = JSON.stringify({ at: new Date().toISOString(), user: h, event, ...extra }) + '\n';
+        await fs.mkdir(path.dirname(file), { recursive: true });
+        return await serial(async () => {
+          if ((generation.get(h) || 0) !== gen) return; // человек удалил данные, пока запись ждала
+          await fs.appendFile(file, row);
+        });
+      } finally { leave(h); }
     },
+    /**
+     * Удалить строки человека. Отклоняется, если удаление не подтверждено: сбой чтения (кроме «файла нет»),
+     * записи или rename, либо очередь не дошла до удаления за forgetTimeoutMs. Тогда вызывающий
+     * не должен говорить «всё удалено». По тайм-ауту удаление остаётся в очереди и выполнится позже.
+     */
     forget(chatId) {
       const h = hash(chatId);
+      enter(h);
       generation.set(h, (generation.get(h) || 0) + 1);
-      return serial(async () => {
+      const run = serial(async () => {
         let text = '';
-        try { text = await fs.readFile(file, 'utf8'); } catch { return; }
+        try { text = await fs.readFile(file, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return; throw e; }
         const kept = text.split('\n').filter((l) => l && !l.includes(`"user":"${h}"`));
         // Атомарно: временный файл и rename — сбой посреди записи не обрезает строки других людей.
         const tmpFile = `${file}.tmp-${process.pid}`;
-        await fs.writeFile(tmpFile, kept.length ? kept.join('\n') + '\n' : '');
-        await fs.rename(tmpFile, file);
+        try {
+          await fs.writeFile(tmpFile, kept.length ? kept.join('\n') + '\n' : '');
+          await fs.rename(tmpFile, file);
+        } catch (e) {
+          await fs.rm(tmpFile, { force: true }).catch(() => {}); // не оставляем копию чужих строк
+          throw e;
+        }
+      }).finally(() => leave(h));
+      let timer;
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(Object.assign(new Error('Удаление метрик не подтверждено за отведённое время.'), { code: 'timeout' })), forgetTimeoutMs);
       });
+      return Promise.race([run, timeout]).finally(() => clearTimeout(timer));
     },
   };
 }
@@ -339,7 +372,12 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
 
     if (text === '/start') { s.stage = 'idle'; s.period = 'day'; await metrics.log(chatId, 'start'); return tg.send(chatId, TEXT.start); }
     if (text === '/year') { s.stage = 'idle'; s.period = 'year'; await metrics.log(chatId, 'year'); return tg.send(chatId, TEXT.year); }
-    if (text === '/delete') { sessions.delete(chatId); await metrics.forget(chatId); return tg.send(chatId, TEXT.deleted); }
+    if (text === '/delete') {
+      sessions.delete(chatId);
+      // Честный ответ: «удалено» — только если удаление метрик подтверждено (G0-fixes, критик реализации).
+      try { await metrics.forget(chatId); } catch { return tg.send(chatId, TEXT.deleteFailed); }
+      return tg.send(chatId, TEXT.deleted);
+    }
     if (text === '/help') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });
 
     if (s.stage === 'rendering') return tg.send(chatId, TEXT.rendering);
