@@ -210,8 +210,8 @@ export function sanitizeEpisode(input) {
   ep.genre = clip(input?.genre, 60); // пустой жанр — по итоговому mood ниже, а не жанр из blankEpisode
   ep.lead = clip(ep.lead || 'ты', 24) || 'ты';
   // Пустой или неизвестный mood — quiet (редактор повествования, 9.11): нейтральное настроение, без навязанной теплоты.
-  ep.mood = MOODS[input?.mood] ? input.mood : 'quiet';
-  ep.music = TRACKS[input?.music] ? input.music : ep.mood;
+  ep.mood = Object.hasOwn(MOODS, input?.mood ?? '') ? input.mood : 'quiet';
+  ep.music = Object.hasOwn(TRACKS, input?.music ?? '') ? input.music : ep.mood;
   if (!ep.genre) ep.genre = MOODS[ep.mood].genre;
   ep.period = PERIODS[ep.period] ? ep.period : 'day';
   ep.gender = ep.gender === 'f' || ep.gender === 'm' ? ep.gender : null;

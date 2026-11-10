@@ -14,7 +14,7 @@ const listed = (values) => new Map(values.map((v) => [v, v]));
 const KNOWN_CODES = listed([
   // свои коды приложения
   'safety', 'timeout', 'browser', 'tmp_cleanup_pending', 'empty', 'stt_off', 'too_long', 'refusal',
-  'max_tokens', 'bad_json', 'ffmpeg', 'fonts',
+  'max_tokens', 'bad_json', 'bad_response', 'incomplete_response', 'ffmpeg', 'fonts',
   // файловая система и сеть Node
   'ENOENT', 'ENOSPC', 'EACCES', 'EPERM', 'EIO', 'EEXIST', 'EMFILE', 'ENOTDIR', 'EISDIR', 'EBUSY', 'EROFS',
   'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE', 'ERR_STREAM_PREMATURE_CLOSE',
