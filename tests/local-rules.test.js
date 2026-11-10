@@ -12,6 +12,7 @@ import { createApp } from '../server/app.js';
 const data = JSON.parse(await fs.readFile(new URL('../rehearsal/r16-r20.json', import.meta.url), 'utf8'));
 const ex = JSON.parse(await fs.readFile(new URL('../examples/day-quiet.json', import.meta.url), 'utf8'));
 const lv = (t) => assessRisk(t).level;
+const sets = JSON.parse(await fs.readFile(new URL('./fixtures/local-rules-sets.json', import.meta.url), 'utf8'));
 
 test('L01: все 20 сигналов S останавливаются локальным фильтром (без модели)', () => {
   const missed = data.stop.filter((s) => lv(s.text) !== 'urgent').map((s) => s.id);
@@ -21,6 +22,25 @@ test('L01: все 20 сигналов S останавливаются лока�
 test('L02: ни одна гипербола H не останавливается и не даёт concern', () => {
   const hit = data.hyperbole.filter((h) => lv(h.text) !== 'none').map((h) => `${h.id}=${lv(h.text)}`);
   assert.deepEqual(hit, [], 'срабатывания H сдаются редактору, ожидания не переписываются');
+});
+
+// Контроль переобучения (замечание независимого разбора): перефразы групп S, написанные отдельно от фикстур,
+// и бытовые фразы с теми же словами. Разбор на первой версии правил: перефразы 25/80, бытовые 36/42 ложных.
+test('L01: перефразы групп S (не фикстуры) останавливаются', () => {
+  assert.deepEqual(sets.paraphrases.filter((t) => lv(t) !== 'urgent'), []);
+});
+
+test('L02: бытовые фразы со словами-похожими не останавливаются', () => {
+  assert.deepEqual(sets.everyday.filter((t) => lv(t) !== 'none').map((t) => `${t} => ${lv(t)}`), []);
+});
+
+test('L01: длинный текст (6000 знаков из повторов) проверяется быстро — без катастрофического бэктрекинга', () => {
+  for (const chunk of ['легче всем без меня ', 'не хочу больше ', 'без меня на ', 'бьет меня по плечу ', 'а'.repeat(50) + ' ']) {
+    const t = chunk.repeat(Math.ceil(6000 / chunk.length)).slice(0, 6000);
+    const start = performance.now();
+    assessRisk(t);
+    assert.ok(performance.now() - start < 200, chunk);
+  }
 });
 
 test('L02: H рядом с S не ослабляет остановку — все 400 сочетаний в обоих порядках', () => {
