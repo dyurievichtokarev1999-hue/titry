@@ -272,7 +272,7 @@ export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), sal
       });
       // Если удаление упадёт уже после тайм-аута, оператор должен об этом узнать: только код ошибки, без хэша и текстов.
       let timedOut = false;
-      run.catch((e) => { if (timedOut) console.error(`metrics.forget: удаление после тайм-аута не выполнено (${e?.code || 'error'})`); });
+      run.catch((e) => { if (timedOut) logError('metrics.forget.after_timeout', e); });
       return Promise.race([run, timeout]).catch((e) => { if (e?.code === 'timeout') timedOut = true; throw e; }).finally(() => clearTimeout(timer));
     },
   };
@@ -515,7 +515,8 @@ export function telegram(token) {
       body: body instanceof FormData ? body : JSON.stringify(body || {}),
     });
     const data = await res.json().catch(() => ({}));
-    if (!data.ok) throw new Error(`Telegram ${method}: ${data.description || res.status}`);
+    // status — код Telegram (401/403/429…): по нему оператор различает причину в обезличенном журнале.
+    if (!data.ok) throw Object.assign(new Error(`Telegram ${method}: ${data.description || res.status}`), { status: data.error_code || res.status });
     return data.result;
   }
   return {
@@ -569,4 +570,9 @@ async function main() {
   }
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  // Необработанные ошибки — тоже обезличенно: иначе Node напечатает стек с сообщением целиком.
+  process.on('unhandledRejection', (e) => logError('unhandled', e));
+  process.on('uncaughtException', (e) => { logError('uncaught', e); process.exit(1); });
+  main().catch((e) => { logError('main', e); process.exit(1); });
+}

@@ -80,7 +80,9 @@ test('ИР-03: монтажная', async (t) => {
   try {
     const res = await fetch(`http://127.0.0.1:${server.address().port}/api/render`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ episode: example.episode, story: example.story }) });
     assert.equal(res.status, 500);
-    assertClean(lines(), 'http');
+    const body = await res.json();
+    assert.ok(!JSON.stringify(body).includes(MARKER), 'клиенту монтажной не уходит сообщение исключения');
+    assertClean(lines(), 'http POST /api/render');
   } finally { server.close(); await fs.rm(dataDir, { recursive: true, force: true }); }
 });
 
