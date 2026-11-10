@@ -5,7 +5,7 @@
 import { safeCode } from './errlog.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { MOODS, blankEpisode, detectGender, sanitizeEpisode, sourceFound, todayIso, validateEpisode } from '../engine/episode.js';
-import { assessRisk } from './safety.js';
+import { assessRisk, threatSentences, touchesThreat, validateSafeEpisode } from './safety.js';
 
 export const DEFAULT_MODEL = process.env.TITRY_MODEL || 'claude-opus-5-5';
 
@@ -127,18 +127,21 @@ export function escapeStoryTags(story) {
 export function groundDraft(raw, story, { date = todayIso(), period = 'day' } = {}) {
   const dropped = [];
   const rows = [];
+  // Угроза другому человеку не становится титром: строки с опорой на такое предложение отбрасываются.
+  const threats = threatSentences(story);
+  const threat = (...xs) => xs.some((x) => touchesThreat(x, threats));
   for (const r of raw.rows || []) {
-    if (sourceFound(r.source, story)) rows.push({ role: r.role, value: r.value, source: r.source });
+    if (sourceFound(r.source, story) && !threat(r.role, r.value, r.source)) rows.push({ role: r.role, value: r.value, source: r.source });
     else dropped.push(r);
   }
-  const post = raw.post && raw.post.text && sourceFound(raw.post.source, story)
+  const post = raw.post && raw.post.text && sourceFound(raw.post.source, story) && !threat(raw.post.text, raw.post.source)
     ? { text: raw.post.text, source: raw.post.source } : { text: '', source: '' };
   if (raw.post && raw.post.text && !post.text) dropped.push({ role: 'после титров', ...raw.post });
   const mood = Object.hasOwn(MOODS, raw.mood ?? '') ? raw.mood : 'quiet'; // пустой или неизвестный mood — нейтральный quiet
   const ownGender = detectGender(story);
   const ep = sanitizeEpisode({
     ...blankEpisode({ date, mood, period }),
-    title: raw.title, genre: raw.genre, mood, music: mood,
+    title: threat(raw.title) ? '' : raw.title, genre: threat(raw.genre) ? '' : raw.genre, mood, music: mood,
     // род: только если модель и наш разбор слов человека не противоречат друг другу
     gender: ownGender && (raw.grammatical_gender === 'unknown' || raw.grammatical_gender === ownGender) ? ownGender : null,
     rows: rows.slice(0, 6), post,
@@ -240,7 +243,9 @@ export function draftRuleBased(story, { date = todayIso(), period = 'day' } = {}
   const t = String(story).toLowerCase();
   // Настроение не названо — quiet как нейтральное оформление (редактор повествования, 10.11), не угаданное warm.
   const mood = (MOOD_WORDS.find(([re]) => re.test(t)) || [null, 'quiet'])[1];
-  const parts = sentences(story);
+  // Предложения с угрозой другому человеку в заготовку не берутся (правило «угроза не становится титром»).
+  const threats = threatSentences(story);
+  const parts = sentences(story).filter((s) => !touchesThreat(s, threats));
   const used = new Set();
   const rows = [];
   for (const s of parts.slice(0, 6)) {
@@ -300,7 +305,7 @@ export async function makeDraft(story, opts = {}) {
     result = draftRuleBased(text, opts);
     provider = 'manual';
   }
-  const validation = validateEpisode(result.episode, text);
+  const validation = validateSafeEpisode(result.episode, text);
   return { ...result, validation, risk, provider, note };
 }
 

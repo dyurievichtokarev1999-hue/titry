@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS, episodeToText } from '../engine/episode.js';
 import { makeDraft, modelSafetyCheck, hasClaudeCredentials } from './draft.js';
 import { makeGate } from './gate.js';
-import { helpMessage, assessEpisodeRisk } from './safety.js';
+import { helpMessage, assessEpisodeRisk, validateSafeEpisode } from './safety.js';
 import { renderEpisode, ROOT } from './render.js';
 import { logError, safeCode } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS, cleanupVoiceOrphans } from './stt.js';
@@ -336,7 +336,7 @@ export function createBot({
   }
 
   async function showDraft(chatId, s) {
-    s.validation = validateEpisode(s.episode, s.story);
+    s.validation = validateSafeEpisode(s.episode, s.story);
     await tg.send(chatId, draftMessage(s.episode, s.validation), { parse_mode: 'HTML', reply_markup: draftKeyboard(s.episode, s.draftId) });
   }
 
@@ -434,7 +434,7 @@ export function createBot({
     if (s.verdict !== 'ok' || !s.episode) return tg.send(chatId, TEXT.noDraft);
     const risk = assessEpisodeRisk(s.story, s.episode);
     if (risk.level === 'urgent') return stopForSafety(chatId, s, 'urgent', { at: 'render' });
-    const v = validateEpisode(s.episode, s.story);
+    const v = validateSafeEpisode(s.episode, s.story);
     if (!v.ok) { await showDraft(chatId, s); return; }
     const gen = s.draftId;
     const original = s.originalStory || s.story;

@@ -10,7 +10,7 @@ import { MOODS, TRACKS, sanitizeEpisode, validateEpisode, episodeToText } from '
 import { makeDraft, hasClaudeCredentials, DEFAULT_MODEL, modelSafetyCheck } from './draft.js';
 import { renderEpisode, ROOT } from './render.js';
 import { logError, safeCode } from './errlog.js';
-import { loadHelp, helpMessage, assessEpisodeRisk } from './safety.js';
+import { loadHelp, helpMessage, assessEpisodeRisk, validateSafeEpisode } from './safety.js';
 import { makeGate } from './gate.js';
 import { makeLedger, KEY_ENV, KEY_VERSION_ENV } from './ledger.js';
 
@@ -233,7 +233,7 @@ export function createApp({
     'POST /api/validate': async (req) => {
       const body = await readJson(req);
       const ep = sanitizeEpisode(body.episode);
-      return { episode: ep, validation: validateEpisode(ep, String(body.story || '')), text: episodeToText(ep) };
+      return { episode: ep, validation: validateSafeEpisode(ep, String(body.story || '')), text: episodeToText(ep) };
     },
 
     'POST /api/render': async (req) => {
@@ -242,7 +242,7 @@ export function createApp({
       const story = String(body.story || '');
       const risk = assessEpisodeRisk(story, ep);
       if (risk.level === 'urgent') { gate.markSafety(SCOPE, story); return safetyStop(risk); }
-      const v = validateEpisode(ep, story);
+      const v = validateSafeEpisode(ep, story);
       if (!v.ok) return { status: 422, body: { error: 'Исправьте ошибки перед рендером.', validation: v } };
       // Инвариант: после остановки по рассказу ни один запрос с ним не запускает рендер и не отдаёт ролик.
       // Ответ «можно» никогда не снимает остановку — ни повторный, ни пришедший позже из параллельного запроса.
