@@ -24,14 +24,19 @@ test('ежедневный ролик: 24 с, 720×1280, звук, постер 
   const out = path.join(dir, 'daily.mp4');
   const poster = path.join(dir, 'daily.jpg');
   try {
-    // Как в боте: пресет standard, длительность по умолчанию (не задаётся явно).
-    await renderEpisode(ex.episode, { story: ex.story, outPath: out, preset: 'standard', posterPath: poster });
+    // Как в боте (server/bot.js): пресет BOT_PRESET || 'standard', водяной знак по умолчанию,
+    // длительность по умолчанию (не задаётся явно).
+    await renderEpisode(ex.episode, {
+      story: ex.story, outPath: out, posterPath: poster,
+      preset: process.env.BOT_PRESET || 'standard',
+      watermark: process.env.BOT_WATERMARK ?? 'сделано в титрах',
+    });
     const probe = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', out]).toString());
     const v = probe.streams.find((s) => s.codec_type === 'video');
     const a = probe.streams.find((s) => s.codec_type === 'audio');
-    assert.equal(v.width, 720);
-    assert.equal(v.height, 1280);
+    if (!process.env.BOT_PRESET) { assert.equal(v.width, 720); assert.equal(v.height, 1280); }
     assert.ok(a, 'есть звуковая дорожка');
+    assert.ok(Math.abs(Number(a.duration) - 24) < 0.2, `звук на всю длину: ${a.duration}`);
     assert.ok(Math.abs(Number(probe.format.duration) - 24) < 0.2, `длительность ${probe.format.duration}`);
     assert.ok((await fs.stat(poster)).size > 5000, 'постер записан');
   } finally {
