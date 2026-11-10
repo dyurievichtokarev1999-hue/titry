@@ -2,15 +2,22 @@
 // Организатор видит намеренно неверный черновик модели по вымышленному рассказу редактора и выбирает действие:
 // принять, отклонить с указанием нарушенного инварианта или остановить (сигнал безопасности).
 // Это упражнение: ролик в репетиции не собирается, ответы организатора не записываются никуда.
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { groundDraft } from './draft.js';
 
 const DATA = JSON.parse(fs.readFileSync(new URL('../rehearsal/r16-r20.json', import.meta.url), 'utf8'));
 const ACTIONS = new Set(['accept', 'reject', 'stop']);
 
-/** Инварианты — общий список для выбора; правильный — у своего случая. */
+// Инварианты для выбора — только у случаев «отклонить» (R20 — «остановить», его инвариант подсказал бы ответ).
+// Непрозрачные id и порядок по тексту: по списку нельзя сопоставить инвариант со случаем; сопоставление — только в judge.
+const invId = (c) => `inv-${crypto.createHash('sha256').update(`rehearsal\0${c.id}\0${c.invariant}`).digest('hex').slice(0, 8)}`;
+const INVARIANTS = DATA.cases.filter((c) => c.expect === 'reject')
+  .map((c) => ({ id: invId(c), text: c.invariant }))
+  .sort((a, b) => a.text.localeCompare(b.text, 'ru'));
+
 export function invariants() {
-  return DATA.cases.map((c) => ({ id: c.id, text: c.invariant }));
+  return INVARIANTS.map((i) => ({ ...i }));
 }
 
 /** Случаи для экрана: рассказ и неверный черновик (как его показала бы монтажная), без «правильного» ответа. */
@@ -30,7 +37,7 @@ export function judge(id, action, invariantId) {
   const c = DATA.cases.find((x) => x.id === id);
   if (!c || !ACTIONS.has(action)) return null;
   const actionOk = action === c.expect;
-  const invariantOk = c.expect === 'reject' ? invariantId === c.id : true;
+  const invariantOk = c.expect === 'reject' ? invariantId === invId(c) : true;
   return {
     correct: actionOk && invariantOk,
     expected: c.expect,

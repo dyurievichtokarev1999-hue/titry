@@ -174,7 +174,8 @@ export function createApp({
     'GET /api/rehearsal': async () => ({ cases: rehearsalCases(), invariants: invariants() }),
 
     'POST /api/rehearsal/answer': async (req) => {
-      const body = await readJson(req);
+      const raw = await readJson(req);
+      const body = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
       const r = judge(String(body.id || ''), String(body.action || ''), String(body.invariant || ''));
       if (!r) return { status: 400, body: { error: 'Неизвестный случай или действие.' } };
       return r;

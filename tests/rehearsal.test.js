@@ -65,14 +65,21 @@ test('Репетиция в монтажной: R16–R19 — верно тол�
   try {
     const list = await (await fetch(url('/api/rehearsal'))).json();
     assert.deepEqual(list.cases.map((c) => c.id), ['R16', 'R17', 'R18', 'R19', 'R20']);
-    assert.equal(list.invariants.length, 5);
+    // Ответ не раскрыт и через список инвариантов: непрозрачные id, порядок по тексту, без инварианта R20.
+    assert.equal(list.invariants.length, 4);
+    for (const i of list.invariants) assert.match(i.id, /^inv-[0-9a-f]{8}$/);
+    const texts = list.invariants.map((i) => i.text);
+    assert.deepEqual(texts, [...texts].sort((a, b) => a.localeCompare(b, 'ru')));
+    assert.ok(!texts.some((t) => /остановк/i.test(t)), 'инвариант R20 не подсказывает «остановить»');
+    const invOf = (id) => list.invariants.find((i) => i.text === data.cases.find((c) => c.id === id).invariant).id;
     for (const c of list.cases) {
       assert.ok(c.episode && Array.isArray(c.episode.rows), `${c.id}: показан черновик`);
       assert.ok(!('good' in c) && !('invariant' in c) && !('expect' in c), `${c.id}: правильный ответ не раскрыт заранее`);
     }
     for (const id of ['R16', 'R17', 'R18', 'R19']) {
-      assert.equal((await answer(id, 'reject', id)).correct, true, `${id}: отклонить со своим инвариантом`);
-      const other = id === 'R16' ? 'R17' : 'R16';
+      assert.equal((await answer(id, 'reject', id)).correct, false, `${id}: id случая — не id инварианта`);
+      assert.equal((await answer(id, 'reject', invOf(id))).correct, true, `${id}: отклонить со своим инвариантом`);
+      const other = invOf(id === 'R16' ? 'R17' : 'R16');
       const wrongInv = await answer(id, 'reject', other);
       assert.equal(wrongInv.correct, false); assert.equal(wrongInv.invariantOk, false);
       assert.equal((await answer(id, 'accept')).correct, false, `${id}: принять — неверно`);
@@ -80,7 +87,11 @@ test('Репетиция в монтажной: R16–R19 — верно тол�
     }
     assert.equal((await answer('R20', 'stop')).correct, true);
     assert.equal((await answer('R20', 'accept')).correct, false);
-    assert.equal((await answer('R20', 'reject', 'R20')).correct, false);
+    assert.equal((await answer('R20', 'reject', invOf('R16'))).correct, false);
+    for (const b of ['null', '[]', '"x"']) {
+      const r = await fetch(url('/api/rehearsal/answer'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: b });
+      assert.equal(r.status, 400, `тело ${b} — 400, не 500`);
+    }
     const bad = await fetch(url('/api/rehearsal/answer'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: 'R99', action: 'stop' }) });
     assert.equal(bad.status, 400);
     assert.equal(renders, 0, 'в репетиции рендер не вызывается');
