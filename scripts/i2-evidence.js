@@ -21,7 +21,7 @@ process.env.FFMPEG = wrapper;
 const ex = JSON.parse(await fs.readFile(new URL('../examples/day-quiet.json', import.meta.url), 'utf8'));
 const ep = { ...ex.episode, title: MARKER };
 const { renderEpisode, closeRenderer } = await import('../server/render.js');
-const report = { sha: process.env.GITHUB_SHA || null, run: process.env.GITHUB_RUN_ID || null, story: 'examples/day-quiet.json (вымышленный)', marker: MARKER };
+const report = { sha: process.env.HEAD_SHA || process.env.GITHUB_SHA || null, merge_sha: process.env.GITHUB_SHA || null, run: process.env.GITHUB_RUN_ID || null, story: 'examples/day-quiet.json (вымышленный)', marker: MARKER };
 let ok = true;
 try {
   const r = await renderEpisode(ep, { story: ex.story, outPath: path.join(out, 'video.mp4'), posterPath: path.join(out, 'poster.jpg'), preset: 'preview', duration: 16 });
