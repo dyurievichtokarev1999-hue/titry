@@ -219,3 +219,38 @@ test('бот /delete, исход 2: на вымышленном стенде —
     }
   } finally { if (saved === undefined) delete process.env.TITRY_STAND; else process.env.TITRY_STAND = saved; }
 });
+
+test('бот /delete: сочетания — два вида записи; запись + идущая проверка (вымышленный стенд)', async () => {
+  const saved = process.env.TITRY_STAND;
+  process.env.TITRY_STAND = 'fictional';
+  try {
+    // Два вида: technical для одного рассказа, safety для другого — у одного участника.
+    let n = 0;
+    const b = setup({ check: (t) => { n++; if (t.includes('Вечером пила чай')) return true; throw Object.assign(new Error('x'), { code: 'timeout' }); } });
+    await b.story(); await b.play(); await b.play(); // technical для первого рассказа
+    await b.bot.handleUpdate({ message: { chat, text: `${ex.story} Вечером пила чай.` } });
+    for (let k = 0; k <= 4; k++) await b.bot.handleUpdate({ callback_query: { id: 'q', data: `play:${k}`, message: { chat } } });
+    await del(b);
+    assert.equal(b.last(), [
+      'Сессия и статистика по тебе удалены.',
+      'Служебная запись об остановке по безопасности сохранена по правилу теста. В ней нет текста рассказа. [срок не утверждён]',
+      'Служебная запись о технической приостановке сохранена по правилу теста. В ней нет текста рассказа. [срок не утверждён]',
+    ].join('\n'));
+
+    // Известная запись + проверка ещё идёт: вид назван, полный результат не подтверждается.
+    let release; const held = new Promise((r) => { release = r; });
+    let calls = 0;
+    const c = setup({ check: async () => { calls++; if (calls === 1) return true; await held; return false; } });
+    await c.story(); await c.play(); // safety для первого рассказа
+    await c.bot.handleUpdate({ message: { chat, text: `${ex.story} Вечером пила чай.` } });
+    const p = c.bot.handleUpdate({ callback_query: { id: 'q', data: 'play:3', message: { chat } } });
+    await new Promise((r) => setTimeout(r, 20));
+    await del(c);
+    assert.equal(c.last(), [
+      'Сессия и статистика по тебе удалены.',
+      'Служебная запись об остановке по безопасности сохранена по правилу теста. В ней нет текста рассказа. [срок не утверждён]',
+      'Полное удаление не подтверждено.',
+    ].join('\n'));
+    release(); await p;
+  } finally { if (saved === undefined) delete process.env.TITRY_STAND; else process.env.TITRY_STAND = saved; }
+});

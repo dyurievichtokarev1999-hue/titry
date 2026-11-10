@@ -98,3 +98,42 @@ test('B09.6 монтажная: стартовая очистка удаляет
     assert.deepEqual(await fs.readdir(foreign), ['precious.mp4']);
   } finally { await fs.rm(base, { recursive: true, force: true }); }
 });
+
+test('B09.6 монтажная: успешный запуск — хранилище загружено, старые ролики удалены до listen, затем сервер слушает', { timeout: 30000 }, async () => {
+  const { spawn } = await import('node:child_process');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-studio-ok-'));
+  let child;
+  try {
+    const repo = new URL('..', import.meta.url).pathname;
+    for (const d of ['server', 'engine']) await fs.cp(path.join(repo, d), path.join(root, d), { recursive: true });
+    for (const d of ['studio', 'config', 'brand', 'examples', 'assets', 'node_modules']) {
+      await fs.symlink(path.join(repo, d), path.join(root, d)).catch(() => {});
+    }
+    await fs.copyFile(path.join(repo, 'package.json'), path.join(root, 'package.json'));
+    const out = path.join(root, 'data', 'out');
+    await fs.mkdir(out, { recursive: true });
+    await fs.writeFile(path.join(out, 'old.mp4'), 'x'); await fs.writeFile(path.join(out, 'old.jpg'), 'x');
+    const http = await import('node:http');
+    const free = await new Promise((r) => { const sv = http.createServer().listen(0, '127.0.0.1', () => { const p = sv.address().port; sv.close(() => r(p)); }); });
+    const seen = await new Promise((resolve, reject) => {
+      child = spawn(process.execPath, [path.join(root, 'server', 'app.js')], {
+        env: { ...process.env, PORT: String(free), TITRY_BLOCKED_HMAC_KEY: 'test-only-key-not-a-secret', TITRY_BLOCKED_KEY_VERSION: 'v-entry-test' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let buf = '';
+      child.stdout.on('data', async (d) => {
+        buf += d;
+        // В момент, когда сервер сообщил о приёме задач, очистка уже должна быть завершена.
+        if (/Монтажная: http:\/\/127\.0\.0\.1:\d+\//.test(buf)) resolve({ left: await fs.readdir(out), buf });
+      });
+      child.on('exit', (code) => reject(new Error(`монтажная завершилась с кодом ${code}`)));
+    });
+    assert.deepEqual(seen.left, [], 'ролики и постеры прежнего запуска удалены до listen');
+    const res = await fetch(`http://127.0.0.1:${free}/api/config`);
+    assert.equal(res.status, 200, 'сервер принимает запросы');
+    await fs.stat(path.join(root, 'data', 'state'));  // хранилище создано во временном корне
+  } finally {
+    if (child && child.exitCode === null) { child.removeAllListeners('exit'); child.kill('SIGKILL'); }
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
