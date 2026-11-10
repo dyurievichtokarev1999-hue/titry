@@ -175,7 +175,9 @@ async function requestDraft() {
     $('draftNote').textContent = (r.provider === 'claude' ? 'Черновик от Claude.' : 'Заготовка без ИИ: сократите значения до коротких фраз.') + dropped + (r.note ? ' ' + r.note : '');
     if (r.help) showHelp(r.help);
   } catch (e) {
-    $('draftNote').textContent = e.message;
+    // ИР-02: «проверка недоступна» — экран организатора целиком (тексты редактора повествования, PM-01).
+    const d = e.data;
+    $('draftNote').textContent = d && d.unavailable ? `${d.error}. ${d.message} ${d.next}` : e.message;
   } finally { $('draftBtn').disabled = false; }
 }
 $('draftBtn').addEventListener('click', requestDraft);

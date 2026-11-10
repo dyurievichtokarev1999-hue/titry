@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { MOODS, TRACKS, sanitizeEpisode, validateEpisode, episodeToText } from '../engine/episode.js';
 import { makeDraft, hasClaudeCredentials, DEFAULT_MODEL, modelSafetyCheck } from './draft.js';
 import { renderEpisode, ROOT } from './render.js';
+import { logError, safeCode } from './errlog.js';
 import { loadHelp, helpMessage, assessEpisodeRisk } from './safety.js';
 
 const STATIC = {
@@ -41,9 +42,9 @@ function send(res, code, body, type = 'application/json; charset=utf-8') {
 
 async function readJson(req, limit = 200_000) {
   let size = 0; const chunks = [];
-  for await (const c of req) { size += c.length; if (size > limit) throw Object.assign(new Error('Слишком большой запрос.'), { status: 413 }); chunks.push(c); }
+  for await (const c of req) { size += c.length; if (size > limit) throw Object.assign(new Error('Слишком большой запрос.'), { status: 413, expose: true }); chunks.push(c); }
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); }
-  catch { throw Object.assign(new Error('Некорректный JSON.'), { status: 400 }); }
+  catch { throw Object.assign(new Error('Некорректный JSON.'), { status: 400, expose: true }); }
 }
 
 function safeName(s, fallback) {
@@ -87,7 +88,7 @@ const bool = (v) => v === true;
 export function logRecord(body) {
   const ep = sanitizeEpisode(body.episode);
   const date = strictDate(body.episode && body.episode.date);
-  if (!date) throw Object.assign(new Error('Некорректная дата эпизода: нужен формат ГГГГ-ММ-ДД.'), { status: 400 });
+  if (!date) throw Object.assign(new Error('Некорректная дата эпизода: нужен формат ГГГГ-ММ-ДД.'), { status: 400, expose: true });
   const fb = body.feedback && typeof body.feedback === 'object' ? body.feedback : {};
   const edits = fb.edits && typeof fb.edits === 'object' ? fb.edits : {};
   return {
@@ -144,6 +145,16 @@ export function createApp({
       const result = await makeDraft(body.story, {
         date: body.date, period: body.period, tone: body.tone, provider: body.provider,
       });
+      if (result.unavailable) {
+        // ИР-02: тексты экрана организатора — редактор повествования (PM-01, 9.11), дословно.
+        return { status: 503, body: {
+          unavailable: true,
+          error: 'Проверку завершить не удалось',
+          message: 'Сервис не завершил проверку. Это техническое состояние, а не вывод о содержании рассказа. Ролик пока не создаётся и не отправляется.',
+          next: 'Повторить можно позже, только с полной проверкой заново. На заготовку без ИИ не переключаться. Если для рассказа ранее подтверждена остановка, повтор не снимает её.',
+          code: result.code,
+        } };
+      }
       if (!result.episode) {
         if (result.risk.byModel) blocked.add(key);
         return { risk: result.risk, help: helpMessage(result.risk.level) };
@@ -276,9 +287,11 @@ export function createApp({
       if (req.method === 'GET' || req.method === 'HEAD') return serveStatic(req, res, url.pathname);
       send(res, 405, { error: 'Метод не поддерживается.' });
     } catch (e) {
-      console.error(e.message);
-      const status = e.status || (e.code === 'safety' ? 422 : 500);
-      send(res, status, { error: e.status || e.code === 'safety' ? e.message : 'Ошибка сервера: ' + e.message, validation: e.validation });
+      logError(routes[key] ? `http ${key}` : 'http', e);
+      // Клиенту — только свои фиксированные тексты (expose) и текст остановки. Сообщения других исключений
+      // (fs, ffmpeg, внешние API) могут содержать пути или фрагменты рассказа: вместо них — общий текст с кодом.
+      if (e.expose || e.code === 'safety') return send(res, e.code === 'safety' ? 422 : e.status, { error: e.message, validation: e.validation });
+      send(res, 500, { error: `Ошибка сервера (${safeCode(e)}). Попробуйте ещё раз.`, validation: e.validation });
     }
   });
   return server;

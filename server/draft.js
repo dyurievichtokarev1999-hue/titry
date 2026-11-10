@@ -2,6 +2,7 @@
 //  1) Claude — основной: грамматика титров, структурированный JSON, цитата-источник для каждой строки;
 //  2) заготовка без ИИ — для консьерж-теста и как запасной путь, если модель недоступна.
 // В обоих случаях каждая строка проверяется по рассказу: без цитаты в рассказе строка в титры не попадает.
+import { safeCode } from './errlog.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { MOODS, blankEpisode, detectGender, sanitizeEpisode, sourceFound, todayIso, validateEpisode } from '../engine/episode.js';
 import { assessRisk } from './safety.js';
@@ -21,7 +22,7 @@ export const SYSTEM_PROMPT = `Ты — монтажёр «Титров». Чел
 - genre: жанр, 1–3 слова, как в кино: «тёплая драма», «тихая драма», «драма без развязки», «камерное кино», «комедия положений». Не диагноз и не оценка.
 - rows: от 3 до 6 строк «роль — значение». Роль: одно-два слова-существительных из рассказа (Письмо, Друг, Встреча, Злость, Окно). Значение: короткая именная фраза до 6 слов («долгая правка, отправлено», «вечерний звонок»).
 - post: «сцена после титров» — одна короткая строка о том, что остаётся на потом или с чем человек остаётся сегодня. Только из его слов. Если ничего подходящего нет, верни пустой text.
-- mood: warm, sad, anger или quiet — по тому, что человек сам сказал о дне. Если не сказал, warm для обычного дня, quiet для дня без сил.
+- mood: warm, sad, anger или quiet — по тому, что человек сам сказал о своём дне. Если настроение не названо или нельзя выбрать одно без догадки, quiet как нейтральное оформление. quiet не означает, что человек спокоен. Чувства, названные в рассказе, сохраняй в строках; не добавляй чувств из-за выбранной плёнки. Сарказм учитывай только когда его пояснил сам автор.
 - grammatical_gender: f или m, только если рассказчик сам говорит о себе в прошедшем времени («я устала» → f, «я устал» → m). Реплики других людей в кавычках или после «написал(а):», «сказал(а):» не учитывай. Если формы противоречат друг другу или граница чужой реплики неясна — unknown. Не угадывай по имени.
 - safety_flag: true, если в рассказе есть желание умереть, самоповреждение, мысли о самоубийстве или прямая опасность для человека. Иначе false.
   Устойчивые выражения-гиперболы сами по себе сигналом не считаются: «умру от стыда», «чуть не умер со смеху», «сдохнуть можно от скуки», «готов убить себя за эту ошибку», «не хочу жить в этой квартире». Но если рядом есть усталость от жизни, безнадёжность, прощание, мысли о том, что без человека всем будет лучше, или любое сомнение — ставь true. Пропустить настоящий сигнал намного хуже, чем перестраховаться.
@@ -94,9 +95,16 @@ export async function modelSafetyCheck(story, { client, model = DEFAULT_MODEL } 
     system: SAFETY_PROMPT,
     messages: [{ role: 'user', content: `<story>\n${escapeStoryTags(story)}\n</story>` }],
   });
-  if (response.stop_reason === 'refusal') return true;
-  const text = response.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
-  try { return JSON.parse(text).safety_flag !== false; } catch { return true; }
+  // Закрытый отказ (критик реализации и владелец, 10.11 11:05): «нет риска» — только полный ответ
+  // (stop_reason end_turn), ровно один текстовый блок, объект и строго safety_flag === false.
+  // Всё остальное, в том числе обрезанный ответ с валидным {"safety_flag":false}, — опасность.
+  const texts = Array.isArray(response?.content) ? response.content.filter((b) => b && b.type === 'text' && typeof b.text === 'string') : [];
+  const odd = Array.isArray(response?.content) && response.content.some((b) => b && b.type === 'text' && typeof b.text !== 'string');
+  if (response?.stop_reason !== 'end_turn' || texts.length !== 1 || odd) return true;
+  let raw;
+  try { raw = JSON.parse(texts[0].text); } catch { return true; }
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return true;
+  return raw.safety_flag !== false;
 }
 
 /** Рассказ не может закрыть или открыть служебный блок <story>: теги внутри него обезвреживаются. */
@@ -115,7 +123,7 @@ export function groundDraft(raw, story, { date = todayIso(), period = 'day' } = 
   const post = raw.post && raw.post.text && sourceFound(raw.post.source, story)
     ? { text: raw.post.text, source: raw.post.source } : { text: '', source: '' };
   if (raw.post && raw.post.text && !post.text) dropped.push({ role: 'после титров', ...raw.post });
-  const mood = MOODS[raw.mood] ? raw.mood : 'warm';
+  const mood = Object.hasOwn(MOODS, raw.mood ?? '') ? raw.mood : 'quiet'; // пустой или неизвестный mood — нейтральный quiet
   const ownGender = detectGender(story);
   const ep = sanitizeEpisode({
     ...blankEpisode({ date, mood, period }),
@@ -155,20 +163,34 @@ export async function draftWithClaude(story, { tone = 'quiet', date, period = 'd
     e.category = response.stop_details && response.stop_details.category;
     throw e;
   }
-  if (response.stop_reason === 'max_tokens') {
-    const e = new Error('Ответ модели обрезан.');
-    e.code = 'max_tokens';
-    throw e;
+  // stop_reason (критик реализации, 10.11 11:05): разрешение — только из полного ответа (end_turn) с ровно
+  // одним текстовым блоком. safety_flag: true останавливает при любом stop_reason — обрезанный ответ,
+  // говорящий «опасно», не ослабляется. Остальное — закрытый отказ (unavailable), не «проверка пройдена».
+  const texts = Array.isArray(response?.content) ? response.content.filter((b) => b && b.type === 'text' && typeof b.text === 'string') : [];
+  let raw, parsed = false;
+  try { raw = JSON.parse(texts.map((b) => b.text).join('')); parsed = true; } catch { /* ниже */ }
+  if (parsed && raw && typeof raw === 'object' && !Array.isArray(raw) && raw.safety_flag === true) {
+    return { safetyFlag: true, model: response.model, usage: response.usage };
   }
-  const text = response.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
-  let raw;
-  try { raw = JSON.parse(text); } catch {
+  if (response?.stop_reason === 'max_tokens') throw Object.assign(new Error('Ответ модели обрезан.'), { code: 'max_tokens' });
+  if (response?.stop_reason !== 'end_turn') throw Object.assign(new Error('Ответ модели не завершён.'), { code: 'incomplete_response' });
+  const odd = response.content.some((b) => b && b.type === 'text' && typeof b.text !== 'string');
+  if (texts.length !== 1 || odd) throw Object.assign(new Error('Ответ модели не по контракту.'), { code: 'bad_response' });
+  if (!parsed) {
     const e = new Error('Модель вернула не JSON.');
     e.code = 'bad_json';
     throw e;
   }
+  // Проверка формы до groundDraft и любой заготовки (контракт владельца 10.11, 09:05; QA PR #5).
+  // Отсутствие явного разрешения — не «проверка пройдена»: safety_flag должен быть строго булевым,
+  // никакого приведения. Неверная форма — bad_response, makeDraft вернёт unavailable без черновика.
+  const badResponse = () => Object.assign(new Error('Ответ модели не по контракту.'), { code: 'bad_response' });
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) throw badResponse();
+  if (typeof raw.safety_flag !== 'boolean') throw badResponse();
+  if (raw.safety_flag === true) return { safetyFlag: true, model: response.model, usage: response.usage };
+  if (!Array.isArray(raw.rows) || raw.rows.some((r) => r === null || typeof r !== 'object' || Array.isArray(r))) throw badResponse();
   const grounded = groundDraft(raw, story, { date, period });
-  return { ...grounded, safetyFlag: !!raw.safety_flag, model: response.model, usage: response.usage };
+  return { ...grounded, safetyFlag: false, model: response.model, usage: response.usage };
 }
 
 // ── Заготовка без ИИ ─────────────────────────────────────────────────────────
@@ -205,7 +227,8 @@ function roleFor(text, used) {
  */
 export function draftRuleBased(story, { date = todayIso(), period = 'day' } = {}) {
   const t = String(story).toLowerCase();
-  const mood = (MOOD_WORDS.find(([re]) => re.test(t)) || [null, 'warm'])[1];
+  // Настроение не названо — quiet как нейтральное оформление (редактор повествования, 10.11), не угаданное warm.
+  const mood = (MOOD_WORDS.find(([re]) => re.test(t)) || [null, 'quiet'])[1];
   const parts = sentences(story);
   const used = new Set();
   const rows = [];
@@ -257,9 +280,10 @@ export async function makeDraft(story, opts = {}) {
         provider = 'manual';
       }
     } catch (e) {
-      note = `Черновик ИИ недоступен (${e.code || e.status || e.message}). Показана заготовка без ИИ.`;
-      result = draftRuleBased(text, opts);
-      provider = 'manual';
+      // ИР-02 (критик реализации): если модель не ответила, её проверка безопасности тоже не прошла.
+      // Заготовку без ИИ не показываем — только состояние «проверка недоступна», без ролика.
+      // Код — только из списка известных (ИР-03).
+      return { risk, episode: null, provider: null, unavailable: true, code: safeCode(e) };
     }
   } else {
     result = draftRuleBased(text, opts);

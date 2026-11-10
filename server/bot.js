@@ -9,6 +9,7 @@ import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode
 import { makeDraft } from './draft.js';
 import { helpMessage, assessEpisodeRisk } from './safety.js';
 import { renderEpisode, ROOT } from './render.js';
+import { logError } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS } from './stt.js';
 
 const MOOD_ORDER = ['warm', 'sad', 'anger', 'quiet'];
@@ -28,6 +29,8 @@ export const TEXT = {
   working: 'Монтирую…',
   rendering: 'Собираю ролик. Обычно это меньше минуты.',
   queue: (n) => `Собираю ролик. Перед тобой в очереди: ${n}.`,
+  // ИР-04: очередь заполнена, черновик сохранён. Текст редактора повествования (10.11), дословно.
+  busy: 'Сейчас очередь заполнена. Черновик остаётся здесь. Нажми «▶ Смотреть титры» ещё раз чуть позже.',
   voiceOff: 'Голосовые пока не подключены. Напиши, пожалуйста, текстом.',
   voiceLong: `Голосовое длиннее ${Math.round(MAX_VOICE_SECONDS / 60)} минут. Для одной сцены хватит минуты.`,
   voiceEmpty: 'Не получилось разобрать голосовое. Можно повторить или написать текстом.',
@@ -46,6 +49,10 @@ export const TEXT = {
   miss: 'Понятно. Можно поправить строки, плёнку или музыку и собрать заново. Или просто закончить на сегодня.',
   heavier: 'Спасибо за честный ответ. Можно остановиться прямо сейчас, это нормально.',
   deleted: 'Готово: сессия и статистика по тебе удалены.',
+  // ИР-02: проверка недоступна — текст редактора повествования (PM-01, 9.11) дословно. Без срока и без карточки помощи.
+  checkUnavailable: 'Ролик задерживается: сервис не завершил проверку. Сейчас отправить его не получится. Ждать в чате и отвечать на это сообщение не нужно.',
+  // Черновик текста, на вычитку редактору повествования: честно, без «всё удалено», без обещаний сроков.
+  deleteFailed: 'Сессия удалена, а удаление статистики по тебе подтвердить не получилось. Попробуй /delete ещё раз чуть позже.',
   renderFail: 'Не получилось собрать ролик. Попробуй ещё раз чуть позже.',
   draftFail: 'Не получилось собрать черновик. Попробуй ещё раз чуть позже.',
 };
@@ -146,7 +153,9 @@ const FEEDBACK_KB = {
 
 // ── Метрики без содержимого рассказов ────────────────────────────────────────
 
-export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), salt = process.env.METRICS_SALT || 'titry-dev-salt') {
+export const MAX_RENDER_WAITING = 3;
+
+export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), salt = process.env.METRICS_SALT || 'titry-dev-salt', { forgetTimeoutMs = 10000 } = {}) {
   const hash = (id) => crypto.createHmac('sha256', salt).update(String(id)).digest('hex').slice(0, 16);
   // ИР-06 (критик реализации 9.11): завершённый forget — барьер для уже принятых записей.
   // 1) Чтение-перезапись и дозапись файла идут одной очередью — строка другого человека не теряется.
@@ -159,30 +168,118 @@ export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), sal
     return run;
   };
   const generation = new Map(); // хэш → номер поколения; текстов здесь нет
+  // G0-fixes: запись поколения нужна, только пока есть незавершённые log/forget этого человека.
+  // Когда их нет, запись удаляется — карта не растёт с каждым /delete.
+  const busy = new Map(); // хэш → число незавершённых операций
+  // Временные копии журнала (критик реализации 10.11): если копию не удалось удалить, это не скрывается.
+  // Копии запоминаются и удаляются при следующих операциях — ограниченное число попыток. После перезапуска
+  // оставшиеся копии этого журнала находятся по имени при первой операции. В журнал ошибок — только код,
+  // без пути, хэшей и текстов.
+  const TMP_CLEANUP_ATTEMPTS = 3;
+  // Только копии этого журнала: «<имя>.tmp-<pid>». Посторонние файлы с похожим именем не трогаем.
+  file = path.resolve(file); // один вид пути для копий из папки и для своей копии
+  const tmpPattern = new RegExp('^' + path.basename(file).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\.tmp-\\d+$');
+  const leftovers = new Map(); // имя временной копии → число неудачных попыток удаления
+  let scanned = false;
+  let scanFailures = 0;
+  const cleanupFailed = () => console.error('metrics: временная копия журнала не удалена (metrics_tmp_cleanup_failed)');
+  // explicit = вызов из forget: человек сам просит удалить данные, поэтому пробуем и сверх лимита.
+  // Лимит действует только на фоновые попытки при записи метрик — без бесконечных повторов в каждом log.
+  async function cleanLeftovers(explicit = false) {
+    if (!scanned && (explicit || scanFailures < TMP_CLEANUP_ATTEMPTS)) {
+      try {
+        const entries = await fs.readdir(path.dirname(file), { withFileTypes: true });
+        for (const d of entries) if (d.isFile() && tmpPattern.test(d.name)) leftovers.set(path.join(path.dirname(file), d.name), 0);
+        scanned = true;
+      } catch (e) {
+        if (e.code === 'ENOENT') scanned = true; // папки ещё нет — копий тоже
+        else {
+          scanFailures++;
+          console.error(scanFailures < TMP_CLEANUP_ATTEMPTS
+            ? 'metrics: не удалось проверить временные копии журнала (metrics_tmp_scan_failed)'
+            : 'metrics: проверка временных копий журнала не удалась после повторов (metrics_tmp_scan_exhausted)');
+        }
+      }
+    }
+    for (const [tmp, failures] of leftovers) {
+      if (failures >= TMP_CLEANUP_ATTEMPTS && !explicit) continue; // фоновые попытки исчерпаны: уже сообщено
+      try { await fs.rm(tmp, { force: true }); leftovers.delete(tmp); }
+      catch {
+        leftovers.set(tmp, failures + 1);
+        if (failures + 1 === TMP_CLEANUP_ATTEMPTS) console.error('metrics: временная копия журнала не удалена после повторов (metrics_tmp_cleanup_exhausted)');
+      }
+    }
+  }
+  const serialClean = (fn, explicit = false) => serial(async () => { await cleanLeftovers(explicit); return fn(); });
+  // Удаление подтверждено, только если копий журнала не осталось и папка проверена:
+  // в копии могут лежать строки этого же человека.
+  const cleanupPending = () => !scanned || leftovers.size > 0;
+  const enter = (h) => busy.set(h, (busy.get(h) || 0) + 1);
+  const leave = (h) => {
+    const n = (busy.get(h) || 1) - 1;
+    if (n > 0) { busy.set(h, n); return; }
+    busy.delete(h);
+    generation.delete(h);
+  };
   return {
     hash,
+    /** Только для тестов: сколько людей сейчас держат запись поколения. */
+    get trackedUsers() { return generation.size; },
+    /** Только для тестов и диагностики: сколько временных копий ждут удаления. */
+    get pendingTmpCleanup() { return leftovers.size; },
     async log(chatId, event, extra = {}) {
       const h = hash(chatId);
-      const gen = generation.get(h) || 0;
-      const row = JSON.stringify({ at: new Date().toISOString(), user: h, event, ...extra }) + '\n';
-      await fs.mkdir(path.dirname(file), { recursive: true });
-      return serial(async () => {
-        if ((generation.get(h) || 0) !== gen) return; // человек удалил данные, пока запись ждала
-        await fs.appendFile(file, row);
-      });
+      enter(h);
+      try {
+        const gen = generation.get(h) || 0;
+        const row = JSON.stringify({ at: new Date().toISOString(), user: h, event, ...extra }) + '\n';
+        await fs.mkdir(path.dirname(file), { recursive: true });
+        return await serialClean(async () => {
+          if ((generation.get(h) || 0) !== gen) return; // человек удалил данные, пока запись ждала
+          await fs.appendFile(file, row);
+        });
+      } finally { leave(h); }
     },
+    /**
+     * Удалить строки человека. Отклоняется, если удаление не подтверждено: сбой чтения (кроме «файла нет»),
+     * записи или rename, либо очередь не дошла до удаления за forgetTimeoutMs. Тогда вызывающий
+     * не должен говорить «всё удалено». По тайм-ауту удаление остаётся в очереди и выполнится позже.
+     */
     forget(chatId) {
       const h = hash(chatId);
+      enter(h);
       generation.set(h, (generation.get(h) || 0) + 1);
-      return serial(async () => {
+      const run = serialClean(async () => {
         let text = '';
-        try { text = await fs.readFile(file, 'utf8'); } catch { return; }
+        const pendingError = () => Object.assign(new Error('Строки удалены из журнала, но временные копии журнала не убраны.'), { code: 'tmp_cleanup_pending', tmpCleanup: 'pending' });
+        try { text = await fs.readFile(file, 'utf8'); } catch (e) {
+          if (e.code !== 'ENOENT') throw e;
+          if (cleanupPending()) throw pendingError(); // журнала нет, но копия может хранить строки человека
+          return;
+        }
         const kept = text.split('\n').filter((l) => l && !l.includes(`"user":"${h}"`));
         // Атомарно: временный файл и rename — сбой посреди записи не обрезает строки других людей.
         const tmpFile = `${file}.tmp-${process.pid}`;
-        await fs.writeFile(tmpFile, kept.length ? kept.join('\n') + '\n' : '');
-        await fs.rename(tmpFile, file);
+        try {
+          await fs.writeFile(tmpFile, kept.length ? kept.join('\n') + '\n' : '');
+          await fs.rename(tmpFile, file);
+          leftovers.delete(tmpFile); // копию с этим именем унёс rename
+        } catch (e) {
+          // Не оставляем копию чужих строк. Если и удалить её не вышло — сообщаем оператору и повторим позже.
+          try { await fs.rm(tmpFile, { force: true }); leftovers.delete(tmpFile); }
+          catch { if (!leftovers.has(tmpFile)) leftovers.set(tmpFile, 1); cleanupFailed(); e.tmpCleanup = 'failed'; }
+          throw e;
+        }
+        if (cleanupPending()) throw pendingError();
+      }, true).finally(() => leave(h));
+      let timer;
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(Object.assign(new Error('Удаление метрик не подтверждено за отведённое время.'), { code: 'timeout' })), forgetTimeoutMs);
       });
+      // Если удаление упадёт уже после тайм-аута, оператор должен об этом узнать: только код ошибки, без хэша и текстов.
+      let timedOut = false;
+      run.catch((e) => { if (timedOut) logError('metrics.forget.after_timeout', e); });
+      return Promise.race([run, timeout]).catch((e) => { if (e?.code === 'timeout') timedOut = true; throw e; }).finally(() => clearTimeout(timer));
     },
   };
 }
@@ -194,7 +291,7 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
   // Ключ рассказа: запрет по безопасности привязан к самому рассказу, а не к интерфейсу.
   const storyKey = (story) => crypto.createHash('sha256').update(String(story).toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim()).digest('hex');
   let queue = Promise.resolve();
-  let waiting = 0;
+  let waiting = 0; // рендеры в работе и в ожидании
 
   const session = (chatId) => {
     let s = sessions.get(chatId);
@@ -250,13 +347,21 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
     try {
       r = await draft(story, { date: todayIso(now()), period: s.period, tone: 'quiet' });
     } catch (e) {
-      console.error('draft', e);
+      logError('draft', e);
       if (!current()) return;
       s.stage = 'idle';
       await tg.send(chatId, TEXT.draftFail);
       return;
     }
     if (!alive(chatId, s)) return; // удалённая сессия не оживает из отложенного ответа
+    if (r.unavailable) {
+      // ИР-02: проверка не завершена — техническое состояние, не остановка: рассказ не запоминается
+      // как запрещённый, карточка помощи не показывается, черновика и ролика нет.
+      logError('draft', { code: r.code });
+      if (!current()) return;
+      s.stage = 'idle';
+      return tg.send(chatId, TEXT.checkUnavailable);
+    }
     if (!r.episode) {
       // Остановка важнее всего, даже если ответ устарел: рассказ запоминается как запрещённый.
       if (s.draftId === gen) return stopForSafety(chatId, s, r.risk.level, { byModel: r.risk.byModel });
@@ -292,6 +397,8 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
     const gen = s.draftId;
     const original = s.originalStory || s.story;
     const current = () => alive(chatId, s) && s.draftId === gen && s.verdict === 'ok' && !isBlocked(s, original);
+    // ИР-04 (критик реализации): один рендер идёт, до трёх ждут. Дальше — явный ответ «занято», без долговечной очереди.
+    if (waiting >= 1 + MAX_RENDER_WAITING) return tg.send(chatId, TEXT.busy); // состояние сессии не меняется
     s.stage = 'rendering';
     const ahead = waiting;
     waiting++;
@@ -320,7 +427,7 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
       await metrics.log(chatId, 'render', { seconds: Math.round(r.seconds), mood: ep.mood, music: ep.music, edits: s.edits || 0 });
       if (current()) s.stage = 'watched';
     } catch (e) {
-      console.error('render', e);
+      logError('render', e);
       if (current()) {
         s.stage = 'draft';
         await tg.send(chatId, TEXT.renderFail);
@@ -339,7 +446,12 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
 
     if (text === '/start') { s.stage = 'idle'; s.period = 'day'; await metrics.log(chatId, 'start'); return tg.send(chatId, TEXT.start); }
     if (text === '/year') { s.stage = 'idle'; s.period = 'year'; await metrics.log(chatId, 'year'); return tg.send(chatId, TEXT.year); }
-    if (text === '/delete') { sessions.delete(chatId); await metrics.forget(chatId); return tg.send(chatId, TEXT.deleted); }
+    if (text === '/delete') {
+      sessions.delete(chatId);
+      // Честный ответ: «удалено» — только если удаление метрик подтверждено (G0-fixes, критик реализации).
+      try { await metrics.forget(chatId); } catch { return tg.send(chatId, TEXT.deleteFailed); }
+      return tg.send(chatId, TEXT.deleted);
+    }
     if (text === '/help') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });
 
     if (s.stage === 'rendering') return tg.send(chatId, TEXT.rendering);
@@ -350,7 +462,7 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
       await tg.action(chatId, 'typing');
       let story = '';
       try { story = await transcribe(await tg.fileBuffer(msg.voice.file_id), { duration: msg.voice.duration }); }
-      catch (e) { console.error('stt', e); }
+      catch (e) { logError('stt', e); }
       if (!alive(chatId, s)) return; // /delete во время распознавания: ничего не отвечаем
       if (!story) return tg.send(chatId, TEXT.voiceEmpty);
       await tg.send(chatId, `Расшифровка:\n«${story}»`);
@@ -402,7 +514,7 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
     try {
       if (u.message) await onMessage(u.message);
       else if (u.callback_query) await onCallback(u.callback_query);
-    } catch (e) { console.error('update', e); }
+    } catch (e) { logError('update', e); }
   }
 
   return { handleUpdate, sessions, sweep };
@@ -419,7 +531,8 @@ export function telegram(token) {
       body: body instanceof FormData ? body : JSON.stringify(body || {}),
     });
     const data = await res.json().catch(() => ({}));
-    if (!data.ok) throw new Error(`Telegram ${method}: ${data.description || res.status}`);
+    // status — код Telegram (401/403/429…): по нему оператор различает причину в обезличенном журнале.
+    if (!data.ok) throw Object.assign(new Error(`Telegram ${method}: ${data.description || res.status}`), { status: data.error_code || res.status });
     return data.result;
   }
   return {
@@ -467,10 +580,15 @@ async function main() {
         bot.handleUpdate(u); // не ждём: рендер одного пользователя не блокирует ответы другим
       }
     } catch (e) {
-      console.error(e.message);
+      logError('poll', e);
       await new Promise((r) => setTimeout(r, 3000));
     }
   }
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  // Необработанные ошибки — тоже обезличенно: иначе Node напечатает стек с сообщением целиком.
+  process.on('unhandledRejection', (e) => logError('unhandled', e));
+  process.on('uncaughtException', (e) => { logError('uncaught', e); process.exit(1); });
+  main().catch((e) => { logError('main', e); process.exit(1); });
+}

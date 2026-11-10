@@ -71,7 +71,8 @@ test('сценарий бота: рассказ → правка → ролик 
   await bot.handleUpdate({ callback_query: { id: 'q2', data: `play:${playId(tg)}`, message: { chat } } });
   assert.equal(rendered.length, 1);
   assert.equal(rendered[0].rows[0].value, 'отправлено');
-  assert.equal(rendered[0].mood, 'sad');
+  // Настроение не названо → quiet (10.11); кнопка плёнки переключает по кругу quiet → warm.
+  assert.equal(rendered[0].mood, 'warm');
   assert.ok(tg.sent.some((m) => m.type === 'video'));
   await bot.handleUpdate({ callback_query: { id: 'q3', data: 'fb:heavier', message: { chat } } });
   assert.ok(tg.sent.some((m) => /112/.test(m.text)));

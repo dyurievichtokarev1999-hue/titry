@@ -42,13 +42,19 @@ async function getBrowser() {
     const require = createRequire(import.meta.url);
     const { chromium } = require('playwright');
     const executablePath = process.env.TITRY_CHROMIUM || undefined;
-    browserPromise = chromium.launch(executablePath ? { executablePath } : {});
+    // Неудачный запуск не кэшируем: следующий рендер попробует снова, а ошибка понятна без стека Playwright.
+    browserPromise = chromium.launch(executablePath ? { executablePath } : {}).catch((cause) => {
+      browserPromise = null;
+      const where = executablePath ? `TITRY_CHROMIUM=${executablePath}` : 'браузер Playwright по умолчанию';
+      throw Object.assign(new Error(`Chromium не запустился (${where}). Укажите установленный Chromium в TITRY_CHROMIUM или установите браузер под версию Playwright из package-lock.json.`), { code: 'browser', cause });
+    });
   }
   return browserPromise;
 }
 
 export async function closeRenderer() {
-  if (browserPromise) { const b = await browserPromise; browserPromise = null; await b.close(); }
+  // После неудачного запуска закрывать нечего: ошибку уже получил рендер, здесь её не повторяем.
+  if (browserPromise) { const b = await browserPromise.catch(() => null); browserPromise = null; if (b) await b.close(); }
 }
 
 function runFfmpeg(args, feed) {
@@ -57,7 +63,7 @@ function runFfmpeg(args, feed) {
     let err = '';
     p.stderr.on('data', (d) => { err = (err + d).slice(-4000); });
     p.on('error', reject);
-    p.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg завершился с кодом ${code}: ${err}`))));
+    p.on('close', (code) => (code === 0 ? resolve() : reject(Object.assign(new Error(`ffmpeg завершился с кодом ${code}: ${err}`), { code: 'ffmpeg' }))));
     feed(p.stdin).then(() => p.stdin.end(), (e) => { p.kill('SIGKILL'); reject(e); });
   });
 }
@@ -87,11 +93,13 @@ export async function renderEpisode(ep, options = {}) {
   const outPath = path.resolve(options.outPath || path.join(ROOT, 'data', 'out', `titry-${Date.now()}.mp4`));
   await fs.mkdir(path.dirname(outPath), { recursive: true });
 
-  const server = await serveEngine();
+  // Сначала браузер, потом сервер: если Chromium не запустился, открытого сервера не остаётся и процесс завершается сам.
   const browser = await getBrowser();
-  const page = await browser.newPage({ viewport: { width: 200, height: 200 } });
+  const server = await serveEngine();
+  let page = null;
   const started = Date.now();
   try {
+    page = await browser.newPage({ viewport: { width: 200, height: 200 } });
     await page.goto(`http://127.0.0.1:${server.address().port}/render.html`);
     await page.waitForFunction(() => window.titryReady === true);
     const fontsOk = await page.evaluate(([e, o]) => window.titrySetup(e, o), [ep, {
@@ -99,7 +107,7 @@ export async function renderEpisode(ep, options = {}) {
       duration: T.duration, still: !!options.still, watermark: options.watermark ?? false,
       timing: options.timing || 'v1', typo: options.typo || 'v1', ease: options.ease || 'smooth',
     }]);
-    if (!fontsOk) throw new Error('Шрифты бренда не загрузились, рендер остановлен, чтобы не выпустить ролик с системным шрифтом.');
+    if (!fontsOk) throw Object.assign(new Error('Шрифты бренда не загрузились, рендер остановлен, чтобы не выпустить ролик с системным шрифтом.'), { code: 'fonts' });
 
     const track = TRACKS[ep.music] || TRACKS.none;
     const audioFile = track.file ? path.join(AUDIO, track.file) : null;
@@ -132,7 +140,7 @@ export async function renderEpisode(ep, options = {}) {
     }
     return { outPath, posterPath, seconds: (Date.now() - started) / 1000, frames, duration: T.duration };
   } finally {
-    await page.close();
     server.close();
+    if (page) await page.close().catch(() => {});
   }
 }

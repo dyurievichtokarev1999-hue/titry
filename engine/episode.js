@@ -92,7 +92,7 @@ export function detectGender(story) {
 }
 
 /** Создать пустой эпизод с разумными умолчаниями. */
-export function blankEpisode({ date = todayIso(), mood = 'warm', period = 'day' } = {}) {
+export function blankEpisode({ date = todayIso(), mood = 'quiet', period = 'day' } = {}) {
   return {
     version: 1,
     period,
@@ -207,10 +207,12 @@ export function sanitizeEpisode(input) {
   const ep = { ...base, ...(input || {}) };
   const clip = (s, n) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
   ep.title = clip(ep.title, 80);
-  ep.genre = clip(ep.genre, 60);
+  ep.genre = clip(input?.genre, 60); // пустой жанр — по итоговому mood ниже, а не жанр из blankEpisode
   ep.lead = clip(ep.lead || 'ты', 24) || 'ты';
-  ep.mood = MOODS[ep.mood] ? ep.mood : 'warm';
-  ep.music = TRACKS[ep.music] ? ep.music : ep.mood;
+  // Пустой или неизвестный mood — quiet (редактор повествования, 9.11): нейтральное настроение, без навязанной теплоты.
+  ep.mood = Object.hasOwn(MOODS, input?.mood ?? '') ? input.mood : 'quiet';
+  ep.music = Object.hasOwn(TRACKS, input?.music ?? '') ? input.music : ep.mood;
+  if (!ep.genre) ep.genre = MOODS[ep.mood].genre;
   ep.period = PERIODS[ep.period] ? ep.period : 'day';
   ep.gender = ep.gender === 'f' || ep.gender === 'm' ? ep.gender : null;
   ep.rows = (Array.isArray(ep.rows) ? ep.rows : []).slice(0, 10).map((r) => ({
