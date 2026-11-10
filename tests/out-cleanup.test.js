@@ -115,6 +115,10 @@ test('B09.6 монтажная: успешный запуск — хранили
     await fs.writeFile(path.join(out, 'old.mp4'), 'x'); await fs.writeFile(path.join(out, 'old.jpg'), 'x');
     const http = await import('node:http');
     const free = await new Promise((r) => { const sv = http.createServer().listen(0, '127.0.0.1', () => { const p = sv.address().port; sv.close(() => r(p)); }); });
+    const repoData = path.join(repo, 'data');
+    const snapshot = async () => (await fs.readdir(repoData, { recursive: true }).catch(() => [])).sort();
+    const before = await snapshot();
+    let errText = '';
     const seen = await new Promise((resolve, reject) => {
       child = spawn(process.execPath, [path.join(root, 'server', 'app.js')], {
         env: { ...process.env, PORT: String(free), TITRY_BLOCKED_HMAC_KEY: 'test-only-key-not-a-secret', TITRY_BLOCKED_KEY_VERSION: 'v-entry-test' },
@@ -126,9 +130,12 @@ test('B09.6 монтажная: успешный запуск — хранили
         // В момент, когда сервер сообщил о приёме задач, очистка уже должна быть завершена.
         if (/Монтажная: http:\/\/127\.0\.0\.1:\d+\//.test(buf)) resolve({ left: await fs.readdir(out), buf });
       });
-      child.on('exit', (code) => reject(new Error(`монтажная завершилась с кодом ${code}`)));
+      child.stderr.on('data', (d) => { errText = (errText + d).slice(-2000); });
+      child.on('error', reject);
+      child.on('exit', (code) => reject(new Error(`монтажная завершилась с кодом ${code}: ${errText}`)));
     });
     assert.deepEqual(seen.left, [], 'ролики и постеры прежнего запуска удалены до listen');
+    assert.deepEqual(await snapshot(), before, 'в data/ репозитория ничего не появилось');
     const res = await fetch(`http://127.0.0.1:${free}/api/config`);
     assert.equal(res.status, 200, 'сервер принимает запросы');
     await fs.stat(path.join(root, 'data', 'state'));  // хранилище создано во временном корне
