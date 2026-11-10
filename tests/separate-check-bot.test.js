@@ -157,3 +157,34 @@ test('бот: другой участник не затронут запрето
   await b.bot.handleUpdate({ callback_query: { id: 'q', data: 'play:1', message: { chat: other } } });
   assert.equal(b.counters.render, 1); assert.equal(b.counters.video, 1);
 });
+
+// Исходы /delete (редактор 16:24, решение владельца 17:10): «удалены» — только при подтверждении;
+// сохранённый запрет и неизвестное состояние сообщаются отдельно, «всё удалено» нигде нет.
+test('бот /delete: исход 1 — нет записей → «Сессия и статистика по тебе удалены.»', async () => {
+  const b = setup({ check: () => false });
+  await b.story(); await b.play();
+  await del(b);
+  assert.equal(b.last(), 'Сессия и статистика по тебе удалены.');
+});
+
+test('бот /delete: запись запрета сохранена → удаление сессии подтверждено, полное удаление — нет', async () => {
+  for (const check of [() => true, fail]) {
+    const b = setup({ check });
+    await b.story(); await b.play(); await b.play();
+    await del(b);
+    assert.equal(b.last(), 'Сессия и статистика по тебе удалены.\nПолное удаление не подтверждено.');
+    assert.doesNotMatch(b.last(), /всё удалено/i);
+  }
+});
+
+test('бот /delete: сбой статистики и неизвестное состояние хранилища называются отдельно', async () => {
+  const sent = [];
+  const brokenLedger = { lookup: () => ({ failed: true }), scopeHasRecords: () => null, flush: async () => false, put: async () => {}, clearTechnical: async () => {} };
+  const bot = createBot({
+    tg: { send: async (c, t) => { sent.push(t); }, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''), sendVideo: async () => {} },
+    metrics: { ...metrics, forget: async () => { throw Object.assign(new Error('x'), { code: 'EIO' }); } },
+    draft: good, safetyCheck: async () => false, ledger: brokenLedger,
+  });
+  await bot.handleUpdate({ message: { chat, text: '/delete' } });
+  assert.equal(sent.at(-1), 'Сессия удалена, а удаление статистики по тебе подтвердить не получилось. Попробуй /delete ещё раз чуть позже.\nПроверить состояние служебной записи не получилось. Полное удаление не подтверждено.');
+});

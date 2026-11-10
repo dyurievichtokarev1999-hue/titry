@@ -36,7 +36,7 @@ test('сбой rename: forget отклоняется, временный фай�
     assert.equal(await fs.readFile(file, 'utf8'), before, 'файл не обрезан');
     // Повторный /delete без отказа — честное «удалено», строк человека нет, чужие на месте.
     await bot.handleUpdate({ message: { chat, text: '/delete' } });
-    assert.equal(sent.at(-1), 'Готово: сессия и статистика по тебе удалены.');
+    assert.equal(sent.at(-1), 'Сессия и статистика по тебе удалены.');
     const rows = (await fs.readFile(file, 'utf8')).split('\n').filter(Boolean).map((l) => JSON.parse(l));
     assert.deepEqual(rows.map((r) => r.user), [metrics.hash(2)]);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
@@ -195,7 +195,7 @@ test('копия после перезапуска не удаляется: forg
       await assert.rejects(metrics.forget(chat.id), { code: 'tmp_cleanup_pending' });
     } finally { fs.rm = origRm; }
     await bot.handleUpdate({ message: { chat, text: '/delete' } }); // отказ снят
-    assert.equal(sent.at(-1), 'Готово: сессия и статистика по тебе удалены.');
+    assert.equal(sent.at(-1), 'Сессия и статистика по тебе удалены.');
     assert.deepEqual(await tmpNames(dir), []);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
