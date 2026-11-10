@@ -176,7 +176,12 @@ export function createApp({
     'POST /api/rehearsal/answer': async (req) => {
       const raw = await readJson(req);
       const body = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
-      const r = judge(String(body.id || ''), String(body.action || ''), String(body.invariant || ''));
+      // Типы полей проверяются до judge, без приведения: массив ["R20"] — не «R20».
+      const str = (v) => typeof v === 'string';
+      if (!str(body.id) || !str(body.action) || (body.invariant !== undefined && !str(body.invariant))) {
+        return { status: 400, body: { error: 'Неизвестный случай или действие.' } };
+      }
+      const r = judge(body.id, body.action, body.invariant || '');
       if (!r) return { status: 400, body: { error: 'Неизвестный случай или действие.' } };
       return r;
     },

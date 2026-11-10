@@ -24,7 +24,8 @@ export function invariants() {
 export function rehearsalCases() {
   return DATA.cases.map((c) => {
     const { episode, dropped } = groundDraft(c.bad, c.story, { date: '2026-11-10' });
-    return { id: c.id, name: c.name, story: c.story, episode, dropped: dropped.length };
+    // Диагностическое имя случая («Отрицание» и т. п.) подсказывает правило — показывается только после ответа.
+    return { id: c.id, story: c.story, episode, dropped: dropped.length };
   });
 }
 
@@ -45,5 +46,6 @@ export function judge(id, action, invariantId) {
     invariantOk,
     invariant: c.invariant,
     why: c.why,
+    name: c.name,
   };
 }

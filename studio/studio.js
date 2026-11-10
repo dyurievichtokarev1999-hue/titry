@@ -255,14 +255,15 @@ changed();
 
 // ── Репетиция R16–R20 ───────────────────────────────────────────────────────
 // Упражнение организатора: черновики намеренно неверные; ролик не собирается, ответы не записываются.
-const rehearsal = { cases: [] };
+const rehearsal = { cases: [], attempt: 0 }; // attempt — номер актуальной попытки: устаревшие ответы не показываются
 api('/api/rehearsal').then((r) => {
   rehearsal.cases = r.cases;
-  for (const c of r.cases) $('rhCase').add(new Option(`${c.id} — ${c.name}`, c.id));
+  for (const c of r.cases) $('rhCase').add(new Option(c.id, c.id));
   for (const i of r.invariants) $('rhInvariant').add(new Option(i.text, i.id));
 }).catch(() => { $('rhCase').disabled = true; });
 
 $('rhCase').addEventListener('change', () => {
+  rehearsal.attempt++; // запрос по прежнему случаю больше не может изменить экран
   const c = rehearsal.cases.find((x) => x.id === $('rhCase').value);
   $('rhBody').hidden = !c;
   $('rhResult').textContent = '';
@@ -279,12 +280,15 @@ async function rhAnswer(action) {
   const id = $('rhCase').value;
   if (!id) return;
   if (action === 'reject' && !$('rhInvariant').value) { $('rhResult').textContent = 'Выберите нарушенный инвариант.'; return; }
+  const attempt = ++rehearsal.attempt;
+  const current = () => attempt === rehearsal.attempt && $('rhCase').value === id;
   try {
     const r = await api('/api/rehearsal/answer', { id, action, invariant: $('rhInvariant').value });
+    if (!current()) return; // ответ по прежнему случаю или устаревшей попытке не показывается
     const head = r.correct ? 'Верно.' : 'Неверно.';
     const need = r.expected === 'stop' ? 'Правильное действие — остановить: ролик не делается.' : `Правильное действие — отклонить. Инвариант: ${r.invariant}`;
-    $('rhResult').textContent = `${head} ${need} ${r.why}`;
-  } catch (e) { $('rhResult').textContent = e.message; }
+    $('rhResult').textContent = `${head} ${need} ${r.why} (${r.id || id}: ${r.name})`;
+  } catch (e) { if (current()) $('rhResult').textContent = e.message; }
 }
 $('rhAccept').addEventListener('click', () => rhAnswer('accept'));
 $('rhReject').addEventListener('click', () => rhAnswer('reject'));

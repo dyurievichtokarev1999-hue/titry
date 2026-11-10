@@ -74,7 +74,7 @@ test('Репетиция в монтажной: R16–R19 — верно тол�
     const invOf = (id) => list.invariants.find((i) => i.text === data.cases.find((c) => c.id === id).invariant).id;
     for (const c of list.cases) {
       assert.ok(c.episode && Array.isArray(c.episode.rows), `${c.id}: показан черновик`);
-      assert.ok(!('good' in c) && !('invariant' in c) && !('expect' in c), `${c.id}: правильный ответ не раскрыт заранее`);
+      assert.ok(!('good' in c) && !('invariant' in c) && !('expect' in c) && !('name' in c), `${c.id}: правильный ответ и подсказка-имя не раскрыты заранее`);
     }
     for (const id of ['R16', 'R17', 'R18', 'R19']) {
       assert.equal((await answer(id, 'reject', id)).correct, false, `${id}: id случая — не id инварианта`);
@@ -88,6 +88,11 @@ test('Репетиция в монтажной: R16–R19 — верно тол�
     assert.equal((await answer('R20', 'stop')).correct, true);
     assert.equal((await answer('R20', 'accept')).correct, false);
     assert.equal((await answer('R20', 'reject', invOf('R16'))).correct, false);
+    // Поля неверного типа — 400, без приведения (QA 23:40).
+    for (const bad of [{ id: ['R20'], action: ['stop'] }, { id: 'R20', action: 1 }, { id: { a: 1 }, action: 'stop' }, { id: 'R16', action: 'reject', invariant: [invOf('R16')] }, { id: null, action: 'stop' }]) {
+      const r = await fetch(url('/api/rehearsal/answer'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(bad) });
+      assert.equal(r.status, 400, JSON.stringify(bad));
+    }
     for (const b of ['null', '[]', '"x"']) {
       const r = await fetch(url('/api/rehearsal/answer'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: b });
       assert.equal(r.status, 400, `тело ${b} — 400, не 500`);
@@ -97,4 +102,38 @@ test('Репетиция в монтажной: R16–R19 — верно тол�
     assert.equal(renders, 0, 'в репетиции рендер не вызывается');
     assert.deepEqual(await fs.readdir(dataDir).catch(() => []), [], 'ответы никуда не записываются');
   } finally { server.close(); await fs.rm(dataDir, { recursive: true, force: true }); }
+});
+
+// Гонка интерфейса (QA 23:40): ответ по R16, пришедший после переключения на R20, не показывается под R20.
+test('Репетиция, интерфейс: устаревший ответ не меняет экран нового случая', async () => {
+  const vm = await import('node:vm');
+  const src = await fs.readFile(new URL('../studio/studio.js', import.meta.url), 'utf8');
+  const part = src.slice(src.indexOf('// ── Репетиция R16–R20'));
+  const els = {};
+  const el = (id) => (els[id] ||= { id, value: '', textContent: '', hidden: false, disabled: false, options: [], listeners: {},
+    add(o) { this.options.push(o); }, addEventListener(t, f) { this.listeners[t] = f; } });
+  const pending = [];
+  const ctx = {
+    $: el, Option: function (t, v) { return { text: t, value: v }; },
+    api: (p, body) => {
+      if (p === '/api/rehearsal') return Promise.resolve({ cases: ['R16', 'R20'].map((id) => ({ id, story: 's', episode: { title: 't', genre: 'g', mood: 'quiet', rows: [], post: {} } })), invariants: [{ id: 'inv-1', text: 'x' }] });
+      return new Promise((resolve) => pending.push(() => resolve({ correct: true, expected: 'reject', invariant: 'ИНВ-R16', why: 'ПОЧЕМУ-R16', name: 'n', id: body.id })));
+    },
+  };
+  vm.runInNewContext(part, ctx);
+  await new Promise((r) => setImmediate(r));
+  el('rhCase').value = 'R16'; el('rhCase').listeners.change();
+  el('rhInvariant').value = 'inv-1';
+  const p = el('rhReject').listeners.click();
+  el('rhCase').value = 'R20'; el('rhCase').listeners.change();
+  pending.shift()();
+  await p; await new Promise((r) => setImmediate(r));
+  assert.ok(!el('rhResult').textContent.includes('R16'), 'под R20 нет ответа R16');
+  // Контроль: без переключения ответ показывается.
+  el('rhInvariant').value = 'inv-1';
+  el('rhCase').value = 'R20';
+  const q = el('rhReject').listeners.click();
+  pending.shift()();
+  await q; await new Promise((r) => setImmediate(r));
+  assert.match(el('rhResult').textContent, /ПОЧЕМУ-R16/);
 });
