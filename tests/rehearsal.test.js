@@ -1,0 +1,194 @@
+// ИР-05: «Репетиция» R16–R20 и H/S редактора повествования (вымышленные случаи, rehearsal/r16-r20.json).
+// Проверяется то, что уже выполняется; известные пробелы — test.todo с причиной (видны в каждом прогоне,
+// не скрыты и не выданы за прохождение). Правила фильтра здесь не меняются — это особая зона и решение людей.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { runCase } from '../scripts/rehearsal-report.js';
+import { assessRisk } from '../server/safety.js';
+
+const data = JSON.parse(await fs.readFile(new URL('../rehearsal/r16-r20.json', import.meta.url), 'utf8'));
+
+test('данные: пять случаев, у каждой строки цитата дословно из рассказа, поля по схеме', () => {
+  assert.deepEqual(data.cases.map((c) => c.id), ['R16', 'R17', 'R18', 'R19', 'R20']);
+  for (const c of data.cases) for (const v of ['good', 'bad']) {
+    const raw = c[v];
+    for (const k of ['title', 'genre', 'mood', 'grammatical_gender', 'safety_flag', 'rows', 'post']) assert.ok(k in raw, `${c.id}.${v}.${k}`);
+    for (const r of raw.rows) assert.ok(c.story.includes(r.source), `${c.id}.${v}: ${r.role}`);
+  }
+  assert.equal(data.hyperbole.length, 20);
+  assert.equal(data.stop.length, 20);
+});
+
+test('R16–R19: эталонный ответ модели даёт черновик, проходящий проверку', async () => {
+  for (const c of data.cases.filter((x) => x.expect === 'reject')) {
+    const r = await runCase(c, 'good');
+    assert.equal(r.status, 'draft', c.id);
+    assert.equal(r.valid, true, c.id);
+  }
+});
+
+test('R20: эталонный ответ модели (safety_flag) — остановка без эпизода', async () => {
+  const c = data.cases.find((x) => x.id === 'R20');
+  assert.equal((await runCase(c, 'good')).status, 'stopped');
+});
+
+test('S11 и S19 останавливаются локальным фильтром (без модели)', () => {
+  for (const id of ['S11', 'S19']) assert.equal(assessRisk(data.stop.find((s) => s.id === id).text).level, 'urgent', id);
+});
+
+test('отчёт репетиции печатает только ID и статусы — без текстов рассказов', () => {
+  const out = execFileSync(process.execPath, [new URL('../scripts/rehearsal-report.js', import.meta.url).pathname]).toString();
+  for (const c of data.cases) assert.ok(!out.includes(c.story.slice(0, 25)), c.id);
+  for (const s of [...data.stop, ...data.hyperbole]) assert.ok(!out.includes(s.text.slice(0, 25)), s.id);
+});
+
+// Известные пробелы (найдены этим прогоном 10.11). Закрываются только решением людей об особой зоне.
+test.todo('R20: неверный ответ модели (safety_flag: false) должен остановиться без ролика — сейчас даёт черновик');
+test.todo('S01–S20: локальный фильтр должен останавливать все — сейчас 2/20 (S11, S19); остальные держит только флаг модели');
+test.todo('H+S: девять сочетаний H01/H02/H04 × S01/S02/S04 должны останавливаться — сейчас 0/9 локально');
+
+
+
+// Часть 2: режим «Репетиция» в монтажной (настоящие маршруты createApp).
+test('Репетиция в монтажной: R16–R19 — верно только «отклонить» со своим инвариантом; R20 — «остановить»; рендера нет', async () => {
+  const { createApp } = await import('../server/app.js');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-rh-'));
+  let renders = 0;
+  const server = createApp({ dataDir, render: async () => { renders++; return {}; }, safetyCheck: async () => false });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const url = (p) => `http://127.0.0.1:${server.address().port}${p}`;
+  const answer = async (id, action, invariant = '') => (await fetch(url('/api/rehearsal/answer'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, action, invariant }) })).json();
+  try {
+    const list = await (await fetch(url('/api/rehearsal'))).json();
+    assert.deepEqual(list.cases.map((c) => c.id), ['R16', 'R17', 'R18', 'R19', 'R20']);
+    // Ответ не раскрыт и через список инвариантов: непрозрачные id, порядок по тексту, без инварианта R20.
+    assert.equal(list.invariants.length, 4);
+    for (const i of list.invariants) assert.match(i.id, /^inv-[0-9a-f]{8}$/);
+    const texts = list.invariants.map((i) => i.text);
+    assert.deepEqual(texts, [...texts].sort((a, b) => a.localeCompare(b, 'ru')));
+    assert.ok(!texts.some((t) => /остановк/i.test(t)), 'инвариант R20 не подсказывает «остановить»');
+    const invOf = (id) => list.invariants.find((i) => i.text === data.cases.find((c) => c.id === id).invariant).id;
+    for (const c of list.cases) {
+      assert.ok(c.episode && Array.isArray(c.episode.rows), `${c.id}: показан черновик`);
+      assert.ok(!('good' in c) && !('invariant' in c) && !('expect' in c) && !('name' in c), `${c.id}: правильный ответ и подсказка-имя не раскрыты заранее`);
+    }
+    for (const id of ['R16', 'R17', 'R18', 'R19']) {
+      assert.equal((await answer(id, 'reject', id)).correct, false, `${id}: id случая — не id инварианта`);
+      assert.equal((await answer(id, 'reject', invOf(id))).correct, true, `${id}: отклонить со своим инвариантом`);
+      const other = invOf(id === 'R16' ? 'R17' : 'R16');
+      const wrongInv = await answer(id, 'reject', other);
+      assert.equal(wrongInv.correct, false); assert.equal(wrongInv.invariantOk, false);
+      assert.equal((await answer(id, 'accept')).correct, false, `${id}: принять — неверно`);
+      assert.equal((await answer(id, 'stop')).correct, false, `${id}: остановить — не то действие`);
+    }
+    assert.equal((await answer('R20', 'stop')).correct, true);
+    assert.equal((await answer('R20', 'accept')).correct, false);
+    assert.equal((await answer('R20', 'reject', invOf('R16'))).correct, false);
+    // Поля неверного типа — 400, без приведения (QA 23:40).
+    for (const bad of [{ id: ['R20'], action: ['stop'] }, { id: 'R20', action: 1 }, { id: { a: 1 }, action: 'stop' }, { id: 'R16', action: 'reject', invariant: [invOf('R16')] }, { id: null, action: 'stop' }]) {
+      const r = await fetch(url('/api/rehearsal/answer'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(bad) });
+      assert.equal(r.status, 400, JSON.stringify(bad));
+    }
+    for (const b of ['null', '[]', '"x"']) {
+      const r = await fetch(url('/api/rehearsal/answer'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: b });
+      assert.equal(r.status, 400, `тело ${b} — 400, не 500`);
+    }
+    const bad = await fetch(url('/api/rehearsal/answer'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: 'R99', action: 'stop' }) });
+    assert.equal(bad.status, 400);
+    assert.equal(renders, 0, 'в репетиции рендер не вызывается');
+    assert.deepEqual(await fs.readdir(dataDir).catch(() => []), [], 'ответы никуда не записываются');
+  } finally { server.close(); await fs.rm(dataDir, { recursive: true, force: true }); }
+});
+
+// Гонка интерфейса (QA 23:40): ответ по R16, пришедший после переключения на R20, не показывается под R20.
+test('Репетиция, интерфейс: устаревший ответ не меняет экран нового случая', async () => {
+  const vm = await import('node:vm');
+  const src = await fs.readFile(new URL('../studio/studio.js', import.meta.url), 'utf8');
+  const part = src.slice(src.indexOf('// ── Репетиция R16–R20'));
+  const els = {};
+  const el = (id) => (els[id] ||= { id, value: '', textContent: '', hidden: false, disabled: false, options: [], listeners: {},
+    add(o) { this.options.push(o); }, addEventListener(t, f) { this.listeners[t] = f; } });
+  const pending = [];
+  const ctx = {
+    $: el, Option: function (t, v) { return { text: t, value: v }; },
+    api: (p, body) => {
+      if (p === '/api/rehearsal') return Promise.resolve({ cases: ['R16', 'R20'].map((id) => ({ id, story: 's', episode: { title: 't', genre: 'g', mood: 'quiet', rows: [], post: {} } })), invariants: [{ id: 'inv-1', text: 'x' }] });
+      return new Promise((resolve) => pending.push(() => resolve({ correct: true, expected: 'reject', invariant: 'ИНВ-R16', why: 'ПОЧЕМУ-R16', name: 'n', id: body.id })));
+    },
+  };
+  vm.runInNewContext(part, ctx);
+  await new Promise((r) => setImmediate(r));
+  el('rhCase').value = 'R16'; el('rhCase').listeners.change();
+  el('rhInvariant').value = 'inv-1';
+  const p = el('rhReject').listeners.click();
+  el('rhCase').value = 'R20'; el('rhCase').listeners.change();
+  pending.shift()();
+  await p; await new Promise((r) => setImmediate(r));
+  assert.ok(!el('rhResult').textContent.includes('R16'), 'под R20 нет ответа R16');
+  // Контроль: без переключения ответ показывается.
+  el('rhInvariant').value = 'inv-1';
+  el('rhCase').value = 'R20';
+  const q = el('rhReject').listeners.click();
+  pending.shift()();
+  await q; await new Promise((r) => setImmediate(r));
+  assert.match(el('rhResult').textContent, /ПОЧЕМУ-R16/);
+});
+
+// Сценарии, которые раньше подтверждал только стенд разборщика (поручение владельца 00:59): теперь в репозитории.
+async function rehearsalUi() {
+  const vm = await import('node:vm');
+  const src = await fs.readFile(new URL('../studio/studio.js', import.meta.url), 'utf8');
+  const part = src.slice(src.indexOf('// ── Репетиция R16–R20'));
+  const els = {};
+  const el = (id) => (els[id] ||= { id, value: '', textContent: '', hidden: false, disabled: false, options: [], listeners: {},
+    add(o) { this.options.push(o); }, addEventListener(t, f) { this.listeners[t] = f; } });
+  const pending = [];
+  const ctx = {
+    $: el, Option: function (t, v) { return { text: t, value: v }; },
+    api: (p, body) => {
+      if (p === '/api/rehearsal') return Promise.resolve({ cases: ['R16', 'R20'].map((id) => ({ id, story: 's', episode: { title: 't', genre: 'g', mood: 'quiet', rows: [], post: {} } })), invariants: [{ id: 'inv-1', text: 'x' }] });
+      return new Promise((resolve, reject) => pending.push({ body, ok: (why) => resolve({ correct: true, expected: 'reject', invariant: 'И', why, name: 'n' }), fail: (msg) => reject(new Error(msg)) }));
+    },
+  };
+  vm.runInNewContext(part, ctx);
+  await new Promise((r) => setImmediate(r));
+  const tick = () => new Promise((r) => setImmediate(r));
+  const select = (id) => { el('rhCase').value = id; el('rhCase').listeners.change(); };
+  const press = (action) => { if (action === 'reject') el('rhInvariant').value = 'inv-1'; return el({ reject: 'rhReject', stop: 'rhStop', accept: 'rhAccept' }[action]).listeners.click(); };
+  return { el, pending, tick, select, press };
+}
+
+test('Репетиция, интерфейс: два ответа одного случая в обратном порядке — остаётся последний', async () => {
+  const u = await rehearsalUi();
+  u.select('R20');
+  const a = u.press('stop'); const b = u.press('stop');
+  u.pending[1].ok('ВТОРОЙ'); await b; await u.tick();
+  u.pending[0].ok('ПЕРВЫЙ'); await a; await u.tick();
+  assert.match(u.el('rhResult').textContent, /ВТОРОЙ/);
+  assert.doesNotMatch(u.el('rhResult').textContent, /ПЕРВЫЙ/);
+});
+
+test('Репетиция, интерфейс: ошибка по R16 после переключения на R20 не показывается; ошибка актуальной попытки — показывается', async () => {
+  const u = await rehearsalUi();
+  u.select('R16');
+  const a = u.press('reject');
+  u.select('R20');
+  u.pending[0].fail('ОШИБКА-R16'); await a; await u.tick();
+  assert.equal(u.el('rhResult').textContent, '');
+  const b = u.press('stop');
+  u.pending[1].fail('ОШИБКА-R20'); await b; await u.tick();
+  assert.equal(u.el('rhResult').textContent, 'ОШИБКА-R20', 'путь catch для актуальной попытки');
+});
+
+test('Репетиция, интерфейс: R16 → R20 → R16 — ответ первой попытки R16 не показывается', async () => {
+  const u = await rehearsalUi();
+  u.select('R16');
+  const a = u.press('reject');
+  u.select('R20'); u.select('R16');
+  u.pending[0].ok('СТАРЫЙ'); await a; await u.tick();
+  assert.equal(u.el('rhResult').textContent, '');
+});
