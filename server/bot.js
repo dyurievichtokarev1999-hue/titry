@@ -30,7 +30,7 @@ export const TEXT = {
   rendering: 'Собираю ролик. Обычно это меньше минуты.',
   queue: (n) => `Собираю ролик. Перед тобой в очереди: ${n}.`,
   // ИР-04: очередь заполнена. Черновик сохранён; без обещаний сроков. Черновик текста — на вычитку редактору.
-  busy: 'Сейчас собирается слишком много роликов, новый в очередь не помещается. Черновик сохранён: нажми «▶ Смотреть титры» ещё раз через несколько минут.',
+  busy: 'Сейчас собирается слишком много роликов, новый в очередь не помещается. Черновик сохранён: нажми «▶ Смотреть титры» ещё раз чуть позже.',
   voiceOff: 'Голосовые пока не подключены. Напиши, пожалуйста, текстом.',
   voiceLong: `Голосовое длиннее ${Math.round(MAX_VOICE_SECONDS / 60)} минут. Для одной сцены хватит минуты.`,
   voiceEmpty: 'Не получилось разобрать голосовое. Можно повторить или написать текстом.',
@@ -388,7 +388,7 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
     const original = s.originalStory || s.story;
     const current = () => alive(chatId, s) && s.draftId === gen && s.verdict === 'ok' && !isBlocked(s, original);
     // ИР-04 (критик реализации): один рендер идёт, до трёх ждут. Дальше — явный ответ «занято», без долговечной очереди.
-    if (waiting >= 1 + MAX_RENDER_WAITING) { s.stage = 'draft'; return tg.send(chatId, TEXT.busy); }
+    if (waiting >= 1 + MAX_RENDER_WAITING) return tg.send(chatId, TEXT.busy); // состояние сессии не меняется
     s.stage = 'rendering';
     const ahead = waiting;
     waiting++;

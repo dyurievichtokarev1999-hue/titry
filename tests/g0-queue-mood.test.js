@@ -51,3 +51,45 @@ test('mood: пустой или неизвестный — quiet; известн
   assert.equal(sanitizeEpisode({ ...example.episode, mood: 'sad', music: 'sad' }).mood, 'sad');
   assert.equal(sanitizeEpisode({ ...example.episode, mood: 'anger', music: 'none' }).music, 'none');
 });
+
+test('mood: пустой жанр берётся по итоговому mood, а не «тёплая драма»', () => {
+  const ep = sanitizeEpisode({ title: 'x' });
+  assert.equal(ep.mood, 'quiet');
+  assert.equal(ep.genre, 'камерное кино');
+  assert.equal(sanitizeEpisode({ ...example.episode, genre: 'своя драма' }).genre, 'своя драма');
+});
+
+test('ИР-04: места в очереди освобождаются после ошибки рендера и после /delete во время ожидания', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-ir04b-'));
+  const sent = new Map();
+  const tg = {
+    send: async (id, text, extra) => { if (!sent.has(id)) sent.set(id, []); sent.get(id).push({ text, extra }); },
+    action: async () => {}, answer: async () => {}, sendVideo: async (id) => { sent.get(id).push({ text: 'VIDEO' }); },
+  };
+  let release;
+  let gate = new Promise((r) => { release = r; });
+  let calls = 0;
+  const bot = createBot({
+    tg, metrics: makeMetrics(path.join(dir, 'm.jsonl'), 'ir04-salt'),
+    draft: async () => ({ episode: structuredClone(example.episode), risk: { level: 'none' }, provider: 'ir04-fake', dropped: [] }),
+    render: async (ep, o) => { calls++; await gate; if (calls === 1) throw new Error('подставной сбой'); return { outPath: o.outPath, seconds: 1, duration: 24 }; },
+  });
+  const users = [1, 2, 3, 4, 5, 6].map((n) => ({ id: 881000 + n, type: 'private' }));
+  const playOf = (chat) => sent.get(chat.id).findLast((x) => x.extra?.reply_markup?.inline_keyboard)?.extra.reply_markup.inline_keyboard[0][0].callback_data;
+  const click = (chat) => bot.handleUpdate({ callback_query: { id: 'q', data: playOf(chat), message: { chat } } });
+  try {
+    for (const chat of users) await bot.handleUpdate({ message: { chat, text: example.story } });
+    const jobs = users.slice(0, 4).map(click); // 1 идёт (упадёт), 3 ждут
+    await new Promise((r) => setImmediate(r));
+    await bot.handleUpdate({ message: { chat: users[2], text: '/delete' } }); // один из ждущих удалил данные
+    await click(users[4]);
+    assert.match(sent.get(users[4].id).at(-1).text, /не помещается/, 'пока очередь полна — «занято»');
+    release();
+    await Promise.all(jobs);
+    assert.ok(sent.get(users[0].id).some((x) => /Не получилось собрать ролик/.test(x.text)), 'сбой рендера сообщён');
+    assert.ok(!sent.get(users[2].id).some((x) => x.text === 'VIDEO'), 'после /delete ролик не отправлен');
+    // Все места свободны: новые запросы проходят без «занято».
+    for (const chat of [users[4], users[5]]) await click(chat);
+    for (const chat of [users[4], users[5]]) assert.equal(sent.get(chat.id).at(-1).text, 'VIDEO');
+  } finally { release(); await fs.rm(dir, { recursive: true, force: true }); }
+});
