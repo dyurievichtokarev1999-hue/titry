@@ -95,9 +95,15 @@ export async function modelSafetyCheck(story, { client, model = DEFAULT_MODEL } 
     system: SAFETY_PROMPT,
     messages: [{ role: 'user', content: `<story>\n${escapeStoryTags(story)}\n</story>` }],
   });
-  if (response.stop_reason === 'refusal') return true;
-  const text = response.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
-  try { return JSON.parse(text).safety_flag !== false; } catch { return true; }
+  // Закрытый отказ (критик реализации и владелец, 10.11 11:05): «нет риска» — только полный ответ
+  // (stop_reason end_turn), ровно один текстовый блок, объект и строго safety_flag === false.
+  // Всё остальное, в том числе обрезанный ответ с валидным {"safety_flag":false}, — опасность.
+  const texts = Array.isArray(response?.content) ? response.content.filter((b) => b && b.type === 'text') : [];
+  if (response?.stop_reason !== 'end_turn' || texts.length !== 1) return true;
+  let raw;
+  try { raw = JSON.parse(texts[0].text); } catch { return true; }
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return true;
+  return raw.safety_flag !== false;
 }
 
 /** Рассказ не может закрыть или открыть служебный блок <story>: теги внутри него обезвреживаются. */
@@ -156,14 +162,19 @@ export async function draftWithClaude(story, { tone = 'quiet', date, period = 'd
     e.category = response.stop_details && response.stop_details.category;
     throw e;
   }
-  if (response.stop_reason === 'max_tokens') {
-    const e = new Error('Ответ модели обрезан.');
-    e.code = 'max_tokens';
-    throw e;
+  // stop_reason (критик реализации, 10.11 11:05): разрешение — только из полного ответа (end_turn) с ровно
+  // одним текстовым блоком. safety_flag: true останавливает при любом stop_reason — обрезанный ответ,
+  // говорящий «опасно», не ослабляется. Остальное — закрытый отказ (unavailable), не «проверка пройдена».
+  const texts = Array.isArray(response?.content) ? response.content.filter((b) => b && b.type === 'text') : [];
+  let raw, parsed = false;
+  try { raw = JSON.parse(texts.map((b) => b.text).join('')); parsed = true; } catch { /* ниже */ }
+  if (parsed && raw && typeof raw === 'object' && !Array.isArray(raw) && raw.safety_flag === true) {
+    return { safetyFlag: true, model: response.model, usage: response.usage };
   }
-  const text = response.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
-  let raw;
-  try { raw = JSON.parse(text); } catch {
+  if (response?.stop_reason === 'max_tokens') throw Object.assign(new Error('Ответ модели обрезан.'), { code: 'max_tokens' });
+  if (response?.stop_reason !== 'end_turn') throw Object.assign(new Error('Ответ модели не завершён.'), { code: 'incomplete_response' });
+  if (texts.length !== 1) throw Object.assign(new Error('Ответ модели не по контракту.'), { code: 'bad_response' });
+  if (!parsed) {
     const e = new Error('Модель вернула не JSON.');
     e.code = 'bad_json';
     throw e;
