@@ -92,7 +92,7 @@ export function detectGender(story) {
 }
 
 /** Создать пустой эпизод с разумными умолчаниями. */
-export function blankEpisode({ date = todayIso(), mood = 'warm', period = 'day' } = {}) {
+export function blankEpisode({ date = todayIso(), mood = 'quiet', period = 'day' } = {}) {
   return {
     version: 1,
     period,

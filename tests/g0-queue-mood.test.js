@@ -33,7 +33,7 @@ test('ИР-04: при полной очереди пятый запрос пол
     await new Promise((r) => setImmediate(r));
     const fifth = users[4];
     await bot.handleUpdate({ callback_query: { id: 'q', data: playOf(fifth), message: { chat: fifth } } });
-    assert.match(sent.get(fifth.id).at(-1).text, /новый в очередь не помещается/);
+    assert.equal(sent.get(fifth.id).at(-1).text, "Сейчас очередь заполнена. Черновик остаётся здесь. Нажми «▶ Смотреть титры» ещё раз чуть позже.");
     assert.equal(bot.sessions.get(fifth.id).stage, 'draft', 'черновик сохранён');
     release();
     await Promise.all(jobs);
@@ -83,7 +83,7 @@ test('ИР-04: места в очереди освобождаются посл�
     await new Promise((r) => setImmediate(r));
     await bot.handleUpdate({ message: { chat: users[2], text: '/delete' } }); // один из ждущих удалил данные
     await click(users[4]);
-    assert.match(sent.get(users[4].id).at(-1).text, /не помещается/, 'пока очередь полна — «занято»');
+    assert.match(sent.get(users[4].id).at(-1).text, /очередь заполнена/, 'пока очередь полна — «занято»');
     release();
     await Promise.all(jobs);
     assert.ok(sent.get(users[0].id).some((x) => /Не получилось собрать ролик/.test(x.text)), 'сбой рендера сообщён');
@@ -92,4 +92,18 @@ test('ИР-04: места в очереди освобождаются посл�
     for (const chat of [users[4], users[5]]) await click(chat);
     for (const chat of [users[4], users[5]]) assert.equal(sent.get(chat.id).at(-1).text, 'VIDEO');
   } finally { release(); await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+// Правка редактора 10.11: quiet в трёх местах — правило без ИИ, blankEpisode, строка mood в промпте.
+test('mood: quiet по умолчанию в правиле без ИИ, blankEpisode и промпте; явное настроение сохраняется', async () => {
+  const { draftRuleBased, SYSTEM_PROMPT } = await import('../server/draft.js');
+  const { blankEpisode } = await import('../engine/episode.js');
+  assert.equal(blankEpisode().mood, 'quiet');
+  assert.equal(blankEpisode().music, 'quiet');
+  assert.equal(draftRuleBased('Утром работа. Днём встреча. Вечером ужин и прогулка.', { date: '2026-11-10' }).episode.mood, 'quiet');
+  assert.equal(draftRuleBased('Утром работа. Весь день была злость на соседа. Вечером ужин.', { date: '2026-11-10' }).episode.mood, 'anger');
+  assert.equal(draftRuleBased('Утром работа. Было грустно весь вечер. Потом ужин.', { date: '2026-11-10' }).episode.mood, 'sad');
+  assert.equal(sanitizeEpisode({ ...example.episode, mood: 'warm', music: 'none' }).music, 'none');
+  assert.ok(!/warm для обычного дня/.test(SYSTEM_PROMPT), 'в промпте нет warm по умолчанию');
+  assert.match(SYSTEM_PROMPT, /quiet как нейтральное оформление/);
 });
