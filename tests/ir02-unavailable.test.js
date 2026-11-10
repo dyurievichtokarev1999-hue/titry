@@ -12,6 +12,15 @@ import { createApp } from '../server/app.js';
 
 const example = JSON.parse(await fs.readFile(new URL('../examples/day-quiet.json', import.meta.url), 'utf8'));
 const failingClient = { beta: { messages: { create: async () => { throw Object.assign(new Error('сеть'), { code: 'ETIMEDOUT' }); } } } };
+// Подставной ответ модели после восстановления: проверка проходит полностью (safety_flag: false), без сети.
+const okClient = { beta: { messages: { create: async () => ({
+  stop_reason: 'end_turn',
+  content: [{ type: 'text', text: JSON.stringify({
+    title: example.episode.title, genre: example.episode.genre, mood: example.episode.mood, grammatical_gender: 'unknown',
+    safety_flag: false, rows: example.episode.rows.map(({ role, value, source }) => ({ role, value, source })),
+    post: { text: example.episode.post?.text || '', source: example.episode.post?.source || '' },
+  }) }],
+}) } } };
 
 test('ИР-02: makeDraft при отказе модели — unavailable, без черновика', async () => {
   const r = await makeDraft(example.story, { provider: 'claude', client: failingClient });
@@ -29,7 +38,7 @@ test('ИР-02: бот — сообщение о задержке, без кар�
   const tg = { send: async (id, text, extra) => { sent.push({ text, extra }); }, action: async () => {}, answer: async () => {}, sendVideo: async () => {} };
   const bot = createBot({
     tg, metrics: makeMetrics(path.join(dir, 'm.jsonl'), 'ir02-salt'),
-    draft: (story, o) => makeDraft(story, { ...o, provider: 'claude', client: down ? failingClient : undefined }).then((r) => (down ? r : { episode: structuredClone(example.episode), risk: { level: 'none' }, provider: 'fake', dropped: [] })),
+    draft: (story, o) => makeDraft(story, { ...o, provider: 'claude', client: down ? failingClient : okClient }),
     render: async () => { renders++; return {}; },
   });
   const chat = { id: 771202, type: 'private' };
@@ -48,14 +57,19 @@ test('ИР-02: бот — сообщение о задержке, без кар�
 
 test('ИР-02: монтажная — 503 с экраном «Проверку завершить не удалось»', async (t) => {
   t.mock.method(console, 'error', () => {});
-  const prev = process.env.ANTHROPIC_API_KEY;
-  process.env.ANTHROPIC_API_KEY = 'sk-test-not-a-real-key';
-  process.env.ANTHROPIC_BASE_URL_SAVED = process.env.ANTHROPIC_BASE_URL || '';
-  process.env.ANTHROPIC_BASE_URL = 'http://127.0.0.1:9'; // закрытый порт: модель недоступна
-  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-ir02-app-'));
-  const server = createApp({ render: async () => { throw new Error('не должно вызываться'); }, dataDir, safetyCheck: async () => false });
-  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  // Свободный порт: заняли и сразу закрыли — соединение будет отклонено, модель недоступна. Сеть наружу не нужна.
+  const probe = (await import('node:net')).createServer();
+  await new Promise((r) => probe.listen(0, '127.0.0.1', r));
+  const deadPort = probe.address().port;
+  await new Promise((r) => probe.close(r));
+  const saved = { key: process.env.ANTHROPIC_API_KEY, base: process.env.ANTHROPIC_BASE_URL };
+  let server, dataDir;
   try {
+    process.env.ANTHROPIC_API_KEY = 'sk-test-not-a-real-key';
+    process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${deadPort}`;
+    dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-ir02-app-'));
+    server = createApp({ render: async () => { throw new Error('не должно вызываться'); }, dataDir, safetyCheck: async () => false });
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
     const res = await fetch(`http://127.0.0.1:${server.address().port}/api/draft`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ story: example.story, provider: 'claude' }) });
     assert.equal(res.status, 503);
     const body = await res.json();
@@ -63,9 +77,10 @@ test('ИР-02: монтажная — 503 с экраном «Проверку �
     assert.equal(body.error, 'Проверку завершить не удалось');
     assert.equal(body.episode, undefined);
   } finally {
-    server.close(); await fs.rm(dataDir, { recursive: true, force: true });
-    if (prev === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = prev;
-    if (process.env.ANTHROPIC_BASE_URL_SAVED) process.env.ANTHROPIC_BASE_URL = process.env.ANTHROPIC_BASE_URL_SAVED; else delete process.env.ANTHROPIC_BASE_URL;
-    delete process.env.ANTHROPIC_BASE_URL_SAVED;
+    if (server) server.close();
+    if (dataDir) await fs.rm(dataDir, { recursive: true, force: true });
+    for (const [k, v] of [['ANTHROPIC_API_KEY', saved.key], ['ANTHROPIC_BASE_URL', saved.base]]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
   }
 });
