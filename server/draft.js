@@ -2,6 +2,7 @@
 //  1) Claude — основной: грамматика титров, структурированный JSON, цитата-источник для каждой строки;
 //  2) заготовка без ИИ — для консьерж-теста и как запасной путь, если модель недоступна.
 // В обоих случаях каждая строка проверяется по рассказу: без цитаты в рассказе строка в титры не попадает.
+import { safeCode } from './errlog.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { MOODS, blankEpisode, detectGender, sanitizeEpisode, sourceFound, todayIso, validateEpisode } from '../engine/episode.js';
 import { assessRisk } from './safety.js';
@@ -257,7 +258,8 @@ export async function makeDraft(story, opts = {}) {
         provider = 'manual';
       }
     } catch (e) {
-      note = `Черновик ИИ недоступен (${e.code || e.status || e.message}). Показана заготовка без ИИ.`;
+      // Только код из списка известных (ИР-03): сообщение исключения может содержать фрагменты рассказа.
+      note = `Черновик ИИ недоступен (${safeCode(e)}). Показана заготовка без ИИ.`;
       result = draftRuleBased(text, opts);
       provider = 'manual';
     }

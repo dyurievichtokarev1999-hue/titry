@@ -63,7 +63,7 @@ function runFfmpeg(args, feed) {
     let err = '';
     p.stderr.on('data', (d) => { err = (err + d).slice(-4000); });
     p.on('error', reject);
-    p.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg завершился с кодом ${code}: ${err}`))));
+    p.on('close', (code) => (code === 0 ? resolve() : reject(Object.assign(new Error(`ffmpeg завершился с кодом ${code}: ${err}`), { code: 'ffmpeg' }))));
     feed(p.stdin).then(() => p.stdin.end(), (e) => { p.kill('SIGKILL'); reject(e); });
   });
 }
@@ -107,7 +107,7 @@ export async function renderEpisode(ep, options = {}) {
       duration: T.duration, still: !!options.still, watermark: options.watermark ?? false,
       timing: options.timing || 'v1', typo: options.typo || 'v1', ease: options.ease || 'smooth',
     }]);
-    if (!fontsOk) throw new Error('Шрифты бренда не загрузились, рендер остановлен, чтобы не выпустить ролик с системным шрифтом.');
+    if (!fontsOk) throw Object.assign(new Error('Шрифты бренда не загрузились, рендер остановлен, чтобы не выпустить ролик с системным шрифтом.'), { code: 'fonts' });
 
     const track = TRACKS[ep.music] || TRACKS.none;
     const audioFile = track.file ? path.join(AUDIO, track.file) : null;

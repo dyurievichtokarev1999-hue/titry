@@ -104,3 +104,36 @@ test('ИР-03: код ошибки — только из списка извес
   assert.equal(safeCode({ status: 299 }), 'error');
   assert.equal(safeCode(null), 'error');
 });
+
+test('ИР-03: геттер, бросающее поле и неизвестный status не обходят список', () => {
+  let n = 0;
+  const flip = { get code() { n++; return n === 1 ? 'ENOENT' : CODE_MARKER; } };
+  assert.ok(['ENOENT', 'error'].includes(safeCode(flip)) && safeCode(flip) !== CODE_MARKER);
+  let m = 0;
+  const flipName = { get name() { m++; return m === 1 ? 'TypeError' : NAME_MARKER; } };
+  assert.notEqual(safeCode(flipName), NAME_MARKER);
+  assert.equal(safeCode({ get code() { throw new Error(MARKER); } }), 'error');
+  assert.equal(safeCode({ status: Symbol('x') }), 'error');
+  assert.equal(safeCode({ status: { valueOf() { throw new Error('x'); } } }), 'error');
+  assert.equal(safeCode({ status: Object.create(null) }), 'error');
+  assert.equal(safeCode({ code: 'max_tokens' }), 'max_tokens');
+  assert.equal(safeCode({ name: 'APIConnectionError' }), 'APIConnectionError');
+});
+
+test('ИР-03: ошибка с маркерами в status — в журнале «error», маркера нет', async (t) => {
+  const lines = capture(t);
+  const { bot, cleanup } = await makeBot({ tg: {}, draft: async () => { throw Object.assign(leaky(), { status: 553311 }); } });
+  try {
+    await bot.handleUpdate({ message: { chat, text: example.story } });
+    assertClean(lines(), 'draft');
+    assert.equal(JSON.parse(lines().find((l) => l.includes('"stage":"draft"'))).code, 'error');
+  } finally { await cleanup(); }
+});
+
+test('ИР-03: заметка черновика клиенту не содержит сообщения и кода исключения', async () => {
+  const { makeDraft } = await import('../server/draft.js');
+  const r = await makeDraft(example.story, { provider: 'claude', client: { beta: { messages: { create: async () => { throw Object.assign(new Error(MARKER), { code: CODE_MARKER }); } } } } }).catch((e) => ({ thrown: e }));
+  const text = JSON.stringify(r);
+  assert.ok(!text.includes(MARKER) && !text.includes(CODE_MARKER));
+  assert.match(r.note || '', /Черновик ИИ недоступен \(error\)/, 'заметка есть и содержит только безопасный код');
+});
