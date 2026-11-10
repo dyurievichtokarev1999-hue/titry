@@ -11,6 +11,7 @@ import { makeDraft, hasClaudeCredentials, DEFAULT_MODEL, modelSafetyCheck } from
 import { renderEpisode, ROOT } from './render.js';
 import { logError, safeCode } from './errlog.js';
 import { loadHelp, helpMessage, assessEpisodeRisk } from './safety.js';
+import { makeGate } from './gate.js';
 
 const STATIC = {
   '/': 'studio/index.html',
@@ -81,7 +82,6 @@ export function strictDate(v) {
   return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v ? v : null;
 }
 
-const storyKey = (story) => crypto.createHash('sha256').update(String(story).toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim()).digest('hex');
 const bool = (v) => v === true;
 
 /** Запись журнала: только разрешённые поля, без текстов. */
@@ -115,20 +115,54 @@ export function logRecord(body) {
  * Создать сервер монтажной. Параметры нужны для тестов:
  * render — функция рендера (по умолчанию настоящий renderEpisode), dataDir — папка данных.
  */
+// Тексты экрана организатора. 503 — редактор повествования (PM-01, 9.11), дословно.
+const UNAVAILABLE = {
+  unavailable: true,
+  error: 'Проверку завершить не удалось',
+  message: 'Сервис не завершил проверку. Это техническое состояние, а не вывод о содержании рассказа. Ролик пока не создаётся и не отправляется.',
+  next: 'Повторить можно позже, только с полной проверкой заново. На заготовку без ИИ не переключаться. Если для рассказа ранее подтверждена остановка, повтор не снимает её.',
+};
+// Техническая приостановка (второй подряд неполный ответ). ВРЕМЕННЫЙ текст по формулировке владельца 13:05
+// до редактуры (редактор повествования, срок 10.11 20:00): без слов об опасности, помощи и сроках.
+const TECHNICAL = {
+  kind: 'technical',
+  reason: 'check_incomplete_twice',
+  error: 'Проверку завершить не удалось',
+  message: 'Сервис дважды не смог завершить проверку; ролик сейчас не создаётся. Это техническое состояние, а не вывод о содержании рассказа.',
+  next: 'Повторить проверку может только организатор кнопкой «Повторить проверку», не раньше указанного времени.',
+};
+const SCOPE = 'studio'; // монтажная — одна общая область запретов
+
+/**
+ * Создать сервер монтажной. Параметры нужны для тестов:
+ * render — функция рендера (по умолчанию настоящий renderEpisode), dataDir — папка данных,
+ * safetyCheck — отдельная проверка (true — опасно, false — разрешение, исключение — проверка не завершена),
+ * hasKey — есть ли доступ к модели, monoNow/wallNow — часы.
+ */
 export function createApp({
   render = renderEpisode,
   dataDir = path.join(ROOT, 'data'),
-  // Второй слой безопасности для прямого пути рендера: true — опасно, false — нет, null — модель недоступна.
-  safetyCheck = async (story) => (hasClaudeCredentials() ? modelSafetyCheck(story) : null),
+  safetyCheck,
+  hasKey = safetyCheck ? () => true : hasClaudeCredentials,
+  draft = makeDraft,
+  monoNow, wallNow,
+  gate = makeGate({ check: safetyCheck || ((text) => modelSafetyCheck(text)), hasKey, monoNow, wallNow }),
 } = {}) {
   const OUT = path.join(dataDir, 'out');
   const LOG = path.join(dataDir, 'concierge');
-  const blocked = new Set(); // рассказы, остановленные моделью в этой сессии монтажной
   let rendering = Promise.resolve();
   // Ролики не переживают перезапуск монтажной и не лежат дольше 2 часов.
   purgeOut(OUT, 0).catch(() => {});
   const sweeper = setInterval(() => purgeOut(OUT).catch(() => {}), 10 * 60 * 1000);
   sweeper.unref();
+
+  // S01–S04: подтверждённая опасность — 422, маршрут помощи. Только реально сработавший слой даёт byModel.
+  const safetyStop = (risk = { level: 'urgent', byModel: true, matches: [] }, error = 'Ролик не собирается: сработал фильтр безопасности.') =>
+    ({ status: 422, body: { error, kind: 'safety', risk, help: helpMessage('urgent') } });
+  // Технические состояния: без помощи, без urgent/byModel.
+  const technical = (r) => ({ status: 422, body: { ...TECHNICAL, code: 'check_incomplete_twice', retryNotBeforeAt: r.retryNotBeforeAt || null } });
+  const unavailable = (code) => ({ status: 503, body: { ...UNAVAILABLE, code } });
+  const fromGate = (r) => (r.kind === 'safety' ? safetyStop() : r.kind === 'technical' ? technical(r) : unavailable(r.code));
 
   const routes = {
     'GET /api/config': async () => ({
@@ -139,33 +173,43 @@ export function createApp({
 
     'POST /api/draft': async (req) => {
       const body = await readJson(req);
-      const key = storyKey(body.story);
-      const stopped = () => ({ risk: { level: 'urgent', byModel: true, matches: [] }, help: helpMessage('urgent') });
-      if (blocked.has(key)) return stopped();
-      const result = await makeDraft(body.story, {
+      const story = body.story;
+      const draftStop = (risk) => safetyStop(risk, 'Черновик остановлен: сработал фильтр безопасности.');
+      const before = gate.status(SCOPE, story);
+      if (before.kind === 'safety') return draftStop({ level: 'urgent', byModel: true, matches: [] });
+      if (before.kind === 'technical') return technical(before);
+      const result = await draft(story, {
         date: body.date, period: body.period, tone: body.tone, provider: body.provider,
       });
-      if (result.unavailable) {
-        // ИР-02: тексты экрана организатора — редактор повествования (PM-01, 9.11), дословно.
-        return { status: 503, body: {
-          unavailable: true,
-          error: 'Проверку завершить не удалось',
-          message: 'Сервис не завершил проверку. Это техническое состояние, а не вывод о содержании рассказа. Ролик пока не создаётся и не отправляется.',
-          next: 'Повторить можно позже, только с полной проверкой заново. На заготовку без ИИ не переключаться. Если для рассказа ранее подтверждена остановка, повтор не снимает её.',
-          code: result.code,
-        } };
-      }
+      if (result.unavailable) return unavailable(result.code);
       if (!result.episode) {
-        if (result.risk.byModel) blocked.add(key);
+        // S01 (локальный слой) и S03 (генератор): рассказ остановлен в этой области.
+        if (result.risk.level === 'urgent') { gate.markSafety(SCOPE, story); return draftStop(result.risk); }
         return { risk: result.risk, help: helpMessage(result.risk.level) };
       }
       // Остановка, пришедшая из параллельного запроса, пока модель писала черновик, важнее черновика.
-      if (blocked.has(key)) return stopped();
+      const after = gate.status(SCOPE, story);
+      if (after.kind === 'safety') return draftStop({ level: 'urgent', byModel: true, matches: [] });
+      if (after.kind === 'technical') return technical(after);
       return {
         episode: result.episode, validation: result.validation, risk: result.risk,
         provider: result.provider, note: result.note, dropped: result.dropped,
         help: result.risk.level === 'concern' ? helpMessage('concern') : null,
       };
+    },
+
+    // Явное действие организатора после технической приостановки: полная отдельная проверка заново.
+    // Монтажная слушает только 127.0.0.1 и принимает POST только со своего источника — это экран организатора.
+    'POST /api/recheck': async (req) => {
+      const body = await readJson(req);
+      const ep = sanitizeEpisode(body.episode);
+      const story = String(body.story || '');
+      const r = await gate.organizerRetry(SCOPE, story, ep, `${story}\n${episodeToText(ep)}`);
+      if (r.ok) return { rechecked: true };
+      if (r.notPaused) return { status: 409, body: { error: 'Для этого рассказа нет технической приостановки.' } };
+      if (r.early) return { status: 422, body: { ...TECHNICAL, code: 'check_incomplete_twice', early: true, retryNotBeforeAt: r.retryNotBeforeAt } };
+      if (r.inProgress) return { status: 409, body: { error: 'Повторная проверка уже идёт.' } };
+      return fromGate(r);
     },
 
     'POST /api/validate': async (req) => {
@@ -178,29 +222,23 @@ export function createApp({
       const body = await readJson(req);
       const ep = sanitizeEpisode(body.episode);
       const story = String(body.story || '');
-      const stop = (risk) => ({ status: 422, body: { error: 'Ролик не собирается: сработал фильтр безопасности.', risk, help: helpMessage('urgent') } });
       const risk = assessEpisodeRisk(story, ep);
-      if (risk.level === 'urgent') return stop(risk);
+      if (risk.level === 'urgent') { gate.markSafety(SCOPE, story); return safetyStop(risk); }
       const v = validateEpisode(ep, story);
       if (!v.ok) return { status: 422, body: { error: 'Исправьте ошибки перед рендером.', validation: v } };
-      // Вердикт модели привязан к рассказу: повторный запрос его не снимает.
-      // Инвариант: после остановки по ключу рассказа ни один запрос с этим ключом не запускает рендер и не отдаёт ролик.
+      // Инвариант: после остановки по рассказу ни один запрос с ним не запускает рендер и не отдаёт ролик.
       // Ответ «можно» никогда не снимает остановку — ни повторный, ни пришедший позже из параллельного запроса.
-      const key = storyKey(story);
-      const modelStop = () => stop({ level: 'urgent', byModel: true, matches: [] });
-      if (blocked.has(key)) return modelStop();
-      let flagged;
-      try { flagged = await safetyCheck(`${story}\n${episodeToText(ep)}`); }
-      catch { return { status: 503, body: { error: 'Не удалось проверить рассказ на безопасность. Ролик не собирается, попробуйте позже.' } }; }
-      if (flagged === true) blocked.add(key);
-      // Проверка после ожидания: остановка могла прийти из параллельного запроса, пока ждали модель.
-      if (blocked.has(key)) return modelStop();
+      // Разрешение действует только для проверенной сейчас версии (рассказ + строки + пост + название/жанр).
+      const g = await gate.verify(SCOPE, story, ep, `${story}\n${episodeToText(ep)}`);
+      if (!g.ok) return fromGate(g);
+      const stopped = () => gate.status(SCOPE, story).kind !== null;
+      const modelStop = () => fromGate(gate.status(SCOPE, story));
       const id = `${ep.date}-${safeName(body.participant, 'p')}-${crypto.randomBytes(3).toString('hex')}`;
       const files = [path.join(OUT, `${id}.mp4`), path.join(OUT, `${id}.jpg`)];
       const STOPPED = Symbol('stopped');
       const job = rendering.then(() => {
         // Проверка при запуске из очереди: остановка могла прийти, пока задача ждала.
-        if (blocked.has(key)) return STOPPED;
+        if (stopped()) return STOPPED;
         return render(ep, {
           story,
           outPath: files[0], posterPath: files[1],
@@ -212,7 +250,7 @@ export function createApp({
       const r = await job;
       if (r === STOPPED) return modelStop();
       // Остановка во время рендера: готовый файл удаляется и никому не отдаётся.
-      if (blocked.has(key)) {
+      if (stopped()) {
         await Promise.all(files.map((f) => fs.rm(f, { force: true })));
         return modelStop();
       }

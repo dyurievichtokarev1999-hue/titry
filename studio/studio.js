@@ -168,7 +168,7 @@ async function requestDraft() {
   $('draftBtn').disabled = true; $('draftNote').textContent = 'Собираю черновик…';
   try {
     const r = await api('/api/draft', { story, date: $('date').value, period: $('period').value, tone: $('tone').value });
-    if (!r.episode) { showHelp(r.help); $('draftNote').textContent = 'Черновик остановлен фильтром безопасности.'; return; }
+    if (!r.episode) { if (r.help) showHelp(r.help); $('draftNote').textContent = 'Черновик остановлен фильтром безопасности.'; return; }
     state.episode = r.episode; state.draft = structuredClone(r.episode); state.provider = r.provider;
     fillForm(state.episode); changed();
     const dropped = r.dropped && r.dropped.length ? ` Отброшено строк без опоры на рассказ: ${r.dropped.length}.` : '';
@@ -176,11 +176,24 @@ async function requestDraft() {
     if (r.help) showHelp(r.help);
   } catch (e) {
     // ИР-02: «проверка недоступна» — экран организатора целиком (тексты редактора повествования, PM-01).
-    const d = e.data;
-    $('draftNote').textContent = d && d.unavailable ? `${d.error}. ${d.message} ${d.next}` : e.message;
+    $('draftNote').textContent = stopText(e, 'Черновик остановлен фильтром безопасности.');
   } finally { $('draftBtn').disabled = false; }
 }
 $('draftBtn').addEventListener('click', requestDraft);
+
+// Три состояния остановки (контракт владельца 10.11 12:05 / 13:05): safety — карточка помощи;
+// первый сбой проверки (503) и техническая приостановка (kind=technical) — только технический текст, без помощи.
+function stopText(e, safetyNote) {
+  const d = e.data || {};
+  if (d.kind === 'safety') { if (d.help) showHelp(d.help); return safetyNote; }
+  if (d.kind === 'technical') {
+    const when = d.retryNotBeforeAt ? ` Не раньше ${new Date(d.retryNotBeforeAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}.` : '';
+    $('recheckBtn').hidden = false;
+    return `${d.error}. ${d.message} ${d.next}${when}`;
+  }
+  if (d.unavailable) return `${d.error}. ${d.message} ${d.next}`;
+  return e.message;
+}
 
 function showHelp(text) { $('helpText').textContent = text; $('help').hidden = false; $('helpClose').focus(); }
 $('helpClose').addEventListener('click', () => { $('help').hidden = true; });
@@ -204,8 +217,21 @@ $('renderBtn').addEventListener('click', async () => {
     $('result').hidden = false;
     $('renderNote').textContent = `Готово за ${r.seconds.toFixed(0)} с. Отправьте файл участнику.`;
   } catch (e) {
-    $('renderNote').textContent = e.message;
+    $('renderNote').textContent = stopText(e, 'Ролик не собирается: сработал фильтр безопасности.');
   } finally { showChecks(); }
+});
+
+// Явное действие организатора после технической приостановки: полная проверка заново, не раньше срока.
+$('recheckBtn').addEventListener('click', async () => {
+  $('recheckBtn').disabled = true;
+  try {
+    await api('/api/recheck', { episode: state.episode, story: $('story').value.trim() || undefined });
+    $('recheckBtn').hidden = true;
+    $('renderNote').textContent = 'Проверка пройдена заново. Можно собрать ролик.';
+  } catch (e) {
+    $('renderNote').textContent = stopText(e, 'Ролик не собирается: сработал фильтр безопасности.');
+    if (e.data && e.data.kind === 'safety') $('recheckBtn').hidden = true;
+  } finally { $('recheckBtn').disabled = false; }
 });
 
 $('sentBtn').addEventListener('click', async () => {

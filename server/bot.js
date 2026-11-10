@@ -5,8 +5,9 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS } from '../engine/episode.js';
-import { makeDraft } from './draft.js';
+import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS, episodeToText } from '../engine/episode.js';
+import { makeDraft, modelSafetyCheck, hasClaudeCredentials } from './draft.js';
+import { makeGate } from './gate.js';
 import { helpMessage, assessEpisodeRisk } from './safety.js';
 import { renderEpisode, ROOT } from './render.js';
 import { logError } from './errlog.js';
@@ -51,6 +52,8 @@ export const TEXT = {
   deleted: 'Готово: сессия и статистика по тебе удалены.',
   // ИР-02: проверка недоступна — текст редактора повествования (PM-01, 9.11) дословно. Без срока и без карточки помощи.
   checkUnavailable: 'Ролик задерживается: сервис не завершил проверку. Сейчас отправить его не получится. Ждать в чате и отвечать на это сообщение не нужно.',
+  // ВРЕМЕННЫЙ текст технической приостановки (формулировка владельца 13:05) до редактуры: без слов о помощи и опасности.
+  checkPaused: 'Сервис дважды не смог завершить проверку; ролик сейчас не создаётся. Это техническое состояние, а не оценка твоего рассказа. Ждать в чате и отвечать на это сообщение не нужно.',
   // Черновик текста, на вычитку редактору повествования: честно, без «всё удалено», без обещаний сроков.
   deleteFailed: 'Сессия удалена, а удаление статистики по тебе подтвердить не получилось. Попробуй /delete ещё раз чуть позже.',
   renderFail: 'Не получилось собрать ролик. Попробуй ещё раз чуть позже.',
@@ -286,7 +289,13 @@ export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), sal
 
 // ── Логика бота (транспорт подменяется в тестах) ─────────────────────────────
 
-export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, render = renderEpisode, transcribe = transcribeOgg, now = () => new Date() } = {}) {
+export function createBot({
+  tg, metrics = makeMetrics(), draft = makeDraft, render = renderEpisode, transcribe = transcribeOgg, now = () => new Date(),
+  // Отдельная проверка перед рендером (контракт владельца 10.11 12:05 / 13:05): true — опасно, false — разрешение,
+  // исключение — проверка не завершена. Нет ключа — проверка недоступна, ролик не собирается.
+  safetyCheck, hasKey = safetyCheck ? () => true : hasClaudeCredentials, monoNow, wallNow,
+  gate = makeGate({ check: safetyCheck || ((text) => modelSafetyCheck(text)), hasKey, monoNow, wallNow }),
+} = {}) {
   const sessions = new Map();
   // Ключ рассказа: запрет по безопасности привязан к самому рассказу, а не к интерфейсу.
   const storyKey = (story) => crypto.createHash('sha256').update(String(story).toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim()).digest('hex');
@@ -295,7 +304,8 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
 
   const session = (chatId) => {
     let s = sessions.get(chatId);
-    if (!s) { s = { stage: 'idle', period: 'day' }; sessions.set(chatId, s); }
+    // scope — область запретов шлюза: своя у каждой сессии (как прежний s.blocked), /delete начинает новую.
+    if (!s) { s = { stage: 'idle', period: 'day', scope: Symbol('session') }; sessions.set(chatId, s); }
     s.touched = Date.now();
     return s;
   };
@@ -319,6 +329,7 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
     if (s.story) {
       s.blocked = s.blocked || new Set();
       s.blocked.add(storyKey(s.originalStory || s.story));
+      gate.markSafety(s.scope, s.originalStory || s.story);
     }
     await metrics.log(chatId, 'safety', { level, ...extra });
     await tg.send(chatId, helpMessage('urgent'));
@@ -396,14 +407,25 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
     if (!v.ok) { await showDraft(chatId, s); return; }
     const gen = s.draftId;
     const original = s.originalStory || s.story;
-    const current = () => alive(chatId, s) && s.draftId === gen && s.verdict === 'ok' && !isBlocked(s, original);
+    const current = () => alive(chatId, s) && s.draftId === gen && s.verdict === 'ok' && !isBlocked(s, original) && gate.status(s.scope, original).kind === null;
     // ИР-04 (критик реализации): один рендер идёт, до трёх ждут. Дальше — явный ответ «занято», без долговечной очереди.
     if (waiting >= 1 + MAX_RENDER_WAITING) return tg.send(chatId, TEXT.busy); // состояние сессии не меняется
-    s.stage = 'rendering';
-    const ahead = waiting;
-    waiting++;
     const ep = structuredClone(s.episode);
     const story = s.story;
+    // Отдельная проверка именно этой версии (рассказ + строки + пост + название/жанр) перед очередью.
+    s.stage = 'rendering';
+    const g = await gate.verify(s.scope, original, ep, `${story}\n${episodeToText(ep)}`);
+    if (!alive(chatId, s) || s.draftId !== gen) return; // удалённая или заменённая сессия не оживает
+    if (g.kind === 'safety') return stopForSafety(chatId, s, 'urgent', { at: 'check', byModel: true });
+    if (!g.ok) {
+      logError('check', { code: g.code });
+      s.stage = 'draft';
+      return tg.send(chatId, g.kind === 'technical' ? TEXT.checkPaused : TEXT.checkUnavailable);
+    }
+    if (!current()) return;
+    if (waiting >= 1 + MAX_RENDER_WAITING) { s.stage = 'draft'; return tg.send(chatId, TEXT.busy); }
+    const ahead = waiting;
+    waiting++;
     const out = path.join(ROOT, 'data', 'tmp', `${metrics.hash(chatId)}-${Date.now()}.mp4`);
     const STALE = Symbol('stale');
     let job;

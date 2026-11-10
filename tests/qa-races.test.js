@@ -163,7 +163,7 @@ test('R2 (воспроизведение QA): поздний старый чер
   const pending = deferred(), started = deferred();
   let drafts = 0, renders = 0;
   const tg = fakeTelegram();
-  const bot = createBot({
+  const bot = createBot({ safetyCheck: async () => false,
     tg, metrics,
     draft: async () => { drafts++; if (drafts === 1) { started.resolve(); return pending.promise; } return blockedDraft(); },
     render: async (e, o) => { renders++; return { outPath: o.outPath, seconds: 1, duration: 24 }; },
@@ -185,7 +185,7 @@ test('R2: поздняя остановка уничтожает уже пока
   const pending = deferred(), started = deferred();
   let drafts = 0, renders = 0;
   const tg = fakeTelegram();
-  const bot = createBot({
+  const bot = createBot({ safetyCheck: async () => false,
     tg, metrics,
     draft: async () => { drafts++; if (drafts === 1) { started.resolve(); return pending.promise; } return good(); },
     render: async (e, o) => { renders++; return { outPath: o.outPath, seconds: 1, duration: 24 }; },
@@ -204,7 +204,7 @@ test('R2: /delete во время незавершённого черновик�
   const pending = deferred(), started = deferred();
   const tg = fakeTelegram();
   const logged = [];
-  const bot = createBot({
+  const bot = createBot({ safetyCheck: async () => false,
     tg, metrics: { ...metrics, log: async (c, ev) => { logged.push(ev); } },
     draft: async () => { started.resolve(); return pending.promise; },
   });
@@ -222,7 +222,7 @@ test('R2: остановка во время рендера в боте — ви
   let drafts = 0;
   let outPath = null;
   const tg = fakeTelegram();
-  const bot = createBot({
+  const bot = createBot({ safetyCheck: async () => false,
     tg, metrics,
     draft: async () => {
       drafts++;
@@ -253,7 +253,7 @@ test('R2: остановка во время рендера в боте — ви
 test('R2: /delete во время рендера — видео не отправлено', async () => {
   const renderGo = deferred(), renderStarted = deferred();
   const tg = fakeTelegram();
-  const bot = createBot({
+  const bot = createBot({ safetyCheck: async () => false,
     tg, metrics,
     draft: async () => good(),
     render: async (e, o) => { renderStarted.resolve(); await renderGo.promise; return { outPath: o.outPath, seconds: 1, duration: 24 }; },
@@ -271,7 +271,7 @@ test('R2: /delete во время рендера — видео не отпра�
 test('R2: обычный путь не сломан — черновик, кнопка, видео', async () => {
   let renders = 0;
   const tg = fakeTelegram();
-  const bot = createBot({ tg, metrics, draft: async () => good(), render: async (e, o) => { renders++; return { outPath: o.outPath, seconds: 1, duration: 24 }; } });
+  const bot = createBot({ safetyCheck: async () => false, tg, metrics, draft: async () => good(), render: async (e, o) => { renders++; return { outPath: o.outPath, seconds: 1, duration: 24 }; } });
   await bot.handleUpdate(message());
   const play = keyboards(tg).at(-1).extra.reply_markup.inline_keyboard[0][0].callback_data;
   await bot.handleUpdate(click(play));
@@ -288,7 +288,7 @@ for (const mode of ['поздняя остановка', '/delete']) {
     let drafts = 0, renders = 0;
     const tg = fakeTelegram();
     tg.action = async (c, a) => { if (a === 'upload_video') { actionEntered.resolve(); await actionGo.promise; } };
-    const bot = createBot({
+    const bot = createBot({ safetyCheck: async () => false,
       tg, metrics,
       draft: async () => {
         if (mode === 'поздняя остановка' && ++drafts === 1) { firstStarted.resolve(); return firstDraft.promise; }
@@ -321,7 +321,7 @@ test('R3: /delete во время sendVideo — после forget запись r
   const m = { hash: () => 'qa-fictional', log: async (c, ev) => { events.push(ev); }, forget: async () => { events.push('forget'); } };
   const tg = fakeTelegram();
   tg.sendVideo = async () => { sendEntered.resolve(); await sendGo.promise; tg.sent.push({ text: 'VIDEO' }); };
-  const bot = createBot({ tg, metrics: m, draft: async () => good(), render: async (e, o) => ({ outPath: o.outPath, seconds: 1, duration: 24 }) });
+  const bot = createBot({ safetyCheck: async () => false, tg, metrics: m, draft: async () => good(), render: async (e, o) => ({ outPath: o.outPath, seconds: 1, duration: 24 }) });
   await bot.handleUpdate(message());
   const play = keyboards(tg).at(-1).extra.reply_markup.inline_keyboard[0][0].callback_data;
   const playing = bot.handleUpdate(click(play));

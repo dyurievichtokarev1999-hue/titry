@@ -53,7 +53,7 @@ test('бот: неполные ответы и max_tokens+true — render и sen
     let renders = 0, videos = 0;
     const sent = [];
     const tg = { send: async (id, txt, extra) => { sent.push({ text: txt, extra }); }, action: async () => {}, answer: async () => {}, sendVideo: async () => { videos++; } };
-    const bot = createBot({ tg, metrics: makeMetrics(path.join(dir, 'm.jsonl'), 'sr-salt'), draft: (s, o) => makeDraft(s, { ...o, provider: 'claude', client: client(resp) }), render: async () => { renders++; return {}; } });
+    const bot = createBot({ safetyCheck: async () => false, tg, metrics: makeMetrics(path.join(dir, 'm.jsonl'), 'sr-salt'), draft: (s, o) => makeDraft(s, { ...o, provider: 'claude', client: client(resp) }), render: async () => { renders++; return {}; } });
     try {
       const chat = { id: 776600, type: 'private' };
       await bot.handleUpdate({ message: { chat, text: STORY } });
@@ -67,15 +67,16 @@ test('бот: неполные ответы и max_tokens+true — render и sen
 
 const safetyJson = (flag) => JSON.stringify({ safety_flag: flag });
 
-test('modelSafetyCheck: «нет риска» только из полного ответа со строгим false', async () => {
-  for (const [name, resp] of Object.entries(INCOMPLETE(safetyJson))) assert.equal(await modelSafetyCheck('день', { client: client(resp) }), true, name);
+// Контракт владельца 10.11 12:05 п. 3: неполная проверка — не «опасно», а «проверка не завершена» (исключение с кодом).
+test('modelSafetyCheck: «нет риска» только из полного ответа со строгим false; неполный ответ — исключение', async () => {
+  for (const [name, resp] of Object.entries(INCOMPLETE(safetyJson))) await assert.rejects(modelSafetyCheck('день', { client: client(resp) }), (e) => typeof e.code === 'string', name);
   assert.equal(await modelSafetyCheck('день', { client: client({ stop_reason: 'max_tokens', content: [text(safetyJson(true))] }) }), true);
-  for (const v of ['"false"', '0', 'null']) assert.equal(await modelSafetyCheck('день', { client: client({ stop_reason: 'end_turn', content: [text(`{"safety_flag":${v}}`)] }) }), true, v);
-  assert.equal(await modelSafetyCheck('день', { client: client({ stop_reason: 'end_turn', content: [text('[]')] }) }), true);
+  for (const v of ['"false"', '0', 'null']) await assert.rejects(modelSafetyCheck('день', { client: client({ stop_reason: 'end_turn', content: [text(`{"safety_flag":${v}}`)] }) }), { code: 'bad_response' }, v);
+  await assert.rejects(modelSafetyCheck('день', { client: client({ stop_reason: 'end_turn', content: [text('[]')] }) }), { code: 'bad_response' });
   assert.equal(await modelSafetyCheck('день', { client: client({ stop_reason: 'end_turn', content: [text(safetyJson(false))] }) }), false, 'контроль');
 });
 
-test('/api/render: неполный ответ проверки — 422 без вызова render; контроль end_turn+false — рендер', async () => {
+test('/api/render: неполный ответ проверки — 503 без вызова render; true — 422; контроль end_turn+false — рендер', async () => {
   const cases = { ...INCOMPLETE(safetyJson), 'max_tokens + true': { stop_reason: 'max_tokens', content: [text(safetyJson(true))] }, 'контроль': { stop_reason: 'end_turn', content: [text(safetyJson(false))] } };
   for (const [name, resp] of Object.entries(cases)) {
     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-sr-app-'));
@@ -85,7 +86,7 @@ test('/api/render: неполный ответ проверки — 422 без �
     try {
       const res = await fetch(`http://127.0.0.1:${server.address().port}/api/render`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ episode: example.episode, story: example.story }) });
       if (name === 'контроль') { assert.equal(res.status, 200, name); assert.equal(renders, 1, name); }
-      else { assert.equal(res.status, 422, name); assert.equal(renders, 0, name); }
+      else { assert.equal(res.status, name === 'max_tokens + true' ? 422 : 503, name); assert.equal(renders, 0, name); }
     } finally { server.close(); await fs.rm(dataDir, { recursive: true, force: true }); }
   }
 });
@@ -99,11 +100,11 @@ test('обычная форма claude-opus-5-5: блоки thinking, затем
 
 test('text не строка, content не массив, refusal с текстом — закрытый отказ', async () => {
   const arr = { stop_reason: 'end_turn', content: [{ type: 'text', text: [safetyJson(false)] }] };
-  assert.equal(await modelSafetyCheck('день', { client: client(arr) }), true);
+  await assert.rejects(modelSafetyCheck('день', { client: client(arr) }), { code: 'bad_response' });
   const arrDraft = { stop_reason: 'end_turn', content: [{ type: 'text', text: [draftJson(false)] }] };
   assert.equal((await makeDraft(STORY, { provider: 'claude', client: client(arrDraft) })).unavailable, true);
-  assert.equal(await modelSafetyCheck('день', { client: client({ stop_reason: 'end_turn', content: 'нет' }) }), true);
+  await assert.rejects(modelSafetyCheck('день', { client: client({ stop_reason: 'end_turn', content: 'нет' }) }), { code: 'bad_response' });
   assert.equal((await makeDraft(STORY, { provider: 'claude', client: client({ stop_reason: 'end_turn', content: null }) })).unavailable, true);
-  assert.equal(await modelSafetyCheck('день', { client: client({ stop_reason: 'refusal', content: [text(safetyJson(false))] }) }), true);
+  await assert.rejects(modelSafetyCheck('день', { client: client({ stop_reason: 'refusal', content: [text(safetyJson(false))] }) }), { code: 'refusal' });
   assert.equal((await makeDraft(STORY, { provider: 'claude', client: client({ stop_reason: 'refusal', content: [text(draftJson(false))] }) })).unavailable, true);
 });

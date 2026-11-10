@@ -86,7 +86,8 @@ async function withApp(fn) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-app-'));
   const calls = [];
   const render = async (ep, opts) => { calls.push({ ep, opts }); return { seconds: 1, outPath: opts.outPath }; };
-  const server = createApp({ render, dataDir });
+  // Отдельная проверка подставная (разрешает): здесь проверяется локальный фильтр и валидация.
+  const server = createApp({ render, dataDir, safetyCheck: async () => false });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const base = `http://127.0.0.1:${server.address().port}`;
   const post = (p, body) => fetch(base + p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -166,7 +167,7 @@ function fakeTelegram() {
 test('бот: «продолжить» после срабатывания фильтра не делает черновик', async () => {
   const tg = fakeTelegram();
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-bot-'));
-  const bot = createBot({ tg, metrics: makeMetrics(path.join(dir, 'm.jsonl')), render: async () => { throw new Error('не должно вызываться'); }, draft: (s, o) => makeDraft(s, { ...o, provider: 'manual' }) });
+  const bot = createBot({ safetyCheck: async () => false, tg, metrics: makeMetrics(path.join(dir, 'm.jsonl')), render: async () => { throw new Error('не должно вызываться'); }, draft: (s, o) => makeDraft(s, { ...o, provider: 'manual' }) });
   const chat = { id: 5, type: 'private' };
   await bot.handleUpdate({ message: { chat, text: URGENT_STORY } });
   await bot.handleUpdate({ message: { chat, text: 'продолжить' } });
@@ -178,7 +179,7 @@ test('бот: правка от самого человека становитс
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-bot-'));
   const rendered = [];
   const render = async (ep, opts) => { rendered.push({ ep, opts }); await fs.mkdir(path.dirname(opts.outPath), { recursive: true }); await fs.writeFile(opts.outPath, 'x'); return { outPath: opts.outPath, duration: 24, seconds: 1 }; };
-  const bot = createBot({ tg, metrics: makeMetrics(path.join(dir, 'm.jsonl')), render, draft: (s, o) => makeDraft(s, { ...o, provider: 'manual' }) });
+  const bot = createBot({ safetyCheck: async () => false, tg, metrics: makeMetrics(path.join(dir, 'm.jsonl')), render, draft: (s, o) => makeDraft(s, { ...o, provider: 'manual' }) });
   const chat = { id: 6, type: 'private' };
   await bot.handleUpdate({ message: { chat, text: SAFE_STORY } });
   await bot.handleUpdate({ message: { chat, text: '1: Работа — обсуждение жирафа' } });

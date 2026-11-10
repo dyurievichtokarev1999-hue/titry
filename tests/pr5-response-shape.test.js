@@ -48,7 +48,7 @@ test('бот: каждая неверная форма — без кнопки, 
     let renders = 0, videos = 0;
     const sent = [];
     const tg = { send: async (id, text, extra) => { sent.push({ text, extra }); }, action: async () => {}, answer: async () => {}, sendVideo: async () => { videos++; } };
-    const bot = createBot({
+    const bot = createBot({ safetyCheck: async () => false,
       tg, metrics: makeMetrics(path.join(dir, 'm.jsonl'), 'pr5-salt'),
       draft: (story, o) => makeDraft(story, { ...o, provider: 'claude', client: modelReturning(raw) }),
       render: async () => { renders++; return {}; },

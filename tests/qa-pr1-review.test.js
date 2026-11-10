@@ -39,7 +39,7 @@ test('B1: корректный черновик → модельная оста�
   };
   const renders = [];
   const render = async (ep, opts) => { renders.push(opts); return { outPath: opts.outPath, duration: 24, seconds: 1 }; };
-  const bot = createBot({ tg, metrics: makeMetrics(path.join(dir, 'm.jsonl')), draft, render });
+  const bot = createBot({ safetyCheck: async () => false, tg, metrics: makeMetrics(path.join(dir, 'm.jsonl')), draft, render });
   const chat = { id: 11, type: 'private' };
 
   await bot.handleUpdate({ message: { chat, text: ex.story } });
@@ -82,10 +82,11 @@ test('B1: монтажная — модельная проверка на пря
   await fs.rm(dataDir, { recursive: true, force: true });
 });
 
-test('B1: modelSafetyCheck — отказ и непонятный ответ модели считаются опасностью', async () => {
+// Было «отказ = опасность»; по контракту 10.11 12:05 п. 3 — «проверка не завершена» (не разрешение): исключение с кодом.
+test('B1: modelSafetyCheck — отказ и непонятный ответ модели не дают разрешения', async () => {
   const client = (resp) => ({ beta: { messages: { create: async () => resp } } });
-  assert.equal(await modelSafetyCheck('день', { client: client({ stop_reason: 'refusal', content: [] }) }), true);
-  assert.equal(await modelSafetyCheck('день', { client: client({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'не JSON' }] }) }), true);
+  await assert.rejects(modelSafetyCheck('день', { client: client({ stop_reason: 'refusal', content: [] }) }), { code: 'refusal' });
+  await assert.rejects(modelSafetyCheck('день', { client: client({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'не JSON' }] }) }), { code: 'bad_json' });
   assert.equal(await modelSafetyCheck('день', { client: client({ stop_reason: 'end_turn', content: [{ type: 'text', text: '{"safety_flag":false}' }] }) }), false);
 });
 
