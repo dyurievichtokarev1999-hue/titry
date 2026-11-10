@@ -106,6 +106,8 @@ export async function modelSafetyCheck(story, { client, model = DEFAULT_MODEL } 
   try { raw = JSON.parse(texts.map((b) => b.text).join('')); parsed = true; } catch { /* ниже */ }
   const isObj = parsed && raw !== null && typeof raw === 'object' && !Array.isArray(raw);
   if (isObj && raw.safety_flag === true) return true;
+  // Обрезанный ответ, который успел сказать «опасно» ({"safety_flag": true без закрывающей скобки), не ослабляется.
+  if (!parsed && /"safety_flag"\s*:\s*true\b/.test(texts.map((b) => b.text).join(''))) return true;
   const fail = (code) => Object.assign(new Error('Проверка не завершена.'), { code });
   if (response?.stop_reason === 'refusal') throw fail('refusal');
   if (response?.stop_reason === 'max_tokens') throw fail('max_tokens');

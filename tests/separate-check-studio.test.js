@@ -85,6 +85,14 @@ test('S03: генератор true при разрешающей отдельн�
   });
 });
 
+test('S04: обрезанный ответ, успевший сказать true, — safety', async () => {
+  for (const t of ['{"safety_flag": true', '{"safety_flag":true,']) {
+    await withApp({ check: viaModel({ stop_reason: 'max_tokens', content: [text(t)] }) }, async ({ render, counters }) => {
+      assert.ok(isSafety(await render()), t); assert.equal(counters.render, 0);
+    });
+  }
+});
+
 test('S04: true с max_tokens → safety; неразборчивый max_tokens — неполная проверка (503), не разрешение', async () => {
   await withApp({ check: viaModel({ stop_reason: 'max_tokens', content: [text(sj(true))] }) }, async ({ render, counters }) => {
     assert.ok(isSafety(await render())); assert.equal(counters.render, 0);
@@ -168,6 +176,17 @@ test('T01: два неполных подряд одной версии → 503,
     assert.ok(isTechnical(await render()), 'новая попытка рендера не запускает проверку');
     assert.ok(isTechnical(await draft()));
     assert.equal(counters.check, 2); assert.equal(counters.render, 0);
+  });
+});
+
+test('T01: «подряд» — для одной версии: A-сбой, B-сбой, A-сбой не дают паузы', async () => {
+  await withApp({ check: fail }, async ({ render, counters }) => {
+    const other = ep(); other.title = 'Другая версия';
+    assert.ok(isUnavailable(await render()));
+    assert.ok(isUnavailable(await render(STORY, other)));
+    assert.ok(isUnavailable(await render()));
+    assert.ok(isTechnical(await render()), 'а два подряд одной версии — пауза');
+    assert.equal(counters.render, 0);
   });
 });
 
@@ -257,19 +276,33 @@ test('T05: два одновременных ручных повтора → о�
     assert.equal((await first).status, 200);
     assert.equal(counters.check, 3, 'две неполных + одна полная');
   });
-  // Поздний ответ прежней попытки: пока ждём false, другая попытка ставит новую паузу.
-  let r2; const slow = new Promise((r) => { r2 = r; });
+  // Поздний сбой прежней попытки (запрос A начат до паузы) не ставит новую паузу поверх ручного повтора,
+  // и полный false повтора даёт разрешение (находка независимого разбора 10.11).
+  let releaseA, releaseR;
+  const heldA = new Promise((r) => { releaseA = r; });
+  const heldR = new Promise((r) => { releaseR = r; });
   let call = 0;
-  await withApp({ check: async () => { call++; if (call <= 2) fail(); if (call === 3) { await slow; return false; } fail(); } }, async ({ render, recheck, clock }) => {
-    await render(); await render();
-    clock.mono += RETRY_AFTER_MS; clock.wall += RETRY_AFTER_MS;
-    const late = recheck(); // call 3 — повиснет
+  await withApp({ check: async () => {
+    call++;
+    if (call === 1) { await heldA; fail(); }   // A: висит, потом сбой
+    if (call === 2 || call === 3) fail();      // B, C: неполные → technical
+    if (call === 4) { await heldR; return false; } // ручной повтор: полный false
+    return false;
+  } }, async ({ render, recheck, clock, counters }) => {
+    const a = render();
     await new Promise((r) => setTimeout(r, 30));
-    // Пока повтор висит, рендер не проходит: пауза действует.
-    const during = await render();
-    assert.ok(isTechnical(during));
-    r2();
-    assert.equal((await late).status, 200, 'полная проверка этой эпохи снимает её паузу');
+    assert.ok(isUnavailable(await render()));
+    assert.ok(isTechnical(await render()));
+    clock.mono += RETRY_AFTER_MS; clock.wall += RETRY_AFTER_MS;
+    const r = recheck();
+    await new Promise((res) => setTimeout(res, 30));
+    releaseA();
+    assert.ok(isUnavailable(await a), 'поздний сбой A — только 503 для своего запроса');
+    releaseR();
+    const done = await r;
+    assert.equal(done.status, 200, JSON.stringify(done.body));
+    assert.equal((await render()).status, 200);
+    assert.equal(counters.render, 1);
   });
 });
 
@@ -347,6 +380,9 @@ test('L03: в ответ и журнал — только допустимый �
       assert.ok(isUnavailable(r)); assert.equal(r.body.code, 'error');
       const t = await render();
       assert.ok(isTechnical(t)); assert.equal(t.body.code, 'check_incomplete_twice');
+      const logged = lines.map((l) => JSON.parse(l));
+      assert.deepEqual(logged.map((l) => [l.stage, l.code]), [['check', 'error'], ['check', 'check_incomplete_twice']], 'журнал пишет этап и код');
+      for (const l of logged) assert.deepEqual(Object.keys(l).sort(), ['at', 'code', 'level', 'stage', 'version']);
       const all = JSON.stringify([r.body, t.body]) + lines.join('\n');
       assert.ok(!all.includes('МАРКЕР'), 'маркер исключения не выходит наружу');
       assert.ok(!all.includes(STORY.slice(0, 20)), 'текст рассказа не выходит наружу');

@@ -162,7 +162,11 @@ export function createApp({
   // Технические состояния: без помощи, без urgent/byModel.
   const technical = (r) => ({ status: 422, body: { ...TECHNICAL, code: 'check_incomplete_twice', retryNotBeforeAt: r.retryNotBeforeAt || null } });
   const unavailable = (code) => ({ status: 503, body: { ...UNAVAILABLE, code } });
-  const fromGate = (r) => (r.kind === 'safety' ? safetyStop() : r.kind === 'technical' ? technical(r) : unavailable(r.code));
+  // В журнал — только этап и код (ИР-03), без текста и сообщений исключений.
+  const fromGate = (r, stage = 'check') => {
+    if (r.kind !== 'safety') logError(stage, { code: r.kind === 'technical' ? 'check_incomplete_twice' : r.code });
+    return r.kind === 'safety' ? safetyStop() : r.kind === 'technical' ? technical(r) : unavailable(r.code);
+  };
 
   const routes = {
     'GET /api/config': async () => ({
@@ -209,7 +213,7 @@ export function createApp({
       if (r.notPaused) return { status: 409, body: { error: 'Для этого рассказа нет технической приостановки.' } };
       if (r.early) return { status: 422, body: { ...TECHNICAL, code: 'check_incomplete_twice', early: true, retryNotBeforeAt: r.retryNotBeforeAt } };
       if (r.inProgress) return { status: 409, body: { error: 'Повторная проверка уже идёт.' } };
-      return fromGate(r);
+      return fromGate(r, 'recheck');
     },
 
     'POST /api/validate': async (req) => {

@@ -39,7 +39,9 @@ test('бот S02: отдельная проверка true → сообщени�
   const b = setup({ check: () => true });
   await b.story(); await b.play();
   assert.match(b.last(), HELP);
-  await b.play(); await b.story(); await b.play();
+  // Новый черновик того же рассказа не появляется (остановка), и ни одна кнопка не запускает рендер.
+  await b.story();
+  for (let n = 0; n <= 6; n++) await b.bot.handleUpdate({ callback_query: { id: 'q', data: `play:${n}`, message: { chat } } });
   assert.equal(b.counters.render, 0); assert.equal(b.counters.video, 0);
   assert.equal(b.counters.check, 1, 'после остановки рассказ больше не проверяется');
 });

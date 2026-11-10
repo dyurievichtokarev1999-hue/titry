@@ -44,7 +44,9 @@ export function makeGate({ check, hasKey = () => true, monoNow = monotonic, wall
   const scopes = new Map();
   const area = (scope) => {
     let a = scopes.get(scope);
-    if (!a) { a = { safety: new Set(), technical: new Map(), failures: new Map() }; scopes.set(scope, a); }
+    // failures: storyDigest → { vd, n } — подряд идущие неполные ответы одной версии; epoch — номер «эпохи» рассказа:
+    // меняется при новой паузе и при ручном повторе; ответы, начатые в прежней эпохе, не учитываются в счётчике.
+    if (!a) { a = { safety: new Set(), technical: new Map(), failures: new Map(), epochs: new Map() }; scopes.set(scope, a); }
     return a;
   };
 
@@ -64,7 +66,11 @@ export function makeGate({ check, hasKey = () => true, monoNow = monotonic, wall
     a.technical.delete(sd); // safety сильнее; technical больше не нужен
   }
 
+  const epochOf = (a, sd) => a.epochs.get(sd) || 0;
+  const bumpEpoch = (a, sd) => { a.epochs.set(sd, epochOf(a, sd) + 1); a.failures.delete(sd); };
+
   function setTechnical(a, sd) {
+    bumpEpoch(a, sd);
     const t = { retryNotBefore: monoNow() + retryMs, retryNotBeforeAt: new Date(wallNow() + retryMs).toISOString(), epoch: Symbol('technical'), retrying: false };
     a.technical.set(sd, t);
     return t;
@@ -77,21 +83,25 @@ export function makeGate({ check, hasKey = () => true, monoNow = monotonic, wall
     const sd = storyDigest(story);
     const vd = versionDigest(story, ep);
     if (!hasKey()) return { unavailable: true, code: 'no_key' };
+    const epoch = epochOf(a, sd);
     let flagged, err;
     try { flagged = await check(text); } catch (e) { err = e; }
     // После ожидания: остановка могла прийти из параллельного запроса — она сильнее любого ответа.
     if (a.safety.has(sd)) return { kind: 'safety' };
     if (!err && flagged === true) { markSafety(scope, story); return { kind: 'safety' }; }
-    if (!err && flagged === false) { a.failures.delete(vd); return { ok: true }; }
-    // Неполная проверка: исключение или ответ не строго булев.
-    const n = (a.failures.get(vd) || 0) + 1;
+    const stale = epochOf(a, sd) !== epoch; // ответ начат до новой паузы или до ручного повтора
+    if (!err && flagged === false) { if (!stale) a.failures.delete(sd); return { ok: true, stale }; }
+    const code = err ? safeCode(err) : 'bad_response';
+    if (stale) return { unavailable: true, code }; // поздний сбой прежней попытки счётчик не двигает
+    // Неполная проверка: «подряд» — для одной версии; сбой другой версии начинает счёт заново.
+    const prev = a.failures.get(sd);
+    const n = prev && prev.vd === vd ? prev.n + 1 : 1;
     if (n >= 2) {
-      a.failures.delete(vd);
       const t = setTechnical(a, sd);
       return { kind: 'technical', code: 'check_incomplete_twice', retryNotBeforeAt: t.retryNotBeforeAt };
     }
-    a.failures.set(vd, n);
-    return { unavailable: true, code: err ? safeCode(err) : 'bad_response' };
+    a.failures.set(sd, { vd, n });
+    return { unavailable: true, code };
   }
 
   /** Проверка перед выдачей: состояние → отдельная проверка версии. technical без действия организатора не проверяется. */
@@ -122,8 +132,8 @@ export function makeGate({ check, hasKey = () => true, monoNow = monotonic, wall
     if (t.retrying) return { inProgress: true };
     t.retrying = true;
     try {
-      const vd = versionDigest(story, ep);
-      a.failures.set(vd, 1); // повтор после паузы: неполный ответ сразу возвращает technical
+      bumpEpoch(a, sd); // ответы прежних попыток больше не влияют на счёт
+      a.failures.set(sd, { vd: versionDigest(story, ep), n: 1 }); // повтор после паузы: неполный ответ сразу возвращает technical
       const r = await runCheck(scope, story, ep, text);
       if (r.ok) {
         if (a.technical.get(sd) === t) a.technical.delete(sd);
