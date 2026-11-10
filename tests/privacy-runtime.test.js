@@ -90,6 +90,7 @@ test('И2: заголовок эпизода не попадает в коман
 
 test('бот: safety переживает перезапуск и /delete (хранилище, область — участник)', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-botledger-'));
+  const opened = []; // все хранилища теста: до удаления каталога дождаться их записей (ENOTEMPTY, QA 17:32)
   const file = path.join(dir, 'state', 'blocked-v1.json');
   const chat = { id: 77101, type: 'private' };
   const metrics = { hash: () => 'qa', log: async () => {}, forget: async () => {} };
@@ -97,6 +98,7 @@ test('бот: safety переживает перезапуск и /delete (хр�
   async function boot(check) {
     const ledger = makeLedger({ file, key: 'test-only-key-not-a-secret', keyVersion: 'v1' });
     await ledger.load();
+    opened.push(ledger);
     const sent = []; const c = { render: 0, video: 0, check: 0 };
     const bot = createBot({
       tg: { send: async (x, t) => { sent.push(t); }, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''), sendVideo: async () => { c.video++; } },
@@ -123,11 +125,12 @@ test('бот: safety переживает перезапуск и /delete (хр�
     const other = { id: 77102, type: 'private' };
     await b.say(ex.story, other); await b.playAll(other);
     assert.equal(b.c.render, 1);
-  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+  } finally { await Promise.all(opened.map((l) => l.flush())); await fs.rm(dir, { recursive: true, force: true }); }
 });
 
 test('бот: technical переживает перезапуск и /delete; опасный черновик после /delete всё равно записывает запрет', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-botledger2-'));
+  const opened = [];
   const file = path.join(dir, 'state', 'blocked-v1.json');
   const chat = { id: 77201, type: 'private' };
   const metrics = { hash: () => 'qa', log: async () => {}, forget: async () => {} };
@@ -136,6 +139,7 @@ test('бот: technical переживает перезапуск и /delete; о
   async function boot({ check, draft = good }) {
     const ledger = makeLedger({ file, key: 'test-only-key-not-a-secret', keyVersion: 'v1' });
     await ledger.load();
+    opened.push(ledger);
     const sent = []; const c = { render: 0, video: 0, check: 0 };
     const bot = createBot({
       tg: { send: async (x, t) => { sent.push(t); }, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''), sendVideo: async () => { c.video++; } },
@@ -171,7 +175,7 @@ test('бот: technical переживает перезапуск и /delete; о
     release(); await pending;
     await c.say(STORY2, other); await c.playAll(other);
     assert.equal(c.c.render, 0, 'запрет записан, хотя сессия удалена'); assert.equal(c.c.video, 0);
-  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+  } finally { await Promise.all(opened.map((l) => l.flush())); await fs.rm(dir, { recursive: true, force: true }); }
 });
 
 test('И1: чужой путь или ссылка вместо каталога задач — отказ, без записи', async () => {
@@ -188,4 +192,46 @@ test('И1: чужой путь или ссылка вместо каталога
     if (saved.f === undefined) delete process.env.YANDEX_FOLDER_ID; else process.env.YANDEX_FOLDER_ID = saved.f;
     await fs.rm(base, { recursive: true, force: true });
   }
+});
+
+test('B09.6: ошибка стартовой очистки — бот не начинает опрос Telegram, код выхода ненулевой', { timeout: 30000 }, async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-entry-'));
+  try {
+    // Сбой очистки, не зависящий от прав (тесты могут идти от root): путь runtime — обычный файл (ENOTDIR).
+    const rt = path.join(dir, 'runtime');
+    await fs.writeFile(rt, 'не каталог');
+    const flag = path.join(dir, 'getUpdates.flag');
+    const preload = path.join(dir, 'preload.mjs');
+    await fs.writeFile(preload, `import fs from 'node:fs';
+globalThis.fetch = async (url) => {
+  const m = String(url).split('/').pop();
+  if (m === 'getUpdates') { fs.writeFileSync(${JSON.stringify(flag)}, '1'); process.exit(0); }
+  return new Response(JSON.stringify({ ok: true, result: m === 'getMe' ? { username: 'test_bot' } : true }));
+};`);
+    const run = (env) => new Promise((resolve) => {
+      const p = spawn(process.execPath, ['--import', preload, new URL('../server/bot.js', import.meta.url).pathname], {
+        env: { ...process.env, TELEGRAM_BOT_TOKEN: 'test-only', TITRY_RUNTIME_DIR: rt, TITRY_BLOCKED_HMAC_KEY: 'test-only-key-not-a-secret', TITRY_BLOCKED_KEY_VERSION: 'v-entry-test', ...env },
+        cwd: dir, stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      p.on('exit', (code) => resolve(code));
+    });
+    const code = await run({});
+    assert.notEqual(code, 0, 'код выхода ненулевой');
+    await assert.rejects(fs.stat(flag), { code: 'ENOENT' }, 'getUpdates не вызывался');
+    // Нет ключа хранилища — тоже отказ запуска (решение владельца 17:10). Очистка здесь успешна.
+    await fs.rm(rt); await fs.mkdir(rt, { mode: 0o700 });
+    const code2 = await run({ TITRY_BLOCKED_HMAC_KEY: '' });
+    assert.notEqual(code2, 0);
+    await assert.rejects(fs.stat(flag), { code: 'ENOENT' });
+    // Контроль: успешная подготовка доходит до опроса (хранилище — во временном ROOT нельзя, поэтому
+    // проверяется prepareBot в соседнем тесте; здесь — только отказы).
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('B09.6: prepareBot — ошибка очистки или хранилища отклоняется; успешная подготовка возвращает хранилище', async () => {
+  const { prepareBot } = await import('../server/bot.js');
+  const okLedger = { load: async () => {} };
+  await assert.rejects(prepareBot({ cleanup: async () => { throw Object.assign(new Error('x'), { code: 'EACCES' }); }, ledger: okLedger }), { stage: 'voice.cleanup', code: 'EACCES' });
+  await assert.rejects(prepareBot({ cleanup: async () => 0, ledger: { load: async () => { throw new Error('x'); } } }), { stage: 'ledger.load', code: 'ledger' });
+  assert.equal(await prepareBot({ cleanup: async () => 0, ledger: okLedger }), okLedger);
 });

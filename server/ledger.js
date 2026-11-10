@@ -152,15 +152,15 @@ export function makeLedger({ file, key, keyVersion, ttlMs = null, wallNow = () =
     return t ? { kind: 'technical', retryNotBeforeAt: t.retry_not_before_at } : { kind: null };
   }
 
-  /** Есть ли записи области: true/false; null — хранилище неисправно (состояние неизвестно). */
-  function scopeHasRecords(scope) {
+  /** Виды записей области (Set: safety/technical); null — хранилище неисправно (состояние неизвестно). */
+  function scopeKinds(scope) {
     if (state !== 'ready') return null;
     const sd = scopeDigest(scope), now = wallNow();
-    return records.some((r) => r.scope_digest === sd && live(r, now));
+    return new Set(records.filter((r) => r.scope_digest === sd && live(r, now)).map((r) => r.kind));
   }
 
   /** Дождаться подтверждения всех начатых записей. false — непрерывность не подтверждена. */
   async function flush() { await chain; return state === 'ready'; }
 
-  return { load, put, clearTechnical, lookup, scopeHasRecords, flush, healthy: () => state === 'ready', get size() { return records.length; } };
+  return { load, put, clearTechnical, lookup, scopeKinds, flush, healthy: () => state === 'ready', get size() { return records.length; } };
 }

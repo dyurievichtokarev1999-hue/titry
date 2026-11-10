@@ -179,7 +179,7 @@ test('бот /delete: запись запрета сохранена → уда�
 
 test('бот /delete: сбой статистики и неизвестное состояние хранилища называются отдельно', async () => {
   const sent = [];
-  const brokenLedger = { lookup: () => ({ failed: true }), scopeHasRecords: () => null, flush: async () => false, put: async () => {}, clearTechnical: async () => {} };
+  const brokenLedger = { lookup: () => ({ failed: true }), scopeKinds: () => null, flush: async () => false, put: async () => {}, clearTechnical: async () => {} };
   const bot = createBot({
     tg: { send: async (c, t) => { sent.push(t); }, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''), sendVideo: async () => {} },
     metrics: { ...metrics, forget: async () => { throw Object.assign(new Error('x'), { code: 'EIO' }); } },
@@ -201,4 +201,21 @@ test('бот /delete во время отдельной проверки: пол
   await del(b);
   assert.equal(b.last(), 'Сессия и статистика по тебе удалены.\nПолное удаление не подтверждено.');
   assert.equal(b.counters.render, 0); assert.equal(b.counters.video, 0);
+});
+
+test('бот /delete, исход 2: на вымышленном стенде — вид записи с маркером; вне стенда — маркера нет', async () => {
+  const saved = process.env.TITRY_STAND;
+  try {
+    for (const [stand, check, expect] of [
+      ['fictional', () => true, 'Сессия и статистика по тебе удалены.\nСлужебная запись об остановке по безопасности сохранена по правилу теста. В ней нет текста рассказа. [срок не утверждён]'],
+      ['fictional', fail, 'Сессия и статистика по тебе удалены.\nСлужебная запись о технической приостановке сохранена по правилу теста. В ней нет текста рассказа. [срок не утверждён]'],
+      [undefined, () => true, 'Сессия и статистика по тебе удалены.\nПолное удаление не подтверждено.'],
+    ]) {
+      if (stand) process.env.TITRY_STAND = stand; else delete process.env.TITRY_STAND;
+      const b = setup({ check });
+      await b.story(); await b.play(); await b.play();
+      await del(b);
+      assert.equal(b.last(), expect);
+    }
+  } finally { if (saved === undefined) delete process.env.TITRY_STAND; else process.env.TITRY_STAND = saved; }
 });

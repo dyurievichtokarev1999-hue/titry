@@ -10,7 +10,7 @@ import { makeDraft, modelSafetyCheck, hasClaudeCredentials } from './draft.js';
 import { makeGate } from './gate.js';
 import { helpMessage, assessEpisodeRisk } from './safety.js';
 import { renderEpisode, ROOT } from './render.js';
-import { logError } from './errlog.js';
+import { logError, safeCode } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS, cleanupVoiceOrphans } from './stt.js';
 import { makeLedger, KEY_ENV, KEY_VERSION_ENV } from './ledger.js';
 
@@ -52,9 +52,12 @@ export const TEXT = {
   heavier: 'Спасибо за честный ответ. Можно остановиться прямо сейчас, это нормально.',
   // Исходы /delete — редактор повествования 16:24, решение владельца 17:10 (только вымышленный стенд).
   deleted: 'Сессия и статистика по тебе удалены.',
-  // Есть сохранённая служебная запись запрета; текст исхода 2 ждёт подтверждения редактора — до него
-  // запасной ответ владельца 17:10: полное удаление не подтверждается.
+  // Запись может появиться (идёт черновик или проверка) или стенд не вымышленный: полное удаление не подтверждается.
   deleteKept: 'Полное удаление не подтверждено.',
+  // Исход 2 — ТОЛЬКО вымышленный стенд (TITRY_STAND=fictional; редактор 18:25, решение владельца 17:10).
+  // Маркер «[срок не утверждён]» не допускается в сборке для реальных данных (tests/release-guard.test.js).
+  keptSafety: 'Служебная запись об остановке по безопасности сохранена по правилу теста. В ней нет текста рассказа. [срок не утверждён]',
+  keptTechnical: 'Служебная запись о технической приостановке сохранена по правилу теста. В ней нет текста рассказа. [срок не утверждён]',
   recordUnknown: 'Проверить состояние служебной записи не получилось. Полное удаление не подтверждено.',
   // ИР-02: проверка недоступна — текст редактора повествования (PM-01, 9.11) дословно. Без срока и без карточки помощи.
   checkUnavailable: 'Ролик задерживается: сервис не завершил проверку. Сейчас отправить его не получится. Ждать в чате и отвечать на это сообщение не нужно.',
@@ -502,11 +505,16 @@ export function createBot({
       // Запреты safety/technical по /delete не снимаются; если они есть, полное удаление не подтверждается.
       let forgot = true;
       try { await metrics.forget(chatId); } catch { forgot = false; }
-      const kept = gate.recordsFor(`chat:${chatId}`);
+      const kinds = gate.recordsFor(`chat:${chatId}`);
       const lines = [forgot ? TEXT.deleted : TEXT.deleteFailed];
-      if (kept === 'unknown') lines.push(TEXT.recordUnknown);
-      // Запрет есть, или черновик/проверка ещё идут и могут его поставить: полное удаление не подтверждается.
-      else if (kept === 'kept' || inFlight.has(chatId)) lines.push(TEXT.deleteKept);
+      if (kinds === null) lines.push(TEXT.recordUnknown); // намеренное сохранение не утверждаем
+      else {
+        const fictional = process.env.TITRY_STAND === 'fictional';
+        if (fictional && kinds.has('safety')) lines.push(TEXT.keptSafety);
+        if (fictional && kinds.has('technical')) lines.push(TEXT.keptTechnical);
+        // Не вымышленный стенд (срок не утверждён) или черновик/проверка ещё идут и могут поставить запрет.
+        if ((kinds.size && !fictional) || inFlight.has(chatId)) lines.push(TEXT.deleteKept);
+      }
       return tg.send(chatId, lines.join('\n'));
     }
     if (text === '/help') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });
@@ -614,9 +622,26 @@ export function telegram(token) {
   };
 }
 
+/**
+ * Подготовка до приёма задач (B09.6, решение владельца 17:10 и 18:05): очистка остатков голосовых и загрузка
+ * хранилища запретов. Любая ошибка — исключение: вызывающий не начинает опрос Telegram (fail closed).
+ * Нет ключа хранилища — тоже отказ запуска, а не тихий режим.
+ */
+export async function prepareBot({ cleanup = cleanupVoiceOrphans, ledger } = {}) {
+  try { await cleanup(); } catch (e) { logError('voice.cleanup', e); throw Object.assign(new Error('startup'), { code: safeCode(e), stage: 'voice.cleanup' }); }
+  const l = ledger || makeLedger({ file: path.join(ROOT, 'data', 'state', 'blocked-v1.json'), key: process.env[KEY_ENV], keyVersion: process.env[KEY_VERSION_ENV] || 'v1' });
+  try { await l.load(); } catch (e) { logError('ledger.load', e); throw Object.assign(new Error('startup'), { code: 'ledger', stage: 'ledger.load' }); }
+  return l;
+}
+
 async function main() {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) { console.error('Задайте TELEGRAM_BOT_TOKEN (выдаёт @BotFather).'); process.exit(2); }
+  let ledger;
+  try { ledger = await prepareBot(); } catch {
+    console.error(`Запуск остановлен: не подтверждена очистка временных файлов или хранилище запретов (${KEY_ENV}, ${KEY_VERSION_ENV}). Задачи не принимаются. Остатки tmp и файл хранилища не удаляйте вручную без владельца кода.`);
+    process.exit(3);
+  }
   const tg = telegram(token);
   const me = await tg.call('getMe');
   await tg.call('setMyCommands', { commands: [
@@ -626,14 +651,6 @@ async function main() {
     { command: 'delete', description: 'Запросить удаление данных' },
   ] }).catch(() => {});
   console.log(`Бот @${me.username} запущен. Распознавание речи: ${sttAvailable() ? 'SpeechKit' : 'выключено'}.`);
-  // Остатки голосовых прежних задач (после аварии) — до приёма задач.
-  await cleanupVoiceOrphans().catch((e) => logError('voice.cleanup', e));
-  // Хранилище запретов загружается до приёма задач; при сбое бот работает, но ролики не выдаёт (закрытый отказ).
-  const ledger = makeLedger({ file: path.join(ROOT, 'data', 'state', 'blocked-v1.json'), key: process.env[KEY_ENV], keyVersion: process.env[KEY_VERSION_ENV] || 'v1' });
-  try { await ledger.load(); } catch (e) {
-    logError('ledger.load', e);
-    console.error(`Хранилище запретов недоступно: ролики не выдаются. Проверьте ${KEY_ENV} и ${KEY_VERSION_ENV}; tmp и повреждённый файл не удаляйте.`);
-  }
   const bot = createBot({ tg, ledger });
   setInterval(bot.sweep, 10 * 60 * 1000).unref();
   let offset = 0;

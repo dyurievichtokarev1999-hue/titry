@@ -178,16 +178,21 @@ export function makeGate({ check, hasKey = () => true, monoNow = monotonic, wall
     } finally { t.retrying = false; }
   }
 
-  /** Есть ли в области сохранённые запреты: 'none' | 'kept' | 'unknown' (хранилище недоступно). */
+  /**
+   * Какие запреты сохранены в области: Set из 'safety' / 'technical' (пустой — нет записей);
+   * null — хранилище недоступно, состояние неизвестно.
+   */
   function recordsFor(scope) {
     const a = scopes.get(scope);
-    const inMemory = !!a && (a.safety.size > 0 || a.technical.size > 0);
+    const kinds = new Set();
+    if (a && a.safety.size) kinds.add('safety');
+    if (a && a.technical.size) kinds.add('technical');
     if (durable(scope)) {
-      const l = ledger.scopeHasRecords(scope);
-      if (l === null) return 'unknown';
-      return l || inMemory ? 'kept' : 'none';
+      const l = ledger.scopeKinds(scope);
+      if (l === null) return null;
+      for (const k of l) kinds.add(k);
     }
-    return inMemory ? 'kept' : 'none';
+    return kinds;
   }
 
   return { status, markSafety, verify, organizerRetry, recordsFor, versionDigest, storyDigest };
