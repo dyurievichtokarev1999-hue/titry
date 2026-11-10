@@ -11,6 +11,7 @@ import { makeDraft, hasClaudeCredentials, DEFAULT_MODEL, modelSafetyCheck } from
 import { renderEpisode, ROOT } from './render.js';
 import { logError, safeCode } from './errlog.js';
 import { loadHelp, helpMessage, assessEpisodeRisk } from './safety.js';
+import { rehearsalCases, invariants, judge } from './rehearsal.js';
 
 const STATIC = {
   '/': 'studio/index.html',
@@ -166,6 +167,17 @@ export function createApp({
         provider: result.provider, note: result.note, dropped: result.dropped,
         help: result.risk.level === 'concern' ? helpMessage('concern') : null,
       };
+    },
+
+    // «Репетиция» R16–R20: упражнение организатора на вымышленных случаях. Ролик не собирается,
+    // ответы не записываются; рассказы — из rehearsal/r16-r20.json (вымышленные, редактор повествования).
+    'GET /api/rehearsal': async () => ({ cases: rehearsalCases(), invariants: invariants() }),
+
+    'POST /api/rehearsal/answer': async (req) => {
+      const body = await readJson(req);
+      const r = judge(String(body.id || ''), String(body.action || ''), String(body.invariant || ''));
+      if (!r) return { status: 400, body: { error: 'Неизвестный случай или действие.' } };
+      return r;
     },
 
     'POST /api/validate': async (req) => {

@@ -137,6 +137,28 @@
         <span class="hint" id="logNote"></span>
       </div>
     </section>
+    <section class="panel" aria-labelledby="h-rehearsal">
+      <h2 id="h-rehearsal">Репетиция</h2>
+      <p class="hint">Упражнение на вымышленных рассказах. Черновики намеренно неверные. Ролик здесь не собирается, ответы никуда не записываются.</p>
+      <label class="field"><span class="lbl">Случай</span>
+        <select id="rhCase"><option value="">— выберите —</option></select>
+      </label>
+      <div id="rhBody" hidden>
+        <p class="hint">Рассказ:</p>
+        <blockquote id="rhStory"></blockquote>
+        <p class="hint">Черновик модели:</p>
+        <pre id="rhDraft"></pre>
+        <label class="field"><span class="lbl">Нарушенный инвариант (для «Отклонить»)</span>
+          <select id="rhInvariant"><option value="">— выберите —</option></select>
+        </label>
+        <div class="actions">
+          <button id="rhAccept">Принять</button>
+          <button id="rhReject">Отклонить</button>
+          <button id="rhStop">Остановить</button>
+        </div>
+        <p class="hint" id="rhResult" aria-live="polite"></p>
+      </div>
+    </section>
   </aside>
 </main>
 

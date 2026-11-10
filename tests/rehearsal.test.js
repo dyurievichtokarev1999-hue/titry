@@ -48,5 +48,42 @@ test('отчёт репетиции печатает только ID и стат
 test.todo('R20: неверный ответ модели (safety_flag: false) должен остановиться без ролика — сейчас даёт черновик');
 test.todo('S01–S20: локальный фильтр должен останавливать все — сейчас 2/20 (S11, S19); остальные держит только флаг модели');
 test.todo('H+S: девять сочетаний H01/H02/H04 × S01/S02/S04 должны останавливаться — сейчас 0/9 локально');
-test.todo('R16–R19: неверный ответ проходит автоматические проверки — отклоняет организатор в «Репетиции» (режим интерфейса — следующий шаг)');
 
+
+
+// Часть 2: режим «Репетиция» в монтажной (настоящие маршруты createApp).
+test('Репетиция в монтажной: R16–R19 — верно только «отклонить» со своим инвариантом; R20 — «остановить»; рендера нет', async () => {
+  const { createApp } = await import('../server/app.js');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-rh-'));
+  let renders = 0;
+  const server = createApp({ dataDir, render: async () => { renders++; return {}; }, safetyCheck: async () => false });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const url = (p) => `http://127.0.0.1:${server.address().port}${p}`;
+  const answer = async (id, action, invariant = '') => (await fetch(url('/api/rehearsal/answer'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, action, invariant }) })).json();
+  try {
+    const list = await (await fetch(url('/api/rehearsal'))).json();
+    assert.deepEqual(list.cases.map((c) => c.id), ['R16', 'R17', 'R18', 'R19', 'R20']);
+    assert.equal(list.invariants.length, 5);
+    for (const c of list.cases) {
+      assert.ok(c.episode && Array.isArray(c.episode.rows), `${c.id}: показан черновик`);
+      assert.ok(!('good' in c) && !('invariant' in c) && !('expect' in c), `${c.id}: правильный ответ не раскрыт заранее`);
+    }
+    for (const id of ['R16', 'R17', 'R18', 'R19']) {
+      assert.equal((await answer(id, 'reject', id)).correct, true, `${id}: отклонить со своим инвариантом`);
+      const other = id === 'R16' ? 'R17' : 'R16';
+      const wrongInv = await answer(id, 'reject', other);
+      assert.equal(wrongInv.correct, false); assert.equal(wrongInv.invariantOk, false);
+      assert.equal((await answer(id, 'accept')).correct, false, `${id}: принять — неверно`);
+      assert.equal((await answer(id, 'stop')).correct, false, `${id}: остановить — не то действие`);
+    }
+    assert.equal((await answer('R20', 'stop')).correct, true);
+    assert.equal((await answer('R20', 'accept')).correct, false);
+    assert.equal((await answer('R20', 'reject', 'R20')).correct, false);
+    const bad = await fetch(url('/api/rehearsal/answer'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: 'R99', action: 'stop' }) });
+    assert.equal(bad.status, 400);
+    assert.equal(renders, 0, 'в репетиции рендер не вызывается');
+    assert.deepEqual(await fs.readdir(dataDir).catch(() => []), [], 'ответы никуда не записываются');
+  } finally { server.close(); await fs.rm(dataDir, { recursive: true, force: true }); }
+});

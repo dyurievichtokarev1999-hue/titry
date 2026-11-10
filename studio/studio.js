@@ -252,3 +252,40 @@ $('logBtn').addEventListener('click', async () => {
 
 fillForm(state.episode);
 changed();
+
+// ── Репетиция R16–R20 ───────────────────────────────────────────────────────
+// Упражнение организатора: черновики намеренно неверные; ролик не собирается, ответы не записываются.
+const rehearsal = { cases: [] };
+api('/api/rehearsal').then((r) => {
+  rehearsal.cases = r.cases;
+  for (const c of r.cases) $('rhCase').add(new Option(`${c.id} — ${c.name}`, c.id));
+  for (const i of r.invariants) $('rhInvariant').add(new Option(i.text, i.id));
+}).catch(() => { $('rhCase').disabled = true; });
+
+$('rhCase').addEventListener('change', () => {
+  const c = rehearsal.cases.find((x) => x.id === $('rhCase').value);
+  $('rhBody').hidden = !c;
+  $('rhResult').textContent = '';
+  $('rhInvariant').value = '';
+  if (!c) return;
+  $('rhStory').textContent = c.story;
+  const ep = c.episode;
+  const rows = ep.rows.map((r) => `${r.role} — ${r.value}   [«${r.source}»]`).join('\n');
+  const post = ep.post && ep.post.text ? `\nПосле титров: ${ep.post.text}   [«${ep.post.source}»]` : '';
+  $('rhDraft').textContent = `«${ep.title}» · ${ep.genre} · плёнка ${ep.mood}\n${rows}${post}`;
+});
+
+async function rhAnswer(action) {
+  const id = $('rhCase').value;
+  if (!id) return;
+  if (action === 'reject' && !$('rhInvariant').value) { $('rhResult').textContent = 'Выберите нарушенный инвариант.'; return; }
+  try {
+    const r = await api('/api/rehearsal/answer', { id, action, invariant: $('rhInvariant').value });
+    const head = r.correct ? 'Верно.' : 'Неверно.';
+    const need = r.expected === 'stop' ? 'Правильное действие — остановить: ролик не делается.' : `Правильное действие — отклонить. Инвариант: ${r.invariant}`;
+    $('rhResult').textContent = `${head} ${need} ${r.why}`;
+  } catch (e) { $('rhResult').textContent = e.message; }
+}
+$('rhAccept').addEventListener('click', () => rhAnswer('accept'));
+$('rhReject').addEventListener('click', () => rhAnswer('reject'));
+$('rhStop').addEventListener('click', () => rhAnswer('stop'));
