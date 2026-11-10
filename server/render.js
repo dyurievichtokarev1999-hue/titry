@@ -120,7 +120,9 @@ export async function renderEpisode(ep, options = {}) {
       args.push('-map', '1:a', '-af', `afade=t=in:st=0:d=0.6,afade=t=out:st=${fadeOutStart}:d=2.4`, '-c:a', 'aac', '-b:a', '160k');
     }
     args.push('-t', T.duration.toFixed(3), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', String(preset.crf),
-      '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-metadata', 'title=' + ep.title, outPath);
+      '-pix_fmt', 'yuv420p', '-movflags', '+faststart', outPath);
+    // Заголовок эпизода не передаётся в командную строку ffmpeg (И2): argv виден другим процессам хоста.
+    // Видимый заголовок остаётся в кадре; метаданных title в файле нет.
 
     const batch = 12;
     await runFfmpeg(args, async (stdin) => {

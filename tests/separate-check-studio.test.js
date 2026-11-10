@@ -49,7 +49,9 @@ async function withApp(opts, fn) {
 const isSafety = (r) => r.status === 422 && r.body.kind === 'safety' && typeof r.body.help === 'string' && r.body.help.length > 0;
 const isUnavailable = (r) => r.status === 503 && r.body.unavailable === true && !r.body.help && !r.body.risk && r.body.kind !== 'safety';
 const isTechnical = (r) => r.status === 422 && r.body.kind === 'technical' && r.body.reason === 'check_incomplete_twice' && !r.body.help && !r.body.risk
-  && !HELP.test(`${r.body.error} ${r.body.message} ${r.body.next}`) && !/опасн|тяж[её]л/i.test(`${r.body.error} ${r.body.message} ${r.body.next}`);
+  && !HELP.test(`${r.body.error} ${r.body.message} ${r.body.next}`) && !/опасн|тяж[её]л/i.test(`${r.body.error} ${r.body.message}`);
+// next — служебная подсказка только организатору (редактор 14:42): она называет, что safety сохраняется, —
+// это не вывод о рассказе; текст для человека (error, message) слов об опасности не содержит.
 
 // ── 1. safety ───────────────────────────────────────────────────────────────
 

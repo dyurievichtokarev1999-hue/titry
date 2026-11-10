@@ -11,7 +11,8 @@ import { makeGate } from './gate.js';
 import { helpMessage, assessEpisodeRisk } from './safety.js';
 import { renderEpisode, ROOT } from './render.js';
 import { logError } from './errlog.js';
-import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS } from './stt.js';
+import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS, cleanupVoiceOrphans } from './stt.js';
+import { makeLedger, KEY_ENV, KEY_VERSION_ENV } from './ledger.js';
 
 const MOOD_ORDER = ['warm', 'sad', 'anger', 'quiet'];
 const MUSIC_ORDER = ['warm', 'sad', 'anger', 'quiet', 'none'];
@@ -52,8 +53,8 @@ export const TEXT = {
   deleted: 'Готово: сессия и статистика по тебе удалены.',
   // ИР-02: проверка недоступна — текст редактора повествования (PM-01, 9.11) дословно. Без срока и без карточки помощи.
   checkUnavailable: 'Ролик задерживается: сервис не завершил проверку. Сейчас отправить его не получится. Ждать в чате и отвечать на это сообщение не нужно.',
-  // ВРЕМЕННЫЙ текст технической приостановки (формулировка владельца 13:05) до редактуры: без слов о помощи и опасности.
-  checkPaused: 'Сервис дважды не смог завершить проверку; ролик сейчас не создаётся. Это техническое состояние, а не оценка твоего рассказа. Ждать в чате и отвечать на это сообщение не нужно.',
+  // Техническая приостановка — редактор повествования 14:42, принято владельцем 15:08, дословно.
+  checkPaused: 'Сервис дважды не смог завершить проверку рассказа. Сейчас ролик не создаётся. Ждать в чате и отвечать на это сообщение не нужно.',
   // Черновик текста, на вычитку редактору повествования: честно, без «всё удалено», без обещаний сроков.
   deleteFailed: 'Сессия удалена, а удаление статистики по тебе подтвердить не получилось. Попробуй /delete ещё раз чуть позже.',
   renderFail: 'Не получилось собрать ролик. Попробуй ещё раз чуть позже.',
@@ -294,7 +295,8 @@ export function createBot({
   // Отдельная проверка перед рендером (контракт владельца 10.11 12:05 / 13:05): true — опасно, false — разрешение,
   // исключение — проверка не завершена. Нет ключа — проверка недоступна, ролик не собирается.
   safetyCheck, hasKey = safetyCheck ? () => true : hasClaudeCredentials, monoNow, wallNow,
-  gate = makeGate({ check: safetyCheck || ((text) => modelSafetyCheck(text)), hasKey, monoNow, wallNow }),
+  ledger = null, // хранилище запретов (server/ledger.js); область — участник, производная HMAC на диске
+  gate = makeGate({ check: safetyCheck || ((text) => modelSafetyCheck(text)), hasKey, monoNow, wallNow, ledger }),
 } = {}) {
   const sessions = new Map();
   // Ключ рассказа: запрет по безопасности привязан к самому рассказу, а не к интерфейсу.
@@ -304,8 +306,9 @@ export function createBot({
 
   const session = (chatId) => {
     let s = sessions.get(chatId);
-    // scope — область запретов шлюза: своя у каждой сессии (как прежний s.blocked), /delete начинает новую.
-    if (!s) { s = { stage: 'idle', period: 'day', scope: Symbol('session') }; sessions.set(chatId, s); }
+    // scope — область запретов шлюза: участник (чат), а не сессия. /delete удаляет сессию и статистику,
+    // но не снимает ни safety, ни technical (решение владельца 15:08 / 16:00). На диск — только HMAC области.
+    if (!s) { s = { stage: 'idle', period: 'day', scope: `chat:${chatId}` }; sessions.set(chatId, s); }
     s.touched = Date.now();
     return s;
   };
@@ -348,10 +351,17 @@ export function createBot({
     s.story = story;
     s.originalStory = story;
     s.stage = 'drafting';
-    if (isBlocked(s, story)) {
+    const prior = gate.status(s.scope, story);
+    if (isBlocked(s, story) || prior.kind === 'safety') {
       return stopForSafety(chatId, s, 'urgent', { at: 'repeat' });
     }
-    const current = () => alive(chatId, s) && s.draftId === gen && !isBlocked(s, story);
+    if (prior.kind) {
+      // technical или хранилище недоступно: черновик не делается, без карточки помощи.
+      logError('check', { code: prior.kind === 'technical' ? 'check_incomplete_twice' : prior.code });
+      s.stage = 'idle';
+      return tg.send(chatId, prior.kind === 'technical' ? TEXT.checkPaused : TEXT.checkUnavailable);
+    }
+    const current = () => alive(chatId, s) && s.draftId === gen && !isBlocked(s, story) && gate.status(s.scope, story).kind !== 'safety';
     await tg.action(chatId, 'typing');
     await tg.send(chatId, TEXT.working);
     let r;
@@ -378,6 +388,7 @@ export function createBot({
       if (s.draftId === gen) return stopForSafety(chatId, s, r.risk.level, { byModel: r.risk.byModel });
       s.blocked = s.blocked || new Set();
       s.blocked.add(storyKey(story));
+      gate.markSafety(s.scope, story);
       // Если сейчас в работе тот же рассказ, его черновик тоже уничтожается.
       if (s.verdict !== 'blocked' && s.originalStory && storyKey(s.originalStory) === storyKey(story)) {
         return stopForSafety(chatId, s, r.risk.level, { byModel: r.risk.byModel, at: 'late' });
@@ -591,7 +602,15 @@ async function main() {
     { command: 'delete', description: 'Удалить всё о себе' },
   ] }).catch(() => {});
   console.log(`Бот @${me.username} запущен. Распознавание речи: ${sttAvailable() ? 'SpeechKit' : 'выключено'}.`);
-  const bot = createBot({ tg });
+  // Остатки голосовых прежних задач (после аварии) — до приёма задач.
+  await cleanupVoiceOrphans().catch((e) => logError('voice.cleanup', e));
+  // Хранилище запретов загружается до приёма задач; при сбое бот работает, но ролики не выдаёт (закрытый отказ).
+  const ledger = makeLedger({ file: path.join(ROOT, 'data', 'state', 'blocked-v1.json'), key: process.env[KEY_ENV], keyVersion: process.env[KEY_VERSION_ENV] || 'v1' });
+  try { await ledger.load(); } catch (e) {
+    logError('ledger.load', e);
+    console.error(`Хранилище запретов недоступно: ролики не выдаются. Проверьте ${KEY_ENV} и ${KEY_VERSION_ENV}; tmp и повреждённый файл не удаляйте.`);
+  }
+  const bot = createBot({ tg, ledger });
   setInterval(bot.sweep, 10 * 60 * 1000).unref();
   let offset = 0;
   for (;;) {

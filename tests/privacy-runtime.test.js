@@ -1,0 +1,126 @@
+// И1/И2 (критик реализации, план архитектора; поручение владельца 16:00) и хранение запретов бота.
+// Рассказы и голосовые — вымышленные/синтетические; ключ — тестовый.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { transcribeOgg, cleanupVoiceOrphans } from '../server/stt.js';
+import { createBot } from '../server/bot.js';
+import { makeLedger } from '../server/ledger.js';
+
+const ex = JSON.parse(await fs.readFile(new URL('../examples/day-quiet.json', import.meta.url), 'utf8'));
+
+test('И1: голосовое — в TITRY_RUNTIME_DIR, каталог задачи 0700, файлы 0600, удаляются после распознавания', async () => {
+  const base = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-rt-'));
+  const saved = { k: process.env.YANDEX_API_KEY, f: process.env.YANDEX_FOLDER_ID };
+  process.env.YANDEX_API_KEY = 'test-only'; process.env.YANDEX_FOLDER_ID = 'test-only';
+  try {
+    const rt = path.join(base, 'runtime');
+    const seen = [];
+    const text = await transcribeOgg(Buffer.from('OggS-синтетика'), {
+      runtimeDir: rt, duration: 3,
+      recognize: async () => {
+        const jobs = await fs.readdir(rt);
+        assert.equal(jobs.length, 1); assert.match(jobs[0], /^titry-voice-[A-Za-z0-9]{6}$/);
+        const job = path.join(rt, jobs[0]);
+        seen.push((await fs.stat(rt)).mode & 0o777, (await fs.stat(job)).mode & 0o777, (await fs.stat(path.join(job, 'voice.ogg'))).mode & 0o777);
+        return 'распознано';
+      },
+    });
+    assert.equal(text, 'распознано');
+    assert.deepEqual(seen, [0o700, 0o700, 0o600]);
+    assert.deepEqual(await fs.readdir(rt), [], 'после распознавания остатков нет');
+  } finally {
+    process.env.YANDEX_API_KEY = saved.k ?? ''; process.env.YANDEX_FOLDER_ID = saved.f ?? '';
+    if (saved.k === undefined) delete process.env.YANDEX_API_KEY;
+    if (saved.f === undefined) delete process.env.YANDEX_FOLDER_ID;
+    await fs.rm(base, { recursive: true, force: true });
+  }
+});
+
+test('И1: очистка при старте удаляет только каталоги собственных задач', async () => {
+  const rt = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-rt-'));
+  try {
+    await fs.mkdir(path.join(rt, 'titry-voice-Ab12Cd'));
+    await fs.writeFile(path.join(rt, 'titry-voice-Ab12Cd', 'part-000.ogg'), 'x');
+    await fs.mkdir(path.join(rt, 'titry-voice-слишком-длинное'));
+    await fs.writeFile(path.join(rt, 'titry-voice-Zz99Yy'), 'файл с похожим именем');
+    await fs.mkdir(path.join(rt, 'чужой'));
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-outside-'));
+    await fs.symlink(outside, path.join(rt, 'titry-voice-Ln00Kk'));
+    assert.equal(await cleanupVoiceOrphans(rt), 1);
+    assert.deepEqual((await fs.readdir(rt)).sort(), ['titry-voice-Ln00Kk', 'titry-voice-Zz99Yy', 'titry-voice-слишком-длинное', 'чужой'].sort());
+    await fs.stat(outside); // цель ссылки не тронута
+    await fs.rm(outside, { recursive: true, force: true });
+    assert.equal(await cleanupVoiceOrphans(path.join(rt, 'нет-такого')), 0);
+  } finally { await fs.rm(rt, { recursive: true, force: true }); }
+});
+
+test('И2: заголовок эпизода не попадает в командную строку ffmpeg', { timeout: 120000 }, async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-argv-'));
+  try {
+    const argvFile = path.join(dir, 'argv.txt');
+    const fake = path.join(dir, 'ffmpeg');
+    await fs.writeFile(fake, `#!/bin/sh\nprintf '%s\\n' "$@" > '${argvFile}'\ncat > /dev/null\nexit 1\n`, { mode: 0o755 });
+    const MARK = 'Заголовок-МАРКЕР-И2';
+    const ep = { ...structuredClone(ex.episode), title: MARK };
+    const script = `
+      import fs from 'node:fs/promises';
+      const { renderEpisode, closeRenderer } = await import(${JSON.stringify(new URL('../server/render.js', import.meta.url).href)});
+      const ep = JSON.parse(process.env.EP);
+      try { await renderEpisode(ep, { story: process.env.STORY, outPath: process.env.OUT, preset: 'preview', duration: 16 }); console.log('ok'); }
+      catch (e) { console.log('code=' + e.code); }
+      await closeRenderer();`;
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
+      env: { ...process.env, FFMPEG: fake, EP: JSON.stringify(ep), STORY: ex.story, OUT: path.join(dir, 'o.mp4') },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = '';
+    child.stdout.on('data', (d) => { out += d; });
+    await new Promise((r) => child.on('exit', r));
+    if (/code=browser/.test(out)) { t.skip('Chromium недоступен в этой среде — not-run'); return; }
+    const argv = await fs.readFile(argvFile, 'utf8');
+    assert.ok(argv.includes('libx264'), 'это настоящий вызов кодирования');
+    assert.ok(!argv.includes(MARK), 'заголовка нет в argv');
+    assert.ok(!/title=/.test(argv), 'нет -metadata title');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('бот: safety и technical переживают перезапуск и /delete (хранилище, область — участник)', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-botledger-'));
+  const file = path.join(dir, 'state', 'blocked-v1.json');
+  const chat = { id: 77101, type: 'private' };
+  const metrics = { hash: () => 'qa', log: async () => {}, forget: async () => {} };
+  const good = async () => ({ episode: structuredClone(ex.episode), risk: { level: 'none' }, provider: 'claude', dropped: [] });
+  async function boot(check) {
+    const ledger = makeLedger({ file, key: 'test-only-key-not-a-secret', keyVersion: 'v1' });
+    await ledger.load();
+    const sent = []; const c = { render: 0, video: 0, check: 0 };
+    const bot = createBot({
+      tg: { send: async (x, t) => { sent.push(t); }, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''), sendVideo: async () => { c.video++; } },
+      metrics, draft: good, ledger,
+      safetyCheck: async () => { c.check++; return check(c.check); },
+      render: async (e, o) => { c.render++; return { seconds: 1, duration: 24, outPath: o.outPath }; },
+    });
+    const say = (text, who = chat) => bot.handleUpdate({ message: { chat: who, text } });
+    const playAll = async (who = chat) => { for (let n = 0; n <= 3; n++) await bot.handleUpdate({ callback_query: { id: 'q', data: `play:${n}`, message: { chat: who } } }); };
+    return { ledger, sent, c, say, playAll };
+  }
+  try {
+    const a = await boot(() => true);
+    await a.say(ex.story); await a.playAll();
+    await a.ledger.flush();
+    const raw = await fs.readFile(file, 'utf8');
+    assert.ok(!raw.includes(String(chat.id)) && !raw.includes(ex.story.slice(0, 15)), 'на диске нет ID чата и текста');
+    const b = await boot(() => false); // перезапуск; модель теперь «разрешает»
+    await b.say('/delete');
+    await b.say(ex.story); await b.playAll();
+    assert.equal(b.c.check, 0); assert.equal(b.c.render, 0); assert.equal(b.c.video, 0);
+    // другой участник не затронут
+    const other = { id: 77102, type: 'private' };
+    await b.say(ex.story, other); await b.playAll(other);
+    assert.equal(b.c.render, 1);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
