@@ -168,8 +168,16 @@ export async function draftWithClaude(story, { tone = 'quiet', date, period = 'd
     e.code = 'bad_json';
     throw e;
   }
+  // Проверка формы до groundDraft и любой заготовки (контракт владельца 10.11, 09:05; QA PR #5).
+  // Отсутствие явного разрешения — не «проверка пройдена»: safety_flag должен быть строго булевым,
+  // никакого приведения. Неверная форма — bad_response, makeDraft вернёт unavailable без черновика.
+  const badResponse = () => Object.assign(new Error('Ответ модели не по контракту.'), { code: 'bad_response' });
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) throw badResponse();
+  if (typeof raw.safety_flag !== 'boolean') throw badResponse();
+  if (raw.safety_flag === true) return { safetyFlag: true, model: response.model, usage: response.usage };
+  if (!Array.isArray(raw.rows) || raw.rows.some((r) => r === null || typeof r !== 'object' || Array.isArray(r))) throw badResponse();
   const grounded = groundDraft(raw, story, { date, period });
-  return { ...grounded, safetyFlag: !!raw.safety_flag, model: response.model, usage: response.usage };
+  return { ...grounded, safetyFlag: false, model: response.model, usage: response.usage };
 }
 
 // ── Заготовка без ИИ ─────────────────────────────────────────────────────────
