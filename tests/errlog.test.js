@@ -130,10 +130,12 @@ test('ИР-03: ошибка с маркерами в status — в журнал�
   } finally { await cleanup(); }
 });
 
-test('ИР-03: заметка черновика клиенту не содержит сообщения и кода исключения', async () => {
+test('ИР-03: ответ черновика при отказе модели не содержит сообщения и кода исключения', async () => {
   const { makeDraft } = await import('../server/draft.js');
   const r = await makeDraft(example.story, { provider: 'claude', client: { beta: { messages: { create: async () => { throw Object.assign(new Error(MARKER), { code: CODE_MARKER }); } } } } }).catch((e) => ({ thrown: e }));
   const text = JSON.stringify(r);
   assert.ok(!text.includes(MARKER) && !text.includes(CODE_MARKER));
-  assert.match(r.note || '', /Черновик ИИ недоступен \(error\)/, 'заметка есть и содержит только безопасный код');
+  assert.equal(r.unavailable, true, 'ИР-02: при отказе модели — состояние «проверка недоступна»');
+  assert.equal(r.code, 'error', 'код только из списка известных');
+  assert.equal(r.episode, null, 'заготовки без ИИ нет');
 });

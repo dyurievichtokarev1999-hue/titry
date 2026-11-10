@@ -145,6 +145,16 @@ export function createApp({
       const result = await makeDraft(body.story, {
         date: body.date, period: body.period, tone: body.tone, provider: body.provider,
       });
+      if (result.unavailable) {
+        // ИР-02: тексты экрана организатора — редактор повествования (PM-01, 9.11), дословно.
+        return { status: 503, body: {
+          unavailable: true,
+          error: 'Проверку завершить не удалось',
+          message: 'Сервис не завершил проверку. Это техническое состояние, а не вывод о содержании рассказа. Ролик пока не создаётся и не отправляется.',
+          next: 'Повторить можно позже, только с полной проверкой заново. На заготовку без ИИ не переключаться. Если для рассказа ранее подтверждена остановка, повтор не снимает её.',
+          code: result.code,
+        } };
+      }
       if (!result.episode) {
         if (result.risk.byModel) blocked.add(key);
         return { risk: result.risk, help: helpMessage(result.risk.level) };

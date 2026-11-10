@@ -258,10 +258,10 @@ export async function makeDraft(story, opts = {}) {
         provider = 'manual';
       }
     } catch (e) {
-      // Только код из списка известных (ИР-03): сообщение исключения может содержать фрагменты рассказа.
-      note = `Черновик ИИ недоступен (${safeCode(e)}). Показана заготовка без ИИ.`;
-      result = draftRuleBased(text, opts);
-      provider = 'manual';
+      // ИР-02 (критик реализации): если модель не ответила, её проверка безопасности тоже не прошла.
+      // Заготовку без ИИ не показываем — только состояние «проверка недоступна», без ролика.
+      // Код — только из списка известных (ИР-03).
+      return { risk, episode: null, provider: null, unavailable: true, code: safeCode(e) };
     }
   } else {
     result = draftRuleBased(text, opts);
