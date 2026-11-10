@@ -78,3 +78,23 @@ test('B09.6 монтажная: ошибка стартовой очистки �
     assert.ok(!r.err.includes(root), 'путей в журнале нет');
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
+
+test('B09.6 монтажная: стартовая очистка удаляет ролики/постеры и ссылки, не трогая цели; data/out-ссылка — отказ', async () => {
+  const base = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-out-pos-'));
+  try {
+    const out = path.join(base, 'out'); await fs.mkdir(out);
+    const foreign = path.join(base, 'foreign'); await fs.mkdir(foreign);
+    await fs.writeFile(path.join(foreign, 'precious.mp4'), 'чужое');
+    await fs.writeFile(path.join(out, 'a.mp4'), 'x'); await fs.writeFile(path.join(out, 'a.jpg'), 'x');
+    await fs.symlink(path.join(foreign, 'precious.mp4'), path.join(out, 'link.mp4'));
+    await fs.mkdir(path.join(out, 'sub')); await fs.writeFile(path.join(out, 'sub', 'keep'), 'x');
+    assert.equal(await purgeOut(out, 0, Date.now(), { strict: true }), 3);
+    assert.deepEqual(await fs.readdir(out), ['sub'], 'подкаталоги не трогаются');
+    assert.equal(await fs.readFile(path.join(foreign, 'precious.mp4'), 'utf8'), 'чужое', 'цель ссылки цела');
+    // data/out сам — ссылка на чужой каталог: строгая очистка отказывает, ничего не удаляя.
+    const linkOut = path.join(base, 'out-link'); await fs.symlink(foreign, linkOut);
+    await assert.rejects(purgeOut(linkOut, 0, Date.now(), { strict: true }), { code: 'EACCES' });
+    assert.equal(await purgeOut(linkOut, 0), 0);
+    assert.deepEqual(await fs.readdir(foreign), ['precious.mp4']);
+  } finally { await fs.rm(base, { recursive: true, force: true }); }
+});

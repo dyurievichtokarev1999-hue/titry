@@ -68,12 +68,18 @@ export async function purgeOut(dir, maxAgeMs = OUT_MAX_AGE_MS, now = Date.now(),
   const gone = (e) => e?.code === 'ENOENT';
   let removed = 0;
   let names = [];
-  try { names = await fs.readdir(dir); } catch (e) { if (strict && !gone(e)) throw e; return 0; }
+  try {
+    // Сам каталог должен быть настоящим каталогом, не ссылкой: иначе очистка ушла бы в чужой каталог.
+    const d = await fs.lstat(dir);
+    if (!d.isDirectory()) throw Object.assign(new Error('data/out — не каталог'), { code: d.isSymbolicLink() ? 'EACCES' : 'ENOTDIR' });
+    names = await fs.readdir(dir);
+  } catch (e) { if (strict && !gone(e)) throw e; return 0; }
   for (const name of names) {
     const file = path.join(dir, name);
     try {
       const st = await fs.lstat(file);
-      if (st.isFile() && now - st.mtimeMs >= maxAgeMs) { await fs.rm(file, { force: true }); removed++; }
+      // Ссылка удаляется как ссылка (цель не трогается): монтажная сама ссылок не создаёт и не отдаёт.
+      if ((st.isFile() || st.isSymbolicLink()) && now - st.mtimeMs >= maxAgeMs) { await fs.rm(file, { force: true }); removed++; }
     } catch (e) { if (strict && !gone(e)) throw e; /* иначе: файл уже удалён */ }
   }
   return removed;
