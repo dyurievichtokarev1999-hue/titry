@@ -137,3 +137,58 @@ test('Репетиция, интерфейс: устаревший ответ н
   await q; await new Promise((r) => setImmediate(r));
   assert.match(el('rhResult').textContent, /ПОЧЕМУ-R16/);
 });
+
+// Сценарии, которые раньше подтверждал только стенд разборщика (поручение владельца 00:59): теперь в репозитории.
+async function rehearsalUi() {
+  const vm = await import('node:vm');
+  const src = await fs.readFile(new URL('../studio/studio.js', import.meta.url), 'utf8');
+  const part = src.slice(src.indexOf('// ── Репетиция R16–R20'));
+  const els = {};
+  const el = (id) => (els[id] ||= { id, value: '', textContent: '', hidden: false, disabled: false, options: [], listeners: {},
+    add(o) { this.options.push(o); }, addEventListener(t, f) { this.listeners[t] = f; } });
+  const pending = [];
+  const ctx = {
+    $: el, Option: function (t, v) { return { text: t, value: v }; },
+    api: (p, body) => {
+      if (p === '/api/rehearsal') return Promise.resolve({ cases: ['R16', 'R20'].map((id) => ({ id, story: 's', episode: { title: 't', genre: 'g', mood: 'quiet', rows: [], post: {} } })), invariants: [{ id: 'inv-1', text: 'x' }] });
+      return new Promise((resolve, reject) => pending.push({ body, ok: (why) => resolve({ correct: true, expected: 'reject', invariant: 'И', why, name: 'n' }), fail: (msg) => reject(new Error(msg)) }));
+    },
+  };
+  vm.runInNewContext(part, ctx);
+  await new Promise((r) => setImmediate(r));
+  const tick = () => new Promise((r) => setImmediate(r));
+  const select = (id) => { el('rhCase').value = id; el('rhCase').listeners.change(); };
+  const press = (action) => { if (action === 'reject') el('rhInvariant').value = 'inv-1'; return el({ reject: 'rhReject', stop: 'rhStop', accept: 'rhAccept' }[action]).listeners.click(); };
+  return { el, pending, tick, select, press };
+}
+
+test('Репетиция, интерфейс: два ответа одного случая в обратном порядке — остаётся последний', async () => {
+  const u = await rehearsalUi();
+  u.select('R20');
+  const a = u.press('stop'); const b = u.press('stop');
+  u.pending[1].ok('ВТОРОЙ'); await b; await u.tick();
+  u.pending[0].ok('ПЕРВЫЙ'); await a; await u.tick();
+  assert.match(u.el('rhResult').textContent, /ВТОРОЙ/);
+  assert.doesNotMatch(u.el('rhResult').textContent, /ПЕРВЫЙ/);
+});
+
+test('Репетиция, интерфейс: ошибка по R16 после переключения на R20 не показывается; ошибка актуальной попытки — показывается', async () => {
+  const u = await rehearsalUi();
+  u.select('R16');
+  const a = u.press('reject');
+  u.select('R20');
+  u.pending[0].fail('ОШИБКА-R16'); await a; await u.tick();
+  assert.equal(u.el('rhResult').textContent, '');
+  const b = u.press('stop');
+  u.pending[1].fail('ОШИБКА-R20'); await b; await u.tick();
+  assert.equal(u.el('rhResult').textContent, 'ОШИБКА-R20', 'путь catch для актуальной попытки');
+});
+
+test('Репетиция, интерфейс: R16 → R20 → R16 — ответ первой попытки R16 не показывается', async () => {
+  const u = await rehearsalUi();
+  u.select('R16');
+  const a = u.press('reject');
+  u.select('R20'); u.select('R16');
+  u.pending[0].ok('СТАРЫЙ'); await a; await u.tick();
+  assert.equal(u.el('rhResult').textContent, '');
+});
