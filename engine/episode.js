@@ -209,8 +209,9 @@ export function sanitizeEpisode(input) {
   ep.title = clip(ep.title, 80);
   ep.genre = clip(ep.genre, 60);
   ep.lead = clip(ep.lead || 'ты', 24) || 'ты';
-  ep.mood = MOODS[ep.mood] ? ep.mood : 'warm';
-  ep.music = TRACKS[ep.music] ? ep.music : ep.mood;
+  // Пустой или неизвестный mood — quiet (редактор повествования, 9.11): нейтральное настроение, без навязанной теплоты.
+  ep.mood = MOODS[input?.mood] ? input.mood : 'quiet';
+  ep.music = TRACKS[input?.music] ? input.music : ep.mood;
   ep.period = PERIODS[ep.period] ? ep.period : 'day';
   ep.gender = ep.gender === 'f' || ep.gender === 'm' ? ep.gender : null;
   ep.rows = (Array.isArray(ep.rows) ? ep.rows : []).slice(0, 10).map((r) => ({

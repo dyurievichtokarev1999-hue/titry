@@ -29,6 +29,8 @@ export const TEXT = {
   working: 'Монтирую…',
   rendering: 'Собираю ролик. Обычно это меньше минуты.',
   queue: (n) => `Собираю ролик. Перед тобой в очереди: ${n}.`,
+  // ИР-04: очередь заполнена. Черновик сохранён; без обещаний сроков. Черновик текста — на вычитку редактору.
+  busy: 'Сейчас собирается слишком много роликов, новый в очередь не помещается. Черновик сохранён: нажми «▶ Смотреть титры» ещё раз через несколько минут.',
   voiceOff: 'Голосовые пока не подключены. Напиши, пожалуйста, текстом.',
   voiceLong: `Голосовое длиннее ${Math.round(MAX_VOICE_SECONDS / 60)} минут. Для одной сцены хватит минуты.`,
   voiceEmpty: 'Не получилось разобрать голосовое. Можно повторить или написать текстом.',
@@ -148,6 +150,8 @@ const FEEDBACK_KB = {
 };
 
 // ── Метрики без содержимого рассказов ────────────────────────────────────────
+
+export const MAX_RENDER_WAITING = 3;
 
 export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), salt = process.env.METRICS_SALT || 'titry-dev-salt', { forgetTimeoutMs = 10000 } = {}) {
   const hash = (id) => crypto.createHmac('sha256', salt).update(String(id)).digest('hex').slice(0, 16);
@@ -285,7 +289,7 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
   // Ключ рассказа: запрет по безопасности привязан к самому рассказу, а не к интерфейсу.
   const storyKey = (story) => crypto.createHash('sha256').update(String(story).toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim()).digest('hex');
   let queue = Promise.resolve();
-  let waiting = 0;
+  let waiting = 0; // рендеры в работе и в ожидании
 
   const session = (chatId) => {
     let s = sessions.get(chatId);
@@ -383,6 +387,8 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
     const gen = s.draftId;
     const original = s.originalStory || s.story;
     const current = () => alive(chatId, s) && s.draftId === gen && s.verdict === 'ok' && !isBlocked(s, original);
+    // ИР-04 (критик реализации): один рендер идёт, до трёх ждут. Дальше — явный ответ «занято», без долговечной очереди.
+    if (waiting >= 1 + MAX_RENDER_WAITING) { s.stage = 'draft'; return tg.send(chatId, TEXT.busy); }
     s.stage = 'rendering';
     const ahead = waiting;
     waiting++;

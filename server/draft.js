@@ -115,7 +115,7 @@ export function groundDraft(raw, story, { date = todayIso(), period = 'day' } = 
   const post = raw.post && raw.post.text && sourceFound(raw.post.source, story)
     ? { text: raw.post.text, source: raw.post.source } : { text: '', source: '' };
   if (raw.post && raw.post.text && !post.text) dropped.push({ role: 'после титров', ...raw.post });
-  const mood = MOODS[raw.mood] ? raw.mood : 'warm';
+  const mood = MOODS[raw.mood] ? raw.mood : 'quiet'; // пустой или неизвестный mood — нейтральный quiet
   const ownGender = detectGender(story);
   const ep = sanitizeEpisode({
     ...blankEpisode({ date, mood, period }),
