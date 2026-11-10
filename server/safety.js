@@ -16,23 +16,32 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 
 // Действие против другого человека. Обязателен объект-человек (существительное или местоимение) рядом с глаголом:
 // «напасть на след», «убить время», «избить рекорд», «ударить по мячу» — не угроза.
-const HARM_VERB = String.raw`(?:причинить\s+(?:\S+\s+)?(?:вред|боль)|ударить|ударю|врезать|врежу|избить|изобью|побить|побью|прибить|прибью|убить|убью|зарезать|зарежу|задушить|задушу|придушить|придушу|покалечить|покалечу|напасть|нападу|отомстить|отомщу|пырнуть|застрелить|застрелю|отравить|отравлю)`;
-const PERSON = String.raw`(?:его|ее|их|ему|ей|им|тебя|тебе|вас|вам|брат\S*|сестр\S*|мам\S*|мать|матери|пап\S*|отц\S*|отца|муж\S*|жен\S*|сосед\S*|коллег\S*|начальни\S*|отчим\S*|мачех\S*|свекр\S*|тещ\S*|бывш\S*|партнер\S*|друг\S*|подруг\S*|ребен\S*|сын\S*|доч\S*|учител\S*|одноклассни\S*|человек\S*|люд\S*|всех|парн\S*|девушк\S*)`;
+// Инфинитив, будущее и прошедшее (для «бы»: «так бы и убила его») — основами, с разговорными формами.
+const HARM_VERB = String.raw`(?:причинить\s+(?:\S+\s+)?(?:вред|боль)|причинил\S*\s+(?:\S+\s+)?(?:вред|боль)|удар(?:ить|ю|ил\S*)|стукн(?:уть|у|ул\S*)|вре(?:зать|жу|зал\S*)|вмаж(?:у|ет)|вмазать|из?би(?:ть|л\S*)|изобью|поб(?:ить|ью|ил\S*)|приб(?:ить|ью|ил\S*)|уб(?:ить|ью|ил\S*)|зарез(?:ать|ал\S*)|зарежу|задуш(?:ить|у|ил\S*)|придуш(?:ить|у|ил\S*)|покалеч(?:ить|у|ил\S*)|напа(?:сть|л\S*)|нападу|отомст(?:ить|ил\S*)|отомщу|пырн(?:уть|у|ул\S*)|застрел(?:ить|ю|ил\S*)|пристрел(?:ить|ю|ил\S*)|отрав(?:ить|лю|ил\S*)|расправ(?:иться|люсь|ился|илась)|уро(?:ю|ет)|урыть|пореш(?:у|ить|ил\S*)|слома(?:ю|ть|л\S*)\s+(?:\S+\s+)?(?:руки|руку|ноги|ногу|шею|нос|челюсть)|подкарау(?:лю|лить)|порвал\S*\s+бы)`;
+const PERSON = String.raw`(?:его|ее|их|ему|ей|им|тебя|тебе|вас|вам|него|нее|ним|ней|ними|мужик\S*|брат\S*|сестр\S*|мам\S*|мать|матери|пап\S*|отц\S*|отца|муж\S*|жен\S*|сосед\S*|коллег\S*|начальни\S*|отчим\S*|мачех\S*|свекр\S*|тещ\S*|бывш\S*|партнер\S*|друг\S*|подруг\S*|ребен\S*|сын\S*|доч\S*|учител\S*|одноклассни\S*|человек\S*|люд\S*|всех|парн\S*|девушк\S*)`;
 // Глагол и объект в пределах трёх слов в любом порядке; «на» допускается («напасть на соседа»).
-const HARM_PERSON = new RegExp(String.raw`(?<![а-я])причинить\s+${PERSON}\s+(?:вред|боль)|(?<![а-я])${HARM_VERB}(?![а-я])(?:\s+\S+){0,2}?\s+(?:на\s+)?${PERSON}(?![а-я])|(?<![а-я])${PERSON}(?:\s+\S+){0,2}?\s+${HARM_VERB}(?![а-я])`);
+const HARM_PERSON = new RegExp(String.raw`(?<![а-я])причинить\s+${PERSON}\s+(?:вред|боль)|(?<![а-я])слома\S*\s+${PERSON}\s+(?:руки|руку|ноги|ногу|шею|нос|челюсть)|(?<![а-я])(?:расправ\S*|разберусь|поквитаюсь|сведу\s+счеты)\s+со?\s+${PERSON}(?![а-я])|(?<![а-я])${HARM_VERB}(?![а-я])(?:\s+(?!(?:с|со|вместе)\s)\S+){0,2}?\s+(?:на\s+)?(?<!(?:с|со)\s)${PERSON}(?![а-я])|(?<![а-я])${PERSON}(?:\s+\S+){0,2}?\s+${HARM_VERB}(?![а-я])`);
 const WANT = /(?:хочу|хочется|хотела|хотел|мечтаю|охота)/;
 const MARKER = /(?<![а-я])(?:собираюсь|соберусь|решил\S*|решено|намерен\S*|планирую|пойду|сегодня|завтра|ночью|вечером|сейчас|после\s+работы|скоро)(?![а-я])/;
 // Средство (оружие) рядом с намерением; «нож» — не «ножницы»; отрицание («нет ножа», «оружия у меня нет») не считается.
-const WEAPON = /(?<!не\s)(?<!нет\s)(?:оружие|оружием|(?<![а-я])нож(?!ниц|ничк)\S*|пистолет\S*|ружье\S*|ружьем|бит[ауо](?![а-я]))(?![^.!?…;]{0,15}нет)/;
+const WEAPON = /(?<!не\s)(?<!нет\s)(?:оружие|оружием|(?<![а-я])нож(?!ниц|ничк)\S*|пистолет\S*|ружье\S*|ружьем|бит(?:а|у|ой|о)(?![а-я]))(?![^.!?…;]{0,15}нет)/;
 
 const clauses = (text) => String(text || '').split(/(?<=[.!?…;])\s+|\n+/).map((x) => x.trim()).filter(Boolean);
+// Имя собственное (кириллица с заглавной, не первое слово предложения) рядом с глаголом: «убью Петю», «Серёгу урою».
+const NAMED = new RegExp(String.raw`(?<![а-яА-ЯёЁ])${HARM_VERB}(?![а-я])\s+(?:\S+\s+)?[А-ЯЁ][а-яё]{2,}|[^.!?…;\s]\s+[А-ЯЁ][а-яё]{2,}\s+(?:\S+\s+)?${HARM_VERB}(?![а-я])`);
+const namedHarm = (raw) => clauses(String(raw || '').replace(/ё/g, 'е').replace(/Ё/g, 'Е')).some((s) => NAMED.test(s.replace(/^[А-ЯЁ]/, (c) => c.toLowerCase()).replace(/^(\S+)/, (w) => w.toLowerCase())));
+
 /** Уровень угрозы другому человеку по предложениям: 'urgent' | 'concern' | null. */
-function harmToOthers(t) {
+function harmToOthers(t, raw = '') {
   let level = null;
   const parts = clauses(t);
   const weapon = WEAPON.test(t);
-  for (const s of parts) {
-    if (!HARM_PERSON.test(s)) continue;
+  const rawParts = clauses(String(raw || '').replace(/ё/g, 'е').replace(/Ё/g, 'Е'));
+  for (const [k, s] of parts.entries()) {
+    const rp = rawParts[k];
+    // Имя в начале предложения («Серёгу урою») не распознаётся: его не отличить от «Сегодня убил».
+    const named = rp !== undefined && NAMED.test(rp.replace(/^(\S+)/, (w) => w.toLowerCase()));
+    if (!HARM_PERSON.test(s) && !named) continue;
     // Признак намерения (решение, план, время) в том же предложении — в любом месте; или средство в рассказе.
     if (MARKER.test(s) || weapon) return 'urgent';
     level = 'concern';
@@ -166,7 +175,7 @@ export function stripIdioms(text) {
 export function assessRisk(text, modelFlag = false) {
   const t = stripIdioms(text);
   const urgent = URGENT.filter((re) => re.test(t)).map(String);
-  const harm = harmToOthers(t);
+  const harm = harmToOthers(t, text);
   if (harm === 'urgent') urgent.push('harm_to_others+intent');
   if (urgent.length || modelFlag) return { level: 'urgent', matches: urgent, byModel: !!modelFlag && !urgent.length };
   const concern = CONCERN.filter((re) => re.test(t)).map(String);
@@ -194,9 +203,11 @@ export function assessEpisodeRisk(story, ep) {
 const unitsOf = (text) => String(text || '').split(/(?<=[.!?…;])\s+|\n+|[,;:]\s+|\s+[—–-]\s+|\s+(?:и|а|но|потом|затем)\s+/)
   .map((x) => x.trim()).filter(Boolean);
 const flat = (x) => norm(x).replace(/[^а-яa-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+// Существительные-люди (без местоимений) для сопоставления «кто в угрозе» и «кто в титрах».
+const PERSON_WORDS = /(?<![а-я])(?:брат|сестр|мам|мать|матер|пап|отц|отец|муж|жен|сосед|коллег|начальни|отчим|мачех|свекр|тещ|бывш|партнер|друг|подруг|ребен|сын|доч|учител|одноклассни|мужик|парн|девушк)[а-я]*/g;
 const isThreatUnit = (u) => { const t = stripIdioms(u); return HARM_PERSON.test(t) || CONCERN.some((re) => re.test(t)); };
 // Пересказ угрозы без цитаты в оформлении (название, жанр, пост, «в главной роли»).
-const HARMISH = new RegExp(String.raw`(?<![а-я])(?:${HARM_VERB}|месть|мести|мщени\S*|прицел\S*|убийств\S*|убийц\S*|расправ\S*)(?![а-я])`);
+const HARMISH = new RegExp(String.raw`(?<![а-я])(?:${HARM_VERB}|месть|мести|мщени\S*|прицел\S*|убийств\S*|убийц\S*|расправ\S*|под\s+удар\S*|расчет\S*|последн\S*\s+день)(?![а-я])`);
 
 /** Части рассказа с угрозой другому человеку (без пунктуации). Исходный текст не урезается. */
 export function threatSentences(story) {
@@ -216,6 +227,12 @@ export function touchesThreat(text, threats, story = '') {
   const t = flat(text);
   if (!t) return false;
   if (isThreatUnit(t) || HARMISH.test(t)) return true;
+  // Строка называет человека из угрозы, который не упоминается в безобидных частях рассказа («Брат под ударом»).
+  const stem = (w) => w.slice(0, 4);
+  const threatPeople = new Set(threats.flatMap((u) => (u.match(PERSON_WORDS) || []).map(stem)));
+  const safeText = unitsOf(story).map(flat).filter((u) => !threats.includes(u)).join(' ');
+  const named = (t.match(PERSON_WORDS) || []).map(stem).filter((w) => threatPeople.has(w));
+  if (named.some((w) => !new RegExp(String.raw`(?<![а-я])${w}`).test(safeText))) return true;
   if (t.length < 4 || !threats.some((s) => s.includes(t) || t.includes(s))) return false;
   // Совпадение есть и вне угрозы (то же слово в безобидном предложении) — строка опирается не на угрозу.
   const safeUnits = unitsOf(story).map(flat).filter((u) => !threats.some((s) => s === u || s.includes(u) || u.includes(s)));
