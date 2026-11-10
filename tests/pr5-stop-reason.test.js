@@ -89,3 +89,21 @@ test('/api/render: неполный ответ проверки — 422 без �
     } finally { server.close(); await fs.rm(dataDir, { recursive: true, force: true }); }
   }
 });
+
+test('обычная форма claude-opus-5-5: блоки thinking, затем один text — разрешение, без ложного «опасно»', async () => {
+  const thinking = [{ type: 'thinking', thinking: '', signature: 's' }, { type: 'redacted_thinking', data: 'x' }];
+  assert.equal(await modelSafetyCheck('день', { client: client({ stop_reason: 'end_turn', content: [...thinking, text(safetyJson(false))] }) }), false);
+  const r = await makeDraft(STORY, { provider: 'claude', client: client({ stop_reason: 'end_turn', content: [...thinking, text(draftJson(false))] }) });
+  assert.ok(r.episode && r.validation.ok);
+});
+
+test('text не строка, content не массив, refusal с текстом — закрытый отказ', async () => {
+  const arr = { stop_reason: 'end_turn', content: [{ type: 'text', text: [safetyJson(false)] }] };
+  assert.equal(await modelSafetyCheck('день', { client: client(arr) }), true);
+  const arrDraft = { stop_reason: 'end_turn', content: [{ type: 'text', text: [draftJson(false)] }] };
+  assert.equal((await makeDraft(STORY, { provider: 'claude', client: client(arrDraft) })).unavailable, true);
+  assert.equal(await modelSafetyCheck('день', { client: client({ stop_reason: 'end_turn', content: 'нет' }) }), true);
+  assert.equal((await makeDraft(STORY, { provider: 'claude', client: client({ stop_reason: 'end_turn', content: null }) })).unavailable, true);
+  assert.equal(await modelSafetyCheck('день', { client: client({ stop_reason: 'refusal', content: [text(safetyJson(false))] }) }), true);
+  assert.equal((await makeDraft(STORY, { provider: 'claude', client: client({ stop_reason: 'refusal', content: [text(draftJson(false))] }) })).unavailable, true);
+});
