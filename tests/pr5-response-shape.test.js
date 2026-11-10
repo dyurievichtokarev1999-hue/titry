@@ -24,6 +24,8 @@ const BAD = {
   'safety_flag: 0': { ...base, safety_flag: 0 },
   'safety_flag: ""': { ...base, safety_flag: '' },
   'safety_flag: "false"': { ...base, safety_flag: 'false' },
+  'safety_flag: "true"': { ...base, safety_flag: 'true' },
+  'safety_flag: 1': { ...base, safety_flag: 1 },
   'safety_flag отсутствует': (({ ...o }) => o)(base),
   'rows не массив': { ...base, safety_flag: false, rows: 'Чай' },
   'rows отсутствует при false': (({ rows, ...o }) => ({ ...o, safety_flag: false }))(base),

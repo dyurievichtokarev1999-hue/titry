@@ -107,3 +107,7 @@ test('mood: quiet по умолчанию в правиле без ИИ, blankEp
   assert.ok(!/warm для обычного дня/.test(SYSTEM_PROMPT), 'в промпте нет warm по умолчанию');
   assert.match(SYSTEM_PROMPT, /quiet как нейтральное оформление/);
 });
+
+test('mood: служебные имена объекта не считаются известным настроением', () => {
+  for (const m of ['constructor', '__proto__', 'toString']) assert.equal(sanitizeEpisode({ ...example.episode, mood: m, music: m }).mood, 'quiet', m);
+});
