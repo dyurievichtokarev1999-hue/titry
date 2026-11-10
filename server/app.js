@@ -62,16 +62,19 @@ export const OUT_MAX_AGE_MS = 2 * 60 * 60 * 1000;
  * Удалить ролики и постеры старше maxAgeMs (0 — все). Ролик удаляется после отправки кнопкой
  * в монтажной; это страховка для забытых, неотправленных и недособранных файлов.
  */
-export async function purgeOut(dir, maxAgeMs = OUT_MAX_AGE_MS, now = Date.now()) {
+export async function purgeOut(dir, maxAgeMs = OUT_MAX_AGE_MS, now = Date.now(), { strict = false } = {}) {
+  // strict (стартовая очистка, B09.6): любая ошибка, кроме «каталога/файла нет», — исключение;
+  // вызывающий не начинает приём задач. Иначе — тихая фоновая страховка.
+  const gone = (e) => e?.code === 'ENOENT';
   let removed = 0;
   let names = [];
-  try { names = await fs.readdir(dir); } catch { return 0; }
+  try { names = await fs.readdir(dir); } catch (e) { if (strict && !gone(e)) throw e; return 0; }
   for (const name of names) {
     const file = path.join(dir, name);
     try {
-      const st = await fs.stat(file);
+      const st = await fs.lstat(file);
       if (st.isFile() && now - st.mtimeMs >= maxAgeMs) { await fs.rm(file, { force: true }); removed++; }
-    } catch { /* файл уже удалён */ }
+    } catch (e) { if (strict && !gone(e)) throw e; /* иначе: файл уже удалён */ }
   }
   return removed;
 }
@@ -355,6 +358,13 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     logError('ledger.load', e);
     console.error(`Запуск остановлен: хранилище запретов недоступно. Проверьте ${KEY_ENV} (не короче 16 символов) и ${KEY_VERSION_ENV}.`);
     console.error('Остатки blocked-v1.json.tmp-* или повреждённый файл не удаляйте: это может снять подтверждённые остановки. Сохраните копию каталога data/state и обратитесь к владельцу кода.');
+    process.exit(3);
+  }
+  // Стартовая очистка роликов и постеров прежнего запуска — до приёма задач (B09.6, решение владельца 18:05/20:05).
+  // Ошибка — отказ запуска с кодом 3; в журнал только этап и код, без путей.
+  try { await purgeOut(path.join(ROOT, 'data', 'out'), 0, Date.now(), { strict: true }); } catch (e) {
+    logError('out.cleanup', e);
+    console.error('Запуск остановлен: не подтверждена очистка роликов прежнего запуска (data/out). Задачи не принимаются.');
     process.exit(3);
   }
   createApp({ ledger }).listen(port, '127.0.0.1', () => {

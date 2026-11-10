@@ -33,3 +33,48 @@ test('кнопка «Отправлено» удаляет видео и пос�
     assert.deepEqual(await fs.readdir(out), []);
   } finally { server.close(); await fs.rm(dataDir, { recursive: true, force: true }); }
 });
+
+test('B09.6 монтажная: строгая стартовая очистка — ошибка не скрывается; нет каталога — не ошибка', async () => {
+  const base = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-out-strict-'));
+  try {
+    const notDir = path.join(base, 'file');
+    await fs.writeFile(notDir, 'x');
+    await assert.rejects(purgeOut(notDir, 0, Date.now(), { strict: true }), { code: 'ENOTDIR' });
+    assert.equal(await purgeOut(notDir, 0), 0, 'фоновая очистка остаётся тихой');
+    assert.equal(await purgeOut(path.join(base, 'нет'), 0, Date.now(), { strict: true }), 0);
+  } finally { await fs.rm(base, { recursive: true, force: true }); }
+});
+
+test('B09.6 монтажная: ошибка стартовой очистки — запуск остановлен до приёма задач, код ≠ 0, путей в журнале нет', { timeout: 30000 }, async () => {
+  // Копия монтажной во временном корне, где data/out — файл (ENOTDIR), а хранилище запретов исправно.
+  const { spawn } = await import('node:child_process');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-studio-entry-'));
+  try {
+    const repo = new URL('..', import.meta.url).pathname;
+    // server/ и engine/ — копии (по ссылке Node взял бы настоящий корень репозитория и его data/);
+    // остальное — ссылки только для чтения.
+    for (const d of ['server', 'engine']) await fs.cp(path.join(repo, d), path.join(root, d), { recursive: true });
+    for (const d of ['studio', 'config', 'brand', 'examples', 'assets', 'node_modules']) {
+      await fs.symlink(path.join(repo, d), path.join(root, d)).catch(() => {});
+    }
+    await fs.copyFile(path.join(repo, 'package.json'), path.join(root, 'package.json'));
+    await fs.mkdir(path.join(root, 'data'));
+    await fs.writeFile(path.join(root, 'data', 'out'), 'не каталог');
+    const run = () => new Promise((resolve) => {
+      const p = spawn(process.execPath, [path.join(root, 'server', 'app.js')], {
+        env: { ...process.env, PORT: '0', TITRY_BLOCKED_HMAC_KEY: 'test-only-key-not-a-secret', TITRY_BLOCKED_KEY_VERSION: 'v-entry-test' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let out = '', err = '';
+      p.stdout.on('data', (d) => { out += d; });
+      p.stderr.on('data', (d) => { err += d; });
+      const t = setTimeout(() => p.kill('SIGKILL'), 15000);
+      p.on('exit', (code) => { clearTimeout(t); resolve({ code, out, err }); });
+    });
+    const r = await run();
+    assert.equal(r.code, 3);
+    assert.doesNotMatch(r.out, /Монтажная: http/, 'сервер не начал слушать');
+    assert.match(r.err, /"stage":"out\.cleanup","code":"ENOTDIR"/);
+    assert.ok(!r.err.includes(root), 'путей в журнале нет');
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
