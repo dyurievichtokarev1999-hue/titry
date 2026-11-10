@@ -188,3 +188,17 @@ test('бот /delete: сбой статистики и неизвестное с
   await bot.handleUpdate({ message: { chat, text: '/delete' } });
   assert.equal(sent.at(-1), 'Сессия удалена, а удаление статистики по тебе подтвердить не получилось. Попробуй /delete ещё раз чуть позже.\nПроверить состояние служебной записи не получилось. Полное удаление не подтверждено.');
 });
+
+test('бот /delete во время отдельной проверки: полное удаление не подтверждается; запрет после этого записан', async () => {
+  let release; const held = new Promise((r) => { release = r; });
+  const b = setup({ check: async () => { await held; return true; } });
+  await b.story();
+  const p = b.play();
+  await new Promise((r) => setTimeout(r, 20));
+  await del(b);
+  assert.equal(b.last(), 'Сессия и статистика по тебе удалены.\nПолное удаление не подтверждено.');
+  release(); await p;
+  await del(b);
+  assert.equal(b.last(), 'Сессия и статистика по тебе удалены.\nПолное удаление не подтверждено.');
+  assert.equal(b.counters.render, 0); assert.equal(b.counters.video, 0);
+});

@@ -304,6 +304,15 @@ export function createBot({
   gate = makeGate({ check: safetyCheck || ((text) => modelSafetyCheck(text)), hasKey, monoNow, wallNow, ledger }),
 } = {}) {
   const sessions = new Map();
+  // Незавершённые черновики и отдельные проверки участника: их результат может создать запрет уже после /delete.
+  const inFlight = new Map();
+  const track = async (chatId, p) => {
+    inFlight.set(chatId, (inFlight.get(chatId) || 0) + 1);
+    try { return await p; } finally {
+      const n = inFlight.get(chatId) - 1;
+      if (n > 0) inFlight.set(chatId, n); else inFlight.delete(chatId);
+    }
+  };
   // Ключ рассказа: запрет по безопасности привязан к самому рассказу, а не к интерфейсу.
   const storyKey = (story) => crypto.createHash('sha256').update(String(story).toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim()).digest('hex');
   let queue = Promise.resolve();
@@ -371,7 +380,7 @@ export function createBot({
     await tg.send(chatId, TEXT.working);
     let r;
     try {
-      r = await draft(story, { date: todayIso(now()), period: s.period, tone: 'quiet' });
+      r = await track(chatId, draft(story, { date: todayIso(now()), period: s.period, tone: 'quiet' }));
     } catch (e) {
       logError('draft', e);
       if (!current()) return;
@@ -433,7 +442,7 @@ export function createBot({
     const story = s.story;
     // Отдельная проверка именно этой версии (рассказ + строки + пост + название/жанр) перед очередью.
     s.stage = 'rendering';
-    const g = await gate.verify(s.scope, original, ep, `${story}\n${episodeToText(ep)}`);
+    const g = await track(chatId, gate.verify(s.scope, original, ep, `${story}\n${episodeToText(ep)}`));
     if (!alive(chatId, s) || s.draftId !== gen) return; // удалённая или заменённая сессия не оживает
     if (g.kind === 'safety') return stopForSafety(chatId, s, 'urgent', { at: 'check', byModel: true });
     if (!g.ok) {
@@ -496,7 +505,8 @@ export function createBot({
       const kept = gate.recordsFor(`chat:${chatId}`);
       const lines = [forgot ? TEXT.deleted : TEXT.deleteFailed];
       if (kept === 'unknown') lines.push(TEXT.recordUnknown);
-      else if (kept === 'kept') lines.push(TEXT.deleteKept);
+      // Запрет есть, или черновик/проверка ещё идут и могут его поставить: полное удаление не подтверждается.
+      else if (kept === 'kept' || inFlight.has(chatId)) lines.push(TEXT.deleteKept);
       return tg.send(chatId, lines.join('\n'));
     }
     if (text === '/help') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });

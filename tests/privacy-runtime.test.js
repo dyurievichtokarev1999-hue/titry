@@ -116,6 +116,7 @@ test('бот: safety переживает перезапуск и /delete (хр�
     assert.ok(!raw.includes(String(chat.id)) && !raw.includes(ex.story.slice(0, 15)), 'на диске нет ID чата и текста');
     const b = await boot(() => false); // перезапуск; модель теперь «разрешает»
     await b.say('/delete');
+    assert.equal(b.sent.at(-1), 'Сессия и статистика по тебе удалены.\nПолное удаление не подтверждено.', 'запись из хранилища после перезапуска');
     await b.say(ex.story); await b.playAll();
     assert.equal(b.c.check, 0); assert.equal(b.c.render, 0); assert.equal(b.c.video, 0);
     // другой участник не затронут
