@@ -349,7 +349,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   // Хранилище запретов: data/state/blocked-v1.json. Без ключа или при неисправном файле монтажная
   // запускается, но ролики не выдаёт (закрытый отказ, 503 ledger) — пустой набор запретов не подставляется.
   const ledger = makeLedger({ file: path.join(ROOT, 'data', 'state', 'blocked-v1.json'), key: process.env[KEY_ENV], keyVersion: process.env[KEY_VERSION_ENV] || 'v1' });
-  try { await ledger.load(); } catch { console.error(`Хранилище запретов недоступно: ролики не выдаются (проверьте ${KEY_ENV} и файл data/state/blocked-v1.json).`); }
+  try { await ledger.load(); } catch {
+    console.error(`Хранилище запретов недоступно: ролики не выдаются. Проверьте ${KEY_ENV} (не короче 16 символов) и ${KEY_VERSION_ENV}.`);
+    console.error('Остатки blocked-v1.json.tmp-* или повреждённый файл не удаляйте: это может снять подтверждённые остановки. Сохраните копию каталога data/state и обратитесь к владельцу кода.');
+  }
   createApp({ ledger }).listen(port, '127.0.0.1', () => {
     console.log(`Монтажная: http://127.0.0.1:${port}/`);
     console.log(hasClaudeCredentials() ? `Черновики: Claude (${DEFAULT_MODEL})` : 'Черновики: заготовка без ИИ (ключ ANTHROPIC_API_KEY не задан)');

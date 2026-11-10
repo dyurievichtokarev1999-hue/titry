@@ -35,6 +35,8 @@ export function makeLedger({ file, key, keyVersion, ttlMs = null, wallNow = () =
 
   const hmac = (domain, value) => crypto.createHmac('sha256', key).update(`${domain}\0${keyVersion}\0${value}`).digest('hex');
   const keyCheck = () => hmac('keycheck', 'titry-blocked');
+  // Подпись всего набора записей: удаление записи из файла без ключа не проходит загрузку.
+  const docMac = (recs) => hmac('document', JSON.stringify(recs));
   const scopeDigest = (scope) => hmac('scope', String(scope));
   const storyDigest = (story) => hmac('story', normStory(story));
 
@@ -54,6 +56,7 @@ export function makeLedger({ file, key, keyVersion, ttlMs = null, wallNow = () =
     if (!doc || typeof doc !== 'object' || doc.schema_version !== SCHEMA_VERSION) throw ledgerError();
     if (doc.key_version !== keyVersion || doc.key_check !== keyCheck()) throw ledgerError();
     if (!Array.isArray(doc.records) || !doc.records.every(validRecord)) throw ledgerError();
+    if (doc.doc_mac !== docMac(doc.records)) throw ledgerError();
     return doc.records;
   }
 
@@ -62,9 +65,13 @@ export function makeLedger({ file, key, keyVersion, ttlMs = null, wallNow = () =
 
   /** Загрузка до приёма задач. Недописанный tmp после аварии — восстановление объединением (только строже). */
   async function load() {
-    if (!key || !keyVersion) { state = 'failed'; throw ledgerError(); }
+    // Ключ — не короче 16 символов (пустой или случайно короткий ключ — закрытый отказ).
+    if (!key || String(key).length < 16 || !keyVersion) { state = 'failed'; throw ledgerError(); }
     try {
       await fsImpl.mkdir(dir, { recursive: true, mode: 0o700 });
+      // Права выставляются и для уже существующего каталога и файла, не только при создании.
+      await fsImpl.chmod(dir, 0o700);
+      try { await fsImpl.chmod(file, 0o600); } catch (e) { if (e?.code !== 'ENOENT') throw e; }
       let main = [];
       try { main = parse(await fsImpl.readFile(file, 'utf8')); }
       catch (e) { if (e?.code !== 'ENOENT') throw ledgerError(); }
@@ -87,7 +94,9 @@ export function makeLedger({ file, key, keyVersion, ttlMs = null, wallNow = () =
   }
 
   async function write() {
-    const doc = { schema_version: SCHEMA_VERSION, key_version: keyVersion, key_check: keyCheck(), records };
+    // Запись, которую потом нельзя загрузить, закрыла бы хранилище навсегда: проверяем до записи.
+    if (!records.every(validRecord)) throw ledgerError();
+    const doc = { schema_version: SCHEMA_VERSION, key_version: keyVersion, key_check: keyCheck(), records, doc_mac: docMac(records) };
     const tmp = path.join(dir, `${base}.tmp-${process.pid}-${crypto.randomBytes(4).toString('hex')}`);
     const fh = await fsImpl.open(tmp, 'wx', 0o600);
     try { await fh.writeFile(JSON.stringify(doc)); await fh.sync(); } finally { await fh.close(); }
@@ -118,6 +127,7 @@ export function makeLedger({ file, key, keyVersion, ttlMs = null, wallNow = () =
       retry_not_before_at: kind === 'technical' ? retryNotBeforeAt : null,
       expires_at: ttlMs === null ? null : new Date(now + ttlMs).toISOString(),
     };
+    if (!validRecord(rec)) return Promise.reject(ledgerError()); // неверный вызов — не портить файл
     return mutate((rs) => {
       const rest = rs.filter((r) => !same(r, rec));
       // safety сильнее: при safety technical той же пары не нужен; technical не пишется поверх safety.

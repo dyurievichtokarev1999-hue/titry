@@ -132,3 +132,28 @@ test('TTL — только тестовый параметр: истёкшая �
     assert.equal(r.size, 0);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
+
+test('замечания разбора: права существующего каталога/файла, проверка записи до write, подпись набора, короткий ключ', async () => {
+  const dir = await tmpDir();
+  try {
+    const sdir = path.join(dir, 'state');
+    await fs.mkdir(sdir, { mode: 0o755 }); await fs.chmod(sdir, 0o755);
+    const l = open(dir); await l.load();
+    assert.equal((await fs.stat(sdir)).mode & 0o777, 0o700, 'существующий каталог получает 0700');
+    await l.put({ scope: 's', story: STORY, kind: 'safety', reason: 'safety' });
+    const file = path.join(sdir, 'blocked-v1.json');
+    await fs.chmod(file, 0o644);
+    const l2 = open(dir); await l2.load();
+    assert.equal((await fs.stat(file)).mode & 0o777, 0o600, 'существующий файл получает 0600 при загрузке');
+    // Неверный вызов не портит файл и не закрывает хранилище.
+    await assert.rejects(l2.put({ scope: 's', story: STORY, kind: 'technical', reason: 'check_incomplete_twice' }), { code: 'ledger' });
+    assert.equal(l2.healthy(), true);
+    const l3 = open(dir); await l3.load();
+    assert.equal(l3.lookup('s', STORY).kind, 'safety');
+    // Удаление записи из файла без ключа — закрытый отказ, а не пустой набор.
+    const doc = JSON.parse(await fs.readFile(file, 'utf8'));
+    await fs.writeFile(file, JSON.stringify({ ...doc, records: [] }));
+    await assert.rejects(open(dir).load(), { code: 'ledger' });
+    await assert.rejects(open(dir, { key: 'short' }).load(), { code: 'ledger' });
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
