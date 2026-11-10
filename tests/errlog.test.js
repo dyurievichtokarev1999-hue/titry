@@ -11,7 +11,10 @@ import { safeCode } from '../server/errlog.js';
 
 const example = JSON.parse(await fs.readFile(new URL('../examples/day-quiet.json', import.meta.url), 'utf8'));
 const MARKER = 'МАРКЕР-ИР03-не-в-журнал';
-const leaky = (code) => Object.assign(new Error(`${MARKER}: ${example.story}`), code ? { code } : {});
+// Короткие ASCII-маркеры в code и name (критик реализации, 10.11): открытый regex их пропускал.
+const CODE_MARKER = 'QA_PRIVATE_MARKER';
+const NAME_MARKER = 'QAPrivateName';
+const leaky = (code = CODE_MARKER) => Object.assign(new Error(`${MARKER}: ${example.story}`), { code, name: NAME_MARKER });
 const chat = { id: 553311, type: 'private' };
 
 function capture(t) {
@@ -22,6 +25,7 @@ function assertClean(lines, stage) {
   assert.ok(lines.length > 0, `ошибка на этапе ${stage} записана`);
   for (const l of lines) {
     assert.ok(!l.includes(MARKER), `маркер не в журнале: ${stage}`);
+    assert.ok(!l.includes(CODE_MARKER) && !l.includes(NAME_MARKER), `короткие маркеры code/name не в журнале: ${stage}`);
     assert.ok(!l.includes(example.story.slice(0, 20)), `текст рассказа не в журнале: ${stage}`);
     assert.ok(!l.includes(String(chat.id)), `id чата не в журнале: ${stage}`);
   }
@@ -81,15 +85,22 @@ test('ИР-03: монтажная', async (t) => {
     const res = await fetch(`http://127.0.0.1:${server.address().port}/api/render`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ episode: example.episode, story: example.story }) });
     assert.equal(res.status, 500);
     const body = await res.json();
-    assert.ok(!JSON.stringify(body).includes(MARKER), 'клиенту монтажной не уходит сообщение исключения');
+    for (const m of [MARKER, CODE_MARKER, NAME_MARKER]) assert.ok(!JSON.stringify(body).includes(m), 'клиенту монтажной не уходит содержимое исключения');
     assertClean(lines(), 'http POST /api/render');
   } finally { server.close(); await fs.rm(dataDir, { recursive: true, force: true }); }
 });
 
-test('ИР-03: код ошибки — только короткий идентификатор', () => {
+test('ИР-03: код ошибки — только из списка известных значений', () => {
   assert.equal(safeCode({ code: 'ENOENT' }), 'ENOENT');
+  assert.equal(safeCode({ code: 'safety' }), 'safety');
   assert.equal(safeCode({ status: 429 }), '429');
+  assert.equal(safeCode({ status: '403' }), '403');
   assert.equal(safeCode(new TypeError('x')), 'TypeError');
-  assert.equal(safeCode({ code: `${MARKER} длинный текст` }), 'error');
+  for (const v of [CODE_MARKER, 'user12345', '553311', 'ENOENT2', `${MARKER} длинный текст`]) {
+    assert.equal(safeCode({ code: v }), 'error', `code ${v}`);
+    assert.equal(safeCode({ name: v }), 'error', `name ${v}`);
+  }
+  assert.equal(safeCode({ status: 553311 }), 'error');
+  assert.equal(safeCode({ status: 299 }), 'error');
   assert.equal(safeCode(null), 'error');
 });
