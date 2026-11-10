@@ -12,6 +12,7 @@ import { renderEpisode, ROOT } from './render.js';
 import { logError, safeCode } from './errlog.js';
 import { loadHelp, helpMessage, assessEpisodeRisk } from './safety.js';
 import { makeGate } from './gate.js';
+import { makeLedger, KEY_ENV, KEY_VERSION_ENV } from './ledger.js';
 
 const STATIC = {
   '/': 'studio/index.html',
@@ -146,7 +147,8 @@ export function createApp({
   hasKey = safetyCheck ? () => true : hasClaudeCredentials,
   draft = makeDraft,
   monoNow, wallNow,
-  gate = makeGate({ check: safetyCheck || ((text) => modelSafetyCheck(text)), hasKey, monoNow, wallNow }),
+  ledger = null, // хранилище запретов; загружается до приёма задач (см. запуск ниже)
+  gate = makeGate({ check: safetyCheck || ((text) => modelSafetyCheck(text)), hasKey, monoNow, wallNow, ledger }),
 } = {}) {
   const OUT = path.join(dataDir, 'out');
   const LOG = path.join(dataDir, 'concierge');
@@ -164,6 +166,7 @@ export function createApp({
   const unavailable = (code) => ({ status: 503, body: { ...UNAVAILABLE, code } });
   // В журнал — только этап и код (ИР-03), без текста и сообщений исключений.
   const fromGate = (r, stage = 'check') => {
+    if (r.kind === 'unavailable') r = { unavailable: true, code: r.code };
     if (r.kind !== 'safety') logError(stage, { code: r.kind === 'technical' ? 'check_incomplete_twice' : r.code });
     return r.kind === 'safety' ? safetyStop() : r.kind === 'technical' ? technical(r) : unavailable(r.code);
   };
@@ -182,6 +185,7 @@ export function createApp({
       const before = gate.status(SCOPE, story);
       if (before.kind === 'safety') return draftStop({ level: 'urgent', byModel: true, matches: [] });
       if (before.kind === 'technical') return technical(before);
+      if (before.kind === 'unavailable') return fromGate(before, 'draft');
       const result = await draft(story, {
         date: body.date, period: body.period, tone: body.tone, provider: body.provider,
       });
@@ -195,6 +199,7 @@ export function createApp({
       const after = gate.status(SCOPE, story);
       if (after.kind === 'safety') return draftStop({ level: 'urgent', byModel: true, matches: [] });
       if (after.kind === 'technical') return technical(after);
+      if (after.kind === 'unavailable') return fromGate(after, 'draft');
       return {
         episode: result.episode, validation: result.validation, risk: result.risk,
         provider: result.provider, note: result.note, dropped: result.dropped,
@@ -341,7 +346,11 @@ export function createApp({
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT || 4173);
-  createApp().listen(port, '127.0.0.1', () => {
+  // Хранилище запретов: data/state/blocked-v1.json. Без ключа или при неисправном файле монтажная
+  // запускается, но ролики не выдаёт (закрытый отказ, 503 ledger) — пустой набор запретов не подставляется.
+  const ledger = makeLedger({ file: path.join(ROOT, 'data', 'state', 'blocked-v1.json'), key: process.env[KEY_ENV], keyVersion: process.env[KEY_VERSION_ENV] || 'v1' });
+  try { await ledger.load(); } catch { console.error(`Хранилище запретов недоступно: ролики не выдаются (проверьте ${KEY_ENV} и файл data/state/blocked-v1.json).`); }
+  createApp({ ledger }).listen(port, '127.0.0.1', () => {
     console.log(`Монтажная: http://127.0.0.1:${port}/`);
     console.log(hasClaudeCredentials() ? `Черновики: Claude (${DEFAULT_MODEL})` : 'Черновики: заготовка без ИИ (ключ ANTHROPIC_API_KEY не задан)');
   });

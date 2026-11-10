@@ -40,7 +40,13 @@ const monotonic = () => performance.now();
  * check(text) — отдельная проверка: true — опасно, false — полное разрешение;
  * исключение с кодом — неполная проверка. hasKey() — есть ли доступ к модели.
  */
-export function makeGate({ check, hasKey = () => true, monoNow = monotonic, wallNow = () => Date.now(), retryMs = RETRY_AFTER_MS } = {}) {
+// ledger — хранилище запретов (server/ledger.js), необязательно. Сохраняются только области-строки
+// (монтажная 'studio'); область бота — сессия в памяти, её хранение ждёт решения карты обработки.
+// Сначала остановка ставится в памяти и выдача запрещается, затем подтверждается запись на диск;
+// пока запись не подтверждена или хранилище неисправно, выдачи нет (503, код ledger).
+export function makeGate({ check, hasKey = () => true, monoNow = monotonic, wallNow = () => Date.now(), retryMs = RETRY_AFTER_MS, ledger = null } = {}) {
+  const durable = (scope) => ledger && typeof scope === 'string';
+  const persist = (p) => { p.catch(() => { /* хранилище само переходит в failed; выдача закрыта */ }); return p; };
   const scopes = new Map();
   const area = (scope) => {
     let a = scopes.get(scope);
@@ -54,6 +60,18 @@ export function makeGate({ check, hasKey = () => true, monoNow = monotonic, wall
     const a = area(scope);
     const sd = storyDigest(story);
     if (a.safety.has(sd)) return { kind: 'safety' };
+    if (durable(scope)) {
+      const l = ledger.lookup(scope, story);
+      if (l.failed) return { kind: 'unavailable', code: 'ledger' };
+      if (l.kind === 'safety') { a.safety.add(sd); a.technical.delete(sd); return { kind: 'safety' }; }
+      if (l.kind === 'technical' && !a.technical.has(sd)) {
+        // После перезапуска монотонное время прежнего процесса недоступно: отсчёт заново, полные 15 минут
+        // от загрузки (никогда не раньше сохранённого UTC-момента). Перезапуск не даёт раннего повтора.
+        const at = Math.max(Date.parse(l.retryNotBeforeAt) || 0, wallNow() + retryMs);
+        bumpEpoch(a, sd);
+        a.technical.set(sd, { retryNotBefore: monoNow() + retryMs, retryNotBeforeAt: new Date(at).toISOString(), epoch: Symbol('technical'), retrying: false });
+      }
+    }
     const t = a.technical.get(sd);
     if (t) return { kind: 'technical', reason: 'check_incomplete_twice', retryNotBeforeAt: t.retryNotBeforeAt, retryAllowed: monoNow() >= t.retryNotBefore };
     return { kind: null };
@@ -64,17 +82,20 @@ export function makeGate({ check, hasKey = () => true, monoNow = monotonic, wall
     const sd = storyDigest(story);
     a.safety.add(sd);
     a.technical.delete(sd); // safety сильнее; technical больше не нужен
+    if (durable(scope)) persist(ledger.put({ scope, story, kind: 'safety', reason: 'safety' }));
   }
 
   const epochOf = (a, sd) => a.epochs.get(sd) || 0;
   const bumpEpoch = (a, sd) => { a.epochs.set(sd, epochOf(a, sd) + 1); a.failures.delete(sd); };
 
-  function setTechnical(a, sd) {
+  function setTechnical(scope, story, a, sd, vd) {
     bumpEpoch(a, sd);
     const t = { retryNotBefore: monoNow() + retryMs, retryNotBeforeAt: new Date(wallNow() + retryMs).toISOString(), epoch: Symbol('technical'), retrying: false };
     a.technical.set(sd, t);
+    if (durable(scope)) persist(ledger.put({ scope, story, episodeDigest: vd, kind: 'technical', reason: 'check_incomplete_twice', retryNotBeforeAt: t.retryNotBeforeAt }));
     return t;
   }
+  const ledgerOk = async (scope) => !durable(scope) || ledger.flush();
 
   // Одна полная отдельная проверка версии. Возвращает { ok } | { kind: 'safety' } | { unavailable, code } |
   // { kind: 'technical', code: 'check_incomplete_twice' }.
@@ -97,7 +118,7 @@ export function makeGate({ check, hasKey = () => true, monoNow = monotonic, wall
     const prev = a.failures.get(sd);
     const n = prev && prev.vd === vd ? prev.n + 1 : 1;
     if (n >= 2) {
-      const t = setTechnical(a, sd);
+      const t = setTechnical(scope, story, a, sd, vd);
       return { kind: 'technical', code: 'check_incomplete_twice', retryNotBeforeAt: t.retryNotBeforeAt };
     }
     a.failures.set(sd, { vd, n });
@@ -106,12 +127,18 @@ export function makeGate({ check, hasKey = () => true, monoNow = monotonic, wall
 
   /** Проверка перед выдачей: состояние → отдельная проверка версии. technical без действия организатора не проверяется. */
   async function verify(scope, story, ep, text) {
+    const fromStatus = (st) => (st.kind === 'safety' ? { kind: 'safety' } : st.kind === 'unavailable' ? { unavailable: true, code: st.code }
+      : { kind: 'technical', code: 'check_incomplete_twice', retryNotBeforeAt: st.retryNotBeforeAt });
     const st = status(scope, story);
-    if (st.kind) return st.kind === 'safety' ? { kind: 'safety' } : { kind: 'technical', code: 'check_incomplete_twice', retryNotBeforeAt: st.retryNotBeforeAt };
+    if (st.kind) return fromStatus(st);
+    if (!(await ledgerOk(scope))) return { unavailable: true, code: 'ledger' };
     const r = await runCheck(scope, story, ep, text);
     // Пока шла проверка, другой запрос мог поставить technical — тогда это разрешение не действует.
+    // Разрешение выдаётся только при подтверждённой записи всех начатых остановок.
     if (r.ok) {
+      if (!(await ledgerOk(scope))) return status(scope, story).kind === 'safety' ? { kind: 'safety' } : { unavailable: true, code: 'ledger' };
       const after = status(scope, story);
+      if (after.kind === 'unavailable') return fromStatus(after);
       if (after.kind === 'safety') return { kind: 'safety' };
       if (after.kind === 'technical') return { kind: 'technical', code: 'check_incomplete_twice', retryNotBeforeAt: after.retryNotBeforeAt };
     }
@@ -125,7 +152,9 @@ export function makeGate({ check, hasKey = () => true, monoNow = monotonic, wall
   async function organizerRetry(scope, story, ep, text) {
     const a = area(scope);
     const sd = storyDigest(story);
-    if (a.safety.has(sd)) return { kind: 'safety' };
+    const st = status(scope, story); // подтягивает запись хранилища после перезапуска
+    if (st.kind === 'safety') return { kind: 'safety' };
+    if (st.kind === 'unavailable') return { unavailable: true, code: st.code };
     const t = a.technical.get(sd);
     if (!t) return { notPaused: true };
     if (monoNow() < t.retryNotBefore) return { early: true, retryNotBeforeAt: t.retryNotBeforeAt };
@@ -136,8 +165,13 @@ export function makeGate({ check, hasKey = () => true, monoNow = monotonic, wall
       a.failures.set(sd, { vd: versionDigest(story, ep), n: 1 }); // повтор после паузы: неполный ответ сразу возвращает technical
       const r = await runCheck(scope, story, ep, text);
       if (r.ok) {
-        if (a.technical.get(sd) === t) a.technical.delete(sd);
-        else return status(scope, story).kind === 'safety' ? { kind: 'safety' } : { kind: 'technical', code: 'check_incomplete_twice' };
+        if (a.technical.get(sd) !== t) return status(scope, story).kind === 'safety' ? { kind: 'safety' } : { kind: 'technical', code: 'check_incomplete_twice' };
+        if (durable(scope)) {
+          // Снятие — только с подтверждённой записью; иначе пауза остаётся.
+          try { await ledger.clearTechnical(scope, story); } catch { return { unavailable: true, code: 'ledger' }; }
+          if (a.technical.get(sd) !== t) return status(scope, story).kind === 'safety' ? { kind: 'safety' } : { kind: 'technical', code: 'check_incomplete_twice' };
+        }
+        a.technical.delete(sd);
         return { ok: true };
       }
       return r;
