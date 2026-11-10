@@ -279,7 +279,7 @@ $('rhCase').addEventListener('change', () => {
 async function rhAnswer(action) {
   const id = $('rhCase').value;
   if (!id) return;
-  if (action === 'reject' && !$('rhInvariant').value) { $('rhResult').textContent = 'Выберите нарушенный инвариант.'; return; }
+  if (action === 'reject' && !$('rhInvariant').value) { rehearsal.attempt++; $('rhResult').textContent = 'Выберите нарушенный инвариант.'; return; }
   const attempt = ++rehearsal.attempt;
   const current = () => attempt === rehearsal.attempt && $('rhCase').value === id;
   try {
