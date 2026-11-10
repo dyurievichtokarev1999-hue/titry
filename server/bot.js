@@ -9,6 +9,7 @@ import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode
 import { makeDraft } from './draft.js';
 import { helpMessage, assessEpisodeRisk } from './safety.js';
 import { renderEpisode, ROOT } from './render.js';
+import { logError } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS } from './stt.js';
 
 const MOOD_ORDER = ['warm', 'sad', 'anger', 'quiet'];
@@ -340,7 +341,7 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
     try {
       r = await draft(story, { date: todayIso(now()), period: s.period, tone: 'quiet' });
     } catch (e) {
-      console.error('draft', e);
+      logError('draft', e);
       if (!current()) return;
       s.stage = 'idle';
       await tg.send(chatId, TEXT.draftFail);
@@ -410,7 +411,7 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
       await metrics.log(chatId, 'render', { seconds: Math.round(r.seconds), mood: ep.mood, music: ep.music, edits: s.edits || 0 });
       if (current()) s.stage = 'watched';
     } catch (e) {
-      console.error('render', e);
+      logError('render', e);
       if (current()) {
         s.stage = 'draft';
         await tg.send(chatId, TEXT.renderFail);
@@ -445,7 +446,7 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
       await tg.action(chatId, 'typing');
       let story = '';
       try { story = await transcribe(await tg.fileBuffer(msg.voice.file_id), { duration: msg.voice.duration }); }
-      catch (e) { console.error('stt', e); }
+      catch (e) { logError('stt', e); }
       if (!alive(chatId, s)) return; // /delete во время распознавания: ничего не отвечаем
       if (!story) return tg.send(chatId, TEXT.voiceEmpty);
       await tg.send(chatId, `Расшифровка:\n«${story}»`);
@@ -497,7 +498,7 @@ export function createBot({ tg, metrics = makeMetrics(), draft = makeDraft, rend
     try {
       if (u.message) await onMessage(u.message);
       else if (u.callback_query) await onCallback(u.callback_query);
-    } catch (e) { console.error('update', e); }
+    } catch (e) { logError('update', e); }
   }
 
   return { handleUpdate, sessions, sweep };
@@ -562,7 +563,7 @@ async function main() {
         bot.handleUpdate(u); // не ждём: рендер одного пользователя не блокирует ответы другим
       }
     } catch (e) {
-      console.error(e.message);
+      logError('poll', e);
       await new Promise((r) => setTimeout(r, 3000));
     }
   }

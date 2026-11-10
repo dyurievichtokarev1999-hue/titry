@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { MOODS, TRACKS, sanitizeEpisode, validateEpisode, episodeToText } from '../engine/episode.js';
 import { makeDraft, hasClaudeCredentials, DEFAULT_MODEL, modelSafetyCheck } from './draft.js';
 import { renderEpisode, ROOT } from './render.js';
+import { logError } from './errlog.js';
 import { loadHelp, helpMessage, assessEpisodeRisk } from './safety.js';
 
 const STATIC = {
@@ -276,7 +277,7 @@ export function createApp({
       if (req.method === 'GET' || req.method === 'HEAD') return serveStatic(req, res, url.pathname);
       send(res, 405, { error: 'Метод не поддерживается.' });
     } catch (e) {
-      console.error(e.message);
+      logError('http', e);
       const status = e.status || (e.code === 'safety' ? 422 : 500);
       send(res, status, { error: e.status || e.code === 'safety' ? e.message : 'Ошибка сервера: ' + e.message, validation: e.validation });
     }
