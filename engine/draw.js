@@ -309,7 +309,7 @@ function stillOffset(L, h, t, T) {
  */
 export function drawFrame(ctx, w, h, ep, t, opts = {}) {
   const T = timeline(opts.duration || DEFAULT_DURATION, opts.timing);
-  const mood = MOODS[ep.mood] || MOODS.warm;
+  const mood = MOODS[ep.mood] || MOODS.quiet;
   const accent = mood.accent;
   const L = layout(ctx, ep, w, h, opts.typo);
   const frame = opts.frame ?? Math.round(t * 30);

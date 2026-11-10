@@ -207,7 +207,7 @@ export function sanitizeEpisode(input) {
   const ep = { ...base, ...(input || {}) };
   const clip = (s, n) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
   ep.title = clip(ep.title, 80);
-  ep.genre = clip(input?.genre, 60); // пустой жанр — по итоговому mood ниже, а не «тёплая драма» из blankEpisode
+  ep.genre = clip(input?.genre, 60); // пустой жанр — по итоговому mood ниже, а не жанр из blankEpisode
   ep.lead = clip(ep.lead || 'ты', 24) || 'ты';
   // Пустой или неизвестный mood — quiet (редактор повествования, 9.11): нейтральное настроение, без навязанной теплоты.
   ep.mood = MOODS[input?.mood] ? input.mood : 'quiet';
