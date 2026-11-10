@@ -88,7 +88,7 @@ test('И2: заголовок эпизода не попадает в коман
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
-test('бот: safety и technical переживают перезапуск и /delete (хранилище, область — участник)', async () => {
+test('бот: safety переживает перезапуск и /delete (хранилище, область — участник)', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-botledger-'));
   const file = path.join(dir, 'state', 'blocked-v1.json');
   const chat = { id: 77101, type: 'private' };
@@ -123,4 +123,68 @@ test('бот: safety и technical переживают перезапуск и /
     await b.say(ex.story, other); await b.playAll(other);
     assert.equal(b.c.render, 1);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('бот: technical переживает перезапуск и /delete; опасный черновик после /delete всё равно записывает запрет', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-botledger2-'));
+  const file = path.join(dir, 'state', 'blocked-v1.json');
+  const chat = { id: 77201, type: 'private' };
+  const metrics = { hash: () => 'qa', log: async () => {}, forget: async () => {} };
+  const good = async () => ({ episode: structuredClone(ex.episode), risk: { level: 'none' }, provider: 'claude', dropped: [] });
+  const fail = () => { throw Object.assign(new Error('x'), { code: 'incomplete_response' }); };
+  async function boot({ check, draft = good }) {
+    const ledger = makeLedger({ file, key: 'test-only-key-not-a-secret', keyVersion: 'v1' });
+    await ledger.load();
+    const sent = []; const c = { render: 0, video: 0, check: 0 };
+    const bot = createBot({
+      tg: { send: async (x, t) => { sent.push(t); }, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''), sendVideo: async () => { c.video++; } },
+      metrics, draft, ledger,
+      safetyCheck: async () => { c.check++; return check(c.check); },
+      render: async (e, o) => { c.render++; return { seconds: 1, duration: 24, outPath: o.outPath }; },
+    });
+    const say = (text, who = chat) => bot.handleUpdate({ message: { chat: who, text } });
+    const playAll = async (who = chat) => { for (let n = 0; n <= 3; n++) await bot.handleUpdate({ callback_query: { id: 'q', data: `play:${n}`, message: { chat: who } } }); };
+    return { ledger, sent, c, say, playAll };
+  }
+  try {
+    const a = await boot({ check: fail });
+    await a.say(ex.story); await a.playAll(); await a.playAll(); // две неполные проверки подряд
+    assert.match(a.sent.join('\n'), /дважды не смог/);
+    await a.ledger.flush();
+    const b = await boot({ check: () => false });
+    await b.say('/delete');
+    await b.say(ex.story); await b.playAll();
+    assert.match(b.sent.join('\n'), /дважды не смог завершить проверку рассказа/);
+    assert.equal(b.c.check, 0); assert.equal(b.c.render, 0); assert.equal(b.c.video, 0);
+
+    // Гонка: опасный черновик возвращается после /delete.
+    const other = { id: 77202, type: 'private' };
+    const STORY2 = `${ex.story} Вечером пила чай.`;
+    let release; const held = new Promise((r) => { release = r; });
+    let started; const inDraft = new Promise((r) => { started = r; });
+    let calls = 0;
+    const c = await boot({ check: () => false, draft: async () => { calls++; if (calls === 1) { started(); await held; return { episode: null, risk: { level: 'urgent', byModel: true, matches: [] }, provider: 'claude' }; } return good(); } });
+    const pending = c.say(STORY2, other);
+    await inDraft; // черновик действительно в работе
+    await c.say('/delete', other);
+    release(); await pending;
+    await c.say(STORY2, other); await c.playAll(other);
+    assert.equal(c.c.render, 0, 'запрет записан, хотя сессия удалена'); assert.equal(c.c.video, 0);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('И1: чужой путь или ссылка вместо каталога задач — отказ, без записи', async () => {
+  const base = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-rt-'));
+  const saved = { k: process.env.YANDEX_API_KEY, f: process.env.YANDEX_FOLDER_ID };
+  process.env.YANDEX_API_KEY = 'test-only'; process.env.YANDEX_FOLDER_ID = 'test-only';
+  try {
+    const target = path.join(base, 'target'); await fs.mkdir(target);
+    const link = path.join(base, 'runtime'); await fs.symlink(target, link);
+    await assert.rejects(transcribeOgg(Buffer.from('x'), { runtimeDir: link, duration: 1, recognize: async () => 'нет' }), { code: 'EACCES' });
+    assert.deepEqual(await fs.readdir(target), []);
+  } finally {
+    if (saved.k === undefined) delete process.env.YANDEX_API_KEY; else process.env.YANDEX_API_KEY = saved.k;
+    if (saved.f === undefined) delete process.env.YANDEX_FOLDER_ID; else process.env.YANDEX_FOLDER_ID = saved.f;
+    await fs.rm(base, { recursive: true, force: true });
+  }
 });

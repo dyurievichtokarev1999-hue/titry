@@ -374,6 +374,9 @@ export function createBot({
       await tg.send(chatId, TEXT.draftFail);
       return;
     }
+    // Опасный черновик, пришедший после /delete или смены сессии: запрет участника записывается всё равно
+    // (область — чат, а не сессия), но в чат ничего не отправляется.
+    if (r && !r.unavailable && !r.episode) gate.markSafety(`chat:${chatId}`, story);
     if (!alive(chatId, s)) return; // удалённая сессия не оживает из отложенного ответа
     if (r.unavailable) {
       // ИР-02: проверка не завершена — техническое состояние, не остановка: рассказ не запоминается

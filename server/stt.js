@@ -14,6 +14,11 @@ export const VOICE_JOB = /^titry-voice-[A-Za-z0-9]{6}$/;
 export function runtimeDir() { return process.env.TITRY_RUNTIME_DIR || path.join(os.tmpdir(), 'titry-runtime'); }
 async function ensureRuntime(dir) {
   await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+  // Каталог должен быть настоящим каталогом этого пользователя, не ссылкой и не заранее созданным чужим путём.
+  const st = await fs.lstat(dir);
+  if (!st.isDirectory() || (typeof process.getuid === 'function' && st.uid !== process.getuid())) {
+    throw Object.assign(new Error('Каталог временных файлов не принадлежит сервису.'), { code: 'EACCES' });
+  }
   await fs.chmod(dir, 0o700);
 }
 
