@@ -30,7 +30,7 @@ jobs:
           mkdir -p out-i2
           set -o pipefail
           node scripts/i2-evidence.js out-i2 2>&1 | tee out-i2/run.log
-          if grep -q 'Маркер И2' out-i2/run.log; then echo 'маркер в журнале запуска'; exit 1; fi
+          if grep -qi -e 'маркер' -e 'И2' out-i2/run.log; then echo 'маркер в журнале запуска'; exit 1; fi
       - name: И2 — артефакт
         if: always()
         uses: actions/upload-artifact@v4
