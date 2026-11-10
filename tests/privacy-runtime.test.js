@@ -213,15 +213,20 @@ globalThis.fetch = async (url) => {
         env: { ...process.env, TELEGRAM_BOT_TOKEN: 'test-only', TITRY_RUNTIME_DIR: rt, TITRY_BLOCKED_HMAC_KEY: 'test-only-key-not-a-secret', TITRY_BLOCKED_KEY_VERSION: 'v-entry-test', ...env },
         cwd: dir, stdio: ['ignore', 'pipe', 'pipe'],
       });
-      p.on('exit', (code) => resolve(code));
+      let err = '';
+      p.stderr.on('data', (d) => { err += d; });
+      p.on('exit', (code) => resolve({ code, err }));
     });
-    const code = await run({});
+    const { code, err } = await run({});
     assert.notEqual(code, 0, 'код выхода ненулевой');
+    assert.match(err, /"stage":"voice\.cleanup","code":"ENOTDIR"/, 'отказ именно на стартовой очистке');
+    assert.ok(!err.includes(dir), 'путей в журнале нет');
     await assert.rejects(fs.stat(flag), { code: 'ENOENT' }, 'getUpdates не вызывался');
     // Нет ключа хранилища — тоже отказ запуска (решение владельца 17:10). Очистка здесь успешна.
     await fs.rm(rt); await fs.mkdir(rt, { mode: 0o700 });
-    const code2 = await run({ TITRY_BLOCKED_HMAC_KEY: '' });
-    assert.notEqual(code2, 0);
+    const r2 = await run({ TITRY_BLOCKED_HMAC_KEY: '' });
+    assert.notEqual(r2.code, 0);
+    assert.match(r2.err, /"stage":"ledger\.load","code":"ledger"/, 'отказ именно на хранилище');
     await assert.rejects(fs.stat(flag), { code: 'ENOENT' });
     // Контроль: успешная подготовка доходит до опроса (хранилище — во временном ROOT нельзя, поэтому
     // проверяется prepareBot в соседнем тесте; здесь — только отказы).
