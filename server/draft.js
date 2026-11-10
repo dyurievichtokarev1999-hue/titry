@@ -129,7 +129,7 @@ export function groundDraft(raw, story, { date = todayIso(), period = 'day' } = 
   const rows = [];
   // Угроза другому человеку не становится титром: строки с опорой на такое предложение отбрасываются.
   const threats = threatSentences(story);
-  const threat = (...xs) => xs.some((x) => touchesThreat(x, threats));
+  const threat = (...xs) => xs.some((x) => touchesThreat(x, threats, story));
   for (const r of raw.rows || []) {
     if (sourceFound(r.source, story) && !threat(r.role, r.value, r.source)) rows.push({ role: r.role, value: r.value, source: r.source });
     else dropped.push(r);
@@ -245,7 +245,7 @@ export function draftRuleBased(story, { date = todayIso(), period = 'day' } = {}
   const mood = (MOOD_WORDS.find(([re]) => re.test(t)) || [null, 'quiet'])[1];
   // Предложения с угрозой другому человеку в заготовку не берутся (правило «угроза не становится титром»).
   const threats = threatSentences(story);
-  const parts = sentences(story).filter((s) => !touchesThreat(s, threats));
+  const parts = sentences(story).filter((s) => !touchesThreat(s, threats, story));
   const used = new Set();
   const rows = [];
   for (const s of parts.slice(0, 6)) {

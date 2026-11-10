@@ -14,18 +14,31 @@ import { validateEpisode } from '../engine/episode.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
-// Действие против другого человека (не «убить время/вечер»).
-const HARM = String.raw`(?:причинить\s+(?:\S+\s+)?вред|ударить|избить|покалечить|напасть|убить(?!\s+(?:время|вечер|день|выходные|час))|зарезать)`;
-const WANT_HARM = new RegExp(String.raw`(?:хочу|хочется|хотела|хотел)\s+(?:\S+\s+){0,2}${HARM}`);
-const WHEN = String.raw`(?:сегодня|завтра|ночью|вечером|сейчас)`;
-const HARM_INTENT_URGENT = [
-  // Явное решение или план действовать: «решил напасть», «собираюсь ударить сестру», «собираюсь причинить ему вред».
-  new RegExp(String.raw`(?:собираюсь|соберусь|решил\S*|намерен\S*|планирую|пойду)\s+(?:\S+\s+){0,2}${HARM}`),
-  // Время, привязанное к желанию действовать, в том же предложении: «хочу причинить вред брату сегодня».
-  new RegExp(String.raw`${WHEN}[^.!?…]{0,40}(?:хочу|хочется)\s+(?:\S+\s+){0,2}${HARM}|(?:хочу|хочется)\s+(?:\S+\s+){0,2}${HARM}[^.!?…]{0,40}${WHEN}`),
-];
-// Доступность средства рядом с желанием причинить вред (в любом предложении рассказа): «У меня есть оружие».
-const WEAPON = /(?<!не\s)(?:у\s+меня\s+есть|взял\S*|достал\S*|приготовил\S*|купил\S*)\s+(?:\S+\s+)?(?:оружие|нож|пистолет|ружье|биту)/;
+// Действие против другого человека. Обязателен объект-человек (существительное или местоимение) рядом с глаголом:
+// «напасть на след», «убить время», «избить рекорд», «ударить по мячу» — не угроза.
+const HARM_VERB = String.raw`(?:причинить\s+(?:\S+\s+)?(?:вред|боль)|ударить|ударю|врезать|врежу|избить|изобью|побить|побью|прибить|прибью|убить|убью|зарезать|зарежу|задушить|задушу|придушить|придушу|покалечить|покалечу|напасть|нападу|отомстить|отомщу|пырнуть|застрелить|застрелю|отравить|отравлю)`;
+const PERSON = String.raw`(?:его|ее|их|ему|ей|им|тебя|тебе|вас|вам|брат\S*|сестр\S*|мам\S*|мать|матери|пап\S*|отц\S*|отца|муж\S*|жен\S*|сосед\S*|коллег\S*|начальни\S*|отчим\S*|мачех\S*|свекр\S*|тещ\S*|бывш\S*|партнер\S*|друг\S*|подруг\S*|ребен\S*|сын\S*|доч\S*|учител\S*|одноклассни\S*|человек\S*|люд\S*|всех|парн\S*|девушк\S*)`;
+// Глагол и объект в пределах трёх слов в любом порядке; «на» допускается («напасть на соседа»).
+const HARM_PERSON = new RegExp(String.raw`(?<![а-я])причинить\s+${PERSON}\s+(?:вред|боль)|(?<![а-я])${HARM_VERB}(?![а-я])(?:\s+\S+){0,2}?\s+(?:на\s+)?${PERSON}(?![а-я])|(?<![а-я])${PERSON}(?:\s+\S+){0,2}?\s+${HARM_VERB}(?![а-я])`);
+const WANT = /(?:хочу|хочется|хотела|хотел|мечтаю|охота)/;
+const MARKER = /(?<![а-я])(?:собираюсь|соберусь|решил\S*|решено|намерен\S*|планирую|пойду|сегодня|завтра|ночью|вечером|сейчас|после\s+работы|скоро)(?![а-я])/;
+// Средство (оружие) рядом с намерением; «нож» — не «ножницы»; отрицание («нет ножа», «оружия у меня нет») не считается.
+const WEAPON = /(?<!не\s)(?<!нет\s)(?:оружие|оружием|(?<![а-я])нож(?!ниц|ничк)\S*|пистолет\S*|ружье\S*|ружьем|бит[ауо](?![а-я]))(?![^.!?…;]{0,15}нет)/;
+
+const clauses = (text) => String(text || '').split(/(?<=[.!?…;])\s+|\n+/).map((x) => x.trim()).filter(Boolean);
+/** Уровень угрозы другому человеку по предложениям: 'urgent' | 'concern' | null. */
+function harmToOthers(t) {
+  let level = null;
+  const parts = clauses(t);
+  const weapon = WEAPON.test(t);
+  for (const s of parts) {
+    if (!HARM_PERSON.test(s)) continue;
+    // Признак намерения (решение, план, время) в том же предложении — в любом месте; или средство в рассказе.
+    if (MARKER.test(s) || weapon) return 'urgent';
+    level = 'concern';
+  }
+  return level;
+}
 
 const URGENT = [
   /не\s+хочу\s+(больше\s+)?жить/,
@@ -107,17 +120,13 @@ const URGENT = [
   /перестреля\S*\s+(?:всех|их)|(?:взорву|взорвать|расстреляю|расстрелять)\s+(?:всех|школу|класс|офис)|(?:ружье|ружьем|пистолет\S*|автомат\S*)[^.!?…]{0,40}(?:убью|перестреля|расстреля)|(?:убью|перестреля|расстреля)[^.!?…]{0,40}(?:ружье|ружьем|пистолет|автомат)/,
   /(?:держ\S*|запира\S*)\s+меня\s+(?:взаперти|дома|в\s+(?:квартире|комнате|подвале))|меня\s+держ\S*\s+(?:взаперти|дома|в\s+(?:квартире|комнате|подвале))/,
   /(?:не\s+выпуска\S*)\s+меня\s+из\s+(?:квартир|дом|комнат)|(?<![а-я])запер\S*\s+меня(?![а-я])|(?<![а-я])меня\s+заперл/,
-  // — Признаки намерения причинить вред другому (редактор повествования, OI01–OI06): решение/план действовать
-  // или время, привязанное к действию в том же предложении. Голая фраза гнева — concern (ниже), не urgent.
-  ...HARM_INTENT_URGENT,
+  // — Признаки намерения причинить вред другому (OI01–OI06) — harmToOthers() в assessRisk.
 ];
 
 // Гнев на других — частая гипербола («убью его, если опоздает»): ролик собирается, рядом — контакты помощи.
 // Фраза угрозы при этом не становится титром (threatErrors ниже).
 const CONCERN = [
   /(убью|прибью|убить\s+готова?)\s+(его|е[её]|их|тебя)/,
-  WANT_HARM,
-  /(?<![а-я])(?:его|ее|их)\s+(?:ударить|избить|убить|прибить)(?![а-я])/,
 ];
 
 function norm(text) {
@@ -157,9 +166,11 @@ export function stripIdioms(text) {
 export function assessRisk(text, modelFlag = false) {
   const t = stripIdioms(text);
   const urgent = URGENT.filter((re) => re.test(t)).map(String);
-  if (WANT_HARM.test(t) && WEAPON.test(t)) urgent.push('want_harm+weapon');
+  const harm = harmToOthers(t);
+  if (harm === 'urgent') urgent.push('harm_to_others+intent');
   if (urgent.length || modelFlag) return { level: 'urgent', matches: urgent, byModel: !!modelFlag && !urgent.length };
   const concern = CONCERN.filter((re) => re.test(t)).map(String);
+  if (harm === 'concern') concern.push('harm_to_others');
   if (concern.length) return { level: 'concern', matches: concern, byModel: false };
   return { level: 'none', matches: [], byModel: false };
 }
@@ -178,38 +189,54 @@ export function assessEpisodeRisk(story, ep) {
   return assessRisk(parts.filter(Boolean).join('\n'));
 }
 
-const sentencesOf = (text) => String(text || '').split(/(?<=[.!?…])\s+|\n+/).map((x) => x.trim()).filter(Boolean);
-const THREAT = [...CONCERN, ...HARM_INTENT_URGENT, WANT_HARM];
-const isThreat = (s) => { const t = stripIdioms(s); return THREAT.some((re) => re.test(t)); };
+// Части рассказа для правила «угроза не в титрах»: предложения и части через «;», запятую, тире и союзы.
+// Это единицы для сопоставления строк титров, а не для оценки риска (assessRisk видит весь текст).
+const unitsOf = (text) => String(text || '').split(/(?<=[.!?…;])\s+|\n+|[,;:]\s+|\s+[—–-]\s+|\s+(?:и|а|но|потом|затем)\s+/)
+  .map((x) => x.trim()).filter(Boolean);
+const flat = (x) => norm(x).replace(/[^а-яa-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+const isThreatUnit = (u) => { const t = stripIdioms(u); return HARM_PERSON.test(t) || CONCERN.some((re) => re.test(t)); };
+// Пересказ угрозы без цитаты в оформлении (название, жанр, пост, «в главной роли»).
+const HARMISH = new RegExp(String.raw`(?<![а-я])(?:${HARM_VERB}|месть|мести|мщени\S*|прицел\S*|убийств\S*|убийц\S*|расправ\S*)(?![а-я])`);
 
-/** Предложения рассказа с угрозой другому человеку (нормализованные). Исходный текст не урезается. */
+/** Части рассказа с угрозой другому человеку (без пунктуации). Исходный текст не урезается. */
 export function threatSentences(story) {
-  return sentencesOf(story).filter(isThreat).map((x) => norm(x).replace(/[.!?…]+$/, '').trim());
+  // Угроза определяется по всему предложению (объект может стоять до союза), а в список попадает только та часть,
+  // где есть глагол вреда или объект: соседние безобидные части предложения не блокируются.
+  const out = [];
+  for (const sentence of String(story || '').split(/(?<=[.!?…;])\s+|\n+/)) {
+    if (!isThreatUnit(sentence)) continue;
+    const units = unitsOf(sentence).filter((u) => HARMISH.test(stripIdioms(u)) || isThreatUnit(u));
+    out.push(...(units.length ? units : [sentence]).map(flat));
+  }
+  return out.filter(Boolean);
 }
 
-/** Строка опирается на предложение с угрозой (или сама содержит угрозу). */
-export function touchesThreat(text, threats) {
-  const t = norm(text).replace(/[.!?…]+$/, '').trim();
+/** Строка опирается на часть рассказа с угрозой, сама содержит угрозу или пересказывает её. */
+export function touchesThreat(text, threats, story = '') {
+  const t = flat(text);
   if (!t) return false;
-  if (isThreat(t)) return true;
-  return t.length >= 4 && threats.some((s) => s.includes(t) || t.includes(s));
+  if (isThreatUnit(t) || HARMISH.test(t)) return true;
+  if (t.length < 4 || !threats.some((s) => s.includes(t) || t.includes(s))) return false;
+  // Совпадение есть и вне угрозы (то же слово в безобидном предложении) — строка опирается не на угрозу.
+  const safeUnits = unitsOf(story).map(flat).filter((u) => !threats.some((s) => s === u || s.includes(u) || u.includes(s)));
+  return !safeUnits.some((u) => u.includes(t));
 }
 
 /**
  * Правило текста «угроза не становится титром» (редактор повествования, OI; владелец 00:59):
- * title, genre, строки и пост не могут опираться на предложение с угрозой другому человеку.
+ * title, genre, «в главной роли», строки и пост не могут опираться на угрозу другому человеку.
  */
 export function threatErrors(story, ep) {
   const threats = threatSentences(story);
   const errors = [];
   const msg = 'Угроза другому человеку не берётся в титры.';
   if (!ep) return errors;
-  if (touchesThreat(ep.title, threats)) errors.push({ path: 'title', msg });
-  if (touchesThreat(ep.genre, threats)) errors.push({ path: 'genre', msg });
-  (ep.rows || []).forEach((r, i) => {
-    if ([r.role, r.value, r.source].some((x) => touchesThreat(x, threats))) errors.push({ path: `rows.${i}`, msg });
-  });
-  if (ep.post && [ep.post.text, ep.post.source].some((x) => touchesThreat(x, threats))) errors.push({ path: 'post', msg });
+  const hit = (...xs) => xs.some((x) => touchesThreat(x, threats, story));
+  if (hit(ep.title)) errors.push({ path: 'title', msg });
+  if (hit(ep.genre)) errors.push({ path: 'genre', msg });
+  if (hit(ep.lead)) errors.push({ path: 'lead', msg });
+  (ep.rows || []).forEach((r, i) => { if (hit(r.role, r.value, r.source)) errors.push({ path: `rows.${i}`, msg }); });
+  if (ep.post && hit(ep.post.text, ep.post.source)) errors.push({ path: 'post', msg });
   return errors;
 }
 
