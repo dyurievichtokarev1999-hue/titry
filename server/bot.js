@@ -567,19 +567,20 @@ export function createBot({
 
   // Короткий текст (< 12 знаков; решение Claude 11.11 15:05 п. 1). «Подробнее» — только после полной проверки:
   //  1) локальный фильтр ≠ none → путь рассказа (остановка и помощь);
-  //  2) none → отдельная модельная проверка до любого ответа: опасно → остановка; безопасно → «подробнее»;
-  //     неизвестно (сбой, нет ключа, предел времени, пауза) → никакого «подробнее»: checkUnavailable и контакты помощи.
+  //  2) none → разовая модельная проверка до любого ответа (gate.probe: без технической паузы для коротких слов):
+  //     опасно → остановка; безопасно → «подробнее»; неизвестно (сбой, нет ключа, хранилище) → никакого
+  //     «подробнее»: текст неизвестного исхода и контакты помощи. Текст в журнал и метрики не пишется.
   async function shortText(chatId, s, text) {
     if (assessRisk(text).level !== 'none') return handleStory(chatId, s, text, 'text');
-    const g = await track(chatId, gate.verify(s.scope, text, null, text));
-    if (!alive(chatId, s)) return;
+    const g = await track(chatId, gate.probe(s.scope, text, text));
+    if (!alive(chatId, s)) return; // /delete во время проверки: в чат ничего не уходит (запрет, если был, остаётся)
     if (g.ok) return tg.send(chatId, TEXT.more);
     if (g.kind === 'safety') {
       s.story = text; s.originalStory = text; // запрет — на этот текст; прежний черновик уничтожается остановкой
-      return stopForSafety(chatId, s, 'urgent', { at: 'short', byModel: true });
+      return stopForSafety(chatId, s, 'urgent', { at: 'short', byModel: !!g.byModel });
     }
-    logError('check', { code: g.kind === 'technical' ? 'check_incomplete_twice' : g.code });
-    return tg.send(chatId, `${g.kind === 'technical' ? TEXT.checkPaused : TEXT.checkUnavailable}\n\n${helpContacts()}`);
+    logError('check', { code: g.code });
+    return tg.send(chatId, `${TEXT.checkUnavailable}\n\n${helpContacts()}`);
   }
 
   async function onCallback(q) {

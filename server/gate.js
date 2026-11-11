@@ -195,5 +195,23 @@ export function makeGate({ check, hasKey = () => true, monoNow = monotonic, wall
     return kinds;
   }
 
-  return { status, markSafety, verify, organizerRetry, recordsFor, versionDigest, storyDigest };
+  // Разовая проверка короткого текста в боте (PR 15, решение Claude 11.11 15:05 п. 1): без счётчика неполных ответов
+  // и без технической паузы — иначе два сбоя на «Привет» навсегда закрыли бы это слово участнику (в боте нет ручного
+  // повтора организатора). Опасность ставит обычную остановку. Неполный ответ — unavailable: «подробнее» не будет.
+  async function probe(scope, story, text) {
+    const a = area(scope);
+    const sd = storyDigest(story);
+    const st = status(scope, story);
+    if (st.kind === 'safety') return { kind: 'safety', byModel: false };
+    if (st.kind) return { unavailable: true, code: st.kind === 'technical' ? 'check_incomplete_twice' : st.code };
+    if (!hasKey()) return { unavailable: true, code: 'no_key' };
+    let flagged;
+    try { flagged = await check(text); } catch (e) { return a.safety.has(sd) ? { kind: 'safety', byModel: false } : { unavailable: true, code: safeCode(e) }; }
+    if (a.safety.has(sd)) return { kind: 'safety', byModel: false }; // остановка из параллельного запроса сильнее
+    if (flagged === true) { markSafety(scope, story); return { kind: 'safety', byModel: true }; }
+    if (flagged === false) return { ok: true };
+    return { unavailable: true, code: 'bad_response' };
+  }
+
+  return { status, markSafety, verify, probe, organizerRetry, recordsFor, versionDigest, storyDigest };
 }

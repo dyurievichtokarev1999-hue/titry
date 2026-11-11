@@ -62,16 +62,18 @@ test('путь 2б: короткий текст без признаков, мо�
 });
 
 const unknownTail = `${TEXT.checkUnavailable}\n\n${helpContacts()}`;
-test('путь 2в: проверка не завершена (сбой) → текст неизвестного исхода и контакты помощи, без «подробнее»', async () => {
-  const b = setup({ check: () => { throw Object.assign(new Error('сбой'), { code: 'incomplete_response' }); } });
-  await b.say('Сдохну');
-  assert.equal(b.sent.at(-1), unknownTail);
+test('путь 2в: проверка не завершена (сбой) → текст неизвестного исхода и контакты, без «подробнее»; паузы для слова нет', async () => {
+  let fail = true;
+  const b = setup({ check: () => { if (fail) throw Object.assign(new Error('сбой'), { code: 'incomplete_response' }); return false; } });
+  for (let i = 0; i < 3; i++) {
+    await b.say('Привет');
+    assert.equal(b.sent.at(-1), unknownTail, `сбой ${i + 1}: неизвестный исход, без технической паузы`);
+  }
   assert.doesNotMatch(b.all(), MORE);
   assert.doesNotMatch(b.sent.at(-1), /похоже|заметил/i, 'без «мы заметили» и «похоже»');
-  // Второй неполный ответ — техническая пауза; «подробнее» по-прежнему нет, контакты есть.
-  await b.say('Сдохну');
-  assert.equal(b.sent.at(-1), `${TEXT.checkPaused}\n\n${helpContacts()}`);
-  assert.doesNotMatch(b.all(), MORE);
+  fail = false; // модель снова отвечает — короткое слово не закрыто навсегда
+  await b.say('Привет');
+  assert.match(b.sent.at(-1), MORE);
 });
 
 test('путь 2г: модель недоступна (нет ключа) → текст неизвестного исхода и контакты, проверка не вызывается', async () => {
@@ -101,9 +103,73 @@ test('«/текст»: неизвестная команда — путь рас
 });
 
 test('однословные формы самоповреждения — urgent (узкое «б»); «Сдохну» — не в словаре, уходит на модель', () => {
-  for (const t of ['Порежусь', 'Отравлюсь', 'Удавлюсь', 'Утоплюсь', 'Застрелюсь', 'Вскроюсь', 'Убьюсь', 'Выпилюсь', 'Наглотаюсь', 'Не жить мне', 'УБЬЮСЬ.', 'вскроюсь']) {
+  for (const t of ['Порежусь', 'Отравлюсь', 'Удавлюсь', 'Утоплюсь', 'Застрелюсь', 'Вскроюсь', 'Убьюсь', 'Самоубьюсь', 'Выпилюсь', 'Наглотаюсь', 'Не жить мне', 'Мне не жить', 'УБЬЮСЬ.', 'вскроюсь']) {
     assert.equal(assessRisk(t).level, 'urgent', t);
   }
   for (const t of ['Сдохну', 'Порезалась', 'Устала', 'Режу хлеб', 'Убилась на работе']) assert.notEqual(assessRisk(t).level, 'urgent', t);
   assert.ok(helpMessage('urgent').includes(helpContacts().split('\n\n')[1]), 'контакты те же, что на экране остановки');
+});
+
+test('«/START», «//текст», «/cmd» с переводом строки, «/start_x …»', async () => {
+  const k = setup();
+  await k.say('/START');
+  assert.equal(k.sent.at(-1), TEXT.start);
+  for (const text of ['//порежусь', '/start\nхочу умереть', '/help\nубьюсь', '/start_x убьюсь', '/ хочу умереть']) {
+    const b = setup();
+    await b.say(text);
+    assert.match(b.all(), URGENT_CARD, JSON.stringify(text));
+    assert.doesNotMatch(b.all(), MORE, JSON.stringify(text));
+  }
+});
+
+test('безопасный короткий текст не трогает показанный черновик; опасный — уничтожает', async () => {
+  const story = 'Утром я пила чай на кухне. Вечером я читала книгу у окна.';
+  const b = setup();
+  await b.say(story);
+  const bot = b; // черновик показан
+  const before = b.sent.length;
+  await bot.say('Привет');
+  assert.match(b.sent.at(-1), MORE);
+  // Правка после «подробнее» работает: черновик на месте.
+  await bot.say('название: Вечер у окна');
+  assert.ok(b.sent.length > before + 1);
+  assert.doesNotMatch(b.sent.at(-1), /Нет черновика|Сначала/);
+  const d = setup({ check: (t) => t === 'Сдохну' });
+  await d.say(story);
+  await d.say('Сдохну');
+  assert.match(d.sent.at(-1), URGENT_CARD);
+  // Запрет — на короткий текст, а не на прежний безобидный рассказ.
+  await d.say(story);
+  assert.doesNotMatch(d.sent.at(-1), URGENT_CARD, 'прежний рассказ не попал в запрет');
+});
+
+test('/delete во время проверки короткого текста: в чат ничего не уходит; повтор — остановка', async () => {
+  let release;
+  const b = setup({ check: (t) => (t === 'Сдохну' ? new Promise((r) => { release = r; }) : false) });
+  const p = b.say('Сдохну');
+  await new Promise((r) => setImmediate(r));
+  await b.say('/delete');
+  const n = b.sent.length;
+  release(true);
+  await p;
+  assert.equal(b.sent.length, n, 'удалённая сессия не получает ответ проверки');
+  await b.say('Сдохну');
+  assert.match(b.sent.at(-1), URGENT_CARD, 'запрет участника остался после /delete');
+});
+
+test('журнал и метрики короткого пути — без текста', async () => {
+  const out = []; const events = [];
+  const saved = { error: console.error, log: console.log, warn: console.warn, info: console.info };
+  for (const k of Object.keys(saved)) console[k] = (...a) => out.push(a.map(String).join(' '));
+  try {
+    for (const check of [() => true, () => { throw Object.assign(new Error('сбой Сдохну'), { code: 'incomplete_response' }); }]) {
+      const tg = { send: async () => {}, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''), sendVideo: async () => {} };
+      const metrics = { hash: () => 'f', log: async (id, ev, extra = {}) => { events.push({ ev, ...extra }); }, forget: async () => {} };
+      const bot = createBot({ tg, metrics, safetyCheck: async (t) => check(t), render: async () => ({}) });
+      await bot.handleUpdate({ message: { chat, text: 'Сдохну' } });
+    }
+  } finally { Object.assign(console, saved); }
+  const all = `${out.join('\n')}\n${JSON.stringify(events)}`.toLowerCase();
+  assert.ok(!all.includes('сдохну'), all);
+  assert.ok(events.some((e) => e.ev === 'safety' && e.at === 'short' && e.byModel === true));
 });
