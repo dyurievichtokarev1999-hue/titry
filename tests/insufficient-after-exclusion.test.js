@@ -408,3 +408,72 @@ test('монтажная: ручная правка организатора н�
     assert.equal(counters.render, 0);
   });
 });
+
+// ── Сверка основной сессии (f2da5268): поздняя остановка того же рассказа ────
+// Тот же рассказ отправлен дважды; отдельная проверка первой отправки вернула true; черновик второй пришёл позже.
+// Раньше оба ответа молча выходили — человек не получал ни карточки помощи, ни ответа.
+async function twiceSameStory(order) {
+  let checkTrue, draft2;
+  let drafts = 0;
+  const draft = (story, o) => (++drafts === 1 ? manual(story, o) : new Promise((r) => { draft2 = () => r(manual(story, o)); }));
+  const b = botSetup({ draft, check: (t, n) => (n === 1 ? new Promise((r) => { checkTrue = () => r(true); }) : false) });
+  const tick = () => new Promise((r) => setImmediate(r));
+  const p1 = b.say(byId.OI10);
+  while (!checkTrue) await tick();
+  const p2 = b.say(byId.OI10);
+  while (!draft2) await tick();
+  if (order === 'check-first') { checkTrue(); await p1; draft2(); await p2; }
+  else { draft2(); await tick(); checkTrue(); await p1; await p2; }
+  await tick();
+  return b;
+}
+
+for (const order of ['check-first', 'draft-first']) {
+  test(`бот: тот же рассказ дважды, проверка первого вернула true (${order}) → одна карточка помощи, без реплики нехватки`, async () => {
+    const b = await twiceSameStory(order);
+    const urgent = b.texts().filter((t) => /Сейчас важнее не титры/.test(t));
+    assert.equal(urgent.length, 1, `карточек помощи: ${urgent.length}; сообщения: ${JSON.stringify(b.texts())}`);
+    if (order === 'check-first') assert.ok(!b.texts().some((t) => t.startsWith(REPLY)), 'реплика нехватки не подменяет остановку');
+    // draft-first: вторая отправка получила полное «безопасно» раньше, чем первая — «опасно»; реплика уже ушла,
+    // но поздняя остановка всё равно приходит, и последним человек видит карточку помощи (как в ветке !r.episode).
+    assert.match(b.texts().at(-1), /Сейчас важнее не титры/, 'последним — карточка помощи');
+    assert.equal(b.bot.sessions.get(chat.id).verdict, 'blocked');
+    assert.equal(b.counters.render, 0);
+    // Повтор — сразу остановка.
+    await b.say(byId.OI10);
+    assert.match(b.texts().at(-1), /Сейчас важнее не титры/);
+  });
+}
+
+test('нехватка: журнал ошибок и консоль не содержат текста рассказа (бот и монтажная)', async () => {
+  const out = [];
+  const saved = { error: console.error, log: console.log, warn: console.warn, info: console.info };
+  for (const k of Object.keys(saved)) console[k] = (...a) => out.push(a.map(String).join(' '));
+  try {
+    const fail = () => { throw Object.assign(new Error(`сбой ${byId.OI10}`), { code: 'incomplete_response' }); };
+    for (const check of [() => false, fail, fail]) {
+      const b = botSetup({ check });
+      await b.say(byId.OI10);
+    }
+    const huge = { contacts: [{ label: 'Ж'.repeat(5000), phone: '112' }] };
+    insufficientMessages(true, { help: huge });
+    await withApp({ check: fail }, async ({ post }) => { await post('/api/draft', { story: byId.OI10 }); await post('/api/draft', { story: byId.OI10 }); });
+    await withApp({}, async ({ post }) => { await post('/api/draft', { story: byId.OI12 }); });
+  } finally { Object.assign(console, saved); }
+  assert.ok(out.length > 0, 'журнал вообще что-то записал (сбои проверки)');
+  const all = out.join('\n').toLowerCase();
+  for (const frag of ['злюсь', 'ударить', 'коллег', 'отчёт', 'соседа', 'оружия']) assert.ok(!all.includes(frag), `в журнале нет «${frag}»`);
+});
+
+test('заметка организатору при переходе на заготовку — по фактической причине', async () => {
+  const titleFromThreat = modelDraft({ title: 'Ударить брата', rows: [
+    { role: 'Чай', value: 'утренний чай', source: 'Утром я пила чай' },
+    { role: 'Книга', value: 'вечер с книгой', source: 'Вечером я читала книгу' },
+  ] });
+  const a = await makeDraft(MIX, { provider: 'claude', client: modelClient(titleFromThreat) });
+  assert.match(a.note, /Название или жанр/);
+  const fewRows = modelDraft({ rows: [{ role: 'Чай', value: 'утренний чай', source: 'Утром я пила чай' }] });
+  const b = await makeDraft(MIX, { provider: 'claude', client: modelClient(fewRows) });
+  assert.match(b.note, /не хватило строк/);
+  for (const r of [a, b]) assert.ok(!/злюсь|ударить|чай|книг/i.test(r.note), 'в заметке нет текста рассказа');
+});

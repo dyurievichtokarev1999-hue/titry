@@ -216,3 +216,25 @@ test('монтажная: открытая помощь прежнего чер�
   await u.click('logBtn');
   assert.equal(logged.provider, null);
 });
+
+test('монтажная: поздний ответ «нехватка» не очищает форму с уже выбранным примером; кнопка черновика работает', async () => {
+  let finish;
+  const u = studio(async (p) => {
+    if (p === '/api/config') return { provider: 'claude', model: 'm' };
+    if (p === '/api/draft') return new Promise((r) => { finish = () => r(insufficient()); });
+    if (p.startsWith('/examples/')) return { story: ex.story, episode: ex.episode };
+    return {};
+  });
+  u.el('story').value = B;
+  const drafting = u.el('draftBtn').listeners.click();
+  await u.tick();
+  u.el('example').value = 'day-quiet';
+  await u.el('example').listeners.change(); await u.tick();
+  assert.equal(u.el('draftBtn').disabled, false, 'после выбора примера можно снова запросить черновик');
+  finish(); await drafting; await u.tick();
+  assert.equal(u.el('title').value, ex.episode.title, 'пример остался в форме');
+  assert.equal(u.el('rows').children.length, ex.episode.rows.length);
+  assert.notEqual(u.el('draftNote').textContent, REPLY);
+  assert.equal(u.el('renderBtn').disabled, false, 'рендер примера доступен');
+  assert.equal(u.el('draftBtn').disabled, false);
+});

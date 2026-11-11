@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS, episodeToText } from '../engine/episode.js';
 import { makeDraft, modelSafetyCheck, hasClaudeCredentials } from './draft.js';
 import { makeGate } from './gate.js';
-import { helpMessage, loadHelp, assessEpisodeRisk, validateSafeEpisode } from './safety.js';
+import { helpMessage, loadHelp, assessEpisodeRisk, validateSafeEpisode, INSUFFICIENT_TEXT } from './safety.js';
 import { renderEpisode, ROOT } from './render.js';
 import { logError, safeCode } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS, cleanupVoiceOrphans } from './stt.js';
@@ -69,7 +69,7 @@ export const TEXT = {
   draftFail: 'Не получилось собрать черновик. Попробуй ещё раз чуть позже.',
   // Внутренняя причина insufficient_after_exclusion (редактор повествования), дословно: только эта реплика —
   // без черновика, ролика, просьбы дописать и кнопок. Показывается только после stop и технических исходов.
-  insufficient: 'Не получилось собрать титры только из твоих слов. Сегодня можно без ролика.',
+  insufficient: INSUFFICIENT_TEXT, // текст — в server/safety.js
 };
 
 export const TELEGRAM_TEXT_LIMIT = 4096; // лимит одного текстового сообщения Telegram, в символах
@@ -466,10 +466,23 @@ export function createBot({
   // (реплика + helpMessage('concern')) проверяется при каждой отправке (insufficientMessages): сверх лимита Telegram 4096
   // сообщение не делится молча — код message_too_long в журнале; сейчас 256 знаков.
   async function replyInsufficient(chatId, s, story, gen, current, concern) {
-    if (!current()) return;
+    // Тот же рассказ сейчас в работе и ещё не остановлен: поздняя остановка (как в ветке !r.episode, at: 'late').
+    // Без этого два подряд одинаковых рассказа, у первого из которых проверка вернула true, оставляли человека
+    // без карточки помощи: первый ответ устарел, у второго current() уже false из-за safety — оба молча выходили.
+    const sameStoryInWork = () => alive(chatId, s) && s.verdict !== 'blocked' && !!s.originalStory && storyKey(s.originalStory) === storyKey(story);
+    const stoppedNow = () => isBlocked(s, story) || gate.status(s.scope, story).kind === 'safety';
+    if (!current()) {
+      if (stoppedNow() && sameStoryInWork()) return stopForSafety(chatId, s, 'urgent', { at: 'late' });
+      return;
+    }
     const g = await track(chatId, gate.verify(s.scope, story, null, story));
-    if (!alive(chatId, s) || s.draftId !== gen) return;
-    if (g.kind === 'safety') return stopForSafety(chatId, s, 'urgent', { at: 'check', byModel: true });
+    if (!alive(chatId, s)) return;
+    if (g.kind === 'safety') {
+      if (s.draftId === gen) return stopForSafety(chatId, s, 'urgent', { at: 'check', byModel: true });
+      if (sameStoryInWork()) return stopForSafety(chatId, s, 'urgent', { at: 'late', byModel: true });
+      return;
+    }
+    if (s.draftId !== gen) return;
     if (!g.ok) {
       logError('check', { code: g.code });
       s.stage = 'idle';

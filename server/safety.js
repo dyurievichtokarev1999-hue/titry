@@ -447,6 +447,8 @@ export function validateSafeEpisode(ep, story) {
 
 /** Внутренняя причина: после исключения опасных частей рассказа не собирается обязательный элемент эпизода. */
 export const INSUFFICIENT_AFTER_EXCLUSION = 'insufficient_after_exclusion';
+/** Реплика при этой причине (редактор повествования), дословно. Единственное место текста: бот и монтажная берут отсюда. */
+export const INSUFFICIENT_TEXT = 'Не получилось собрать титры только из твоих слов. Сегодня можно без ролика.';
 
 /**
  * Не хватает ли материала ПОСЛЕ исключения опасных частей (threatSentences/threatErrors).

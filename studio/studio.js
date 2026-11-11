@@ -8,6 +8,7 @@ const state = {
   provider: null,
   feedback: null,
   t: 0, playing: false, last: 0,
+  drafting: 0,          // поколение запроса черновика: поздний ответ прежнего запроса (или до выбора примера) не применяется
   screen: 0,            // поколение экрана результата: ответ рендера/перепроверки, начатых до нехватки, не показывается
   insufficient: false,  // нехватка материала после исключения: рендер выключен до нового проверенного черновика
 };
@@ -169,23 +170,25 @@ api('/api/config').then((c) => {
 async function requestDraft() {
   const story = $('story').value.trim();
   if (!story) { $('draftNote').textContent = 'Вставьте рассказ участника.'; return; }
+  const my = ++state.drafting;
   $('draftBtn').disabled = true; $('draftNote').textContent = 'Собираю черновик…';
   try {
     const r = await api('/api/draft', { story, date: $('date').value, period: $('period').value, tone: $('tone').value });
+    if (my !== state.drafting) return; // пока ждали, выбран пример или запрошен новый черновик
     state.insufficient = false; // любой исход нового рассказа, кроме нехватки, возвращает обычный маршрут
     if (!r.episode) { if (r.help) showHelp(r.help); $('draftNote').textContent = 'Черновик остановлен фильтром безопасности.'; return; }
-    state.insufficient = false; // новый проверенный черновик — обычный маршрут
     state.episode = r.episode; state.draft = structuredClone(r.episode); state.provider = r.provider;
     fillForm(state.episode); changed();
     const dropped = r.dropped && r.dropped.length ? ` Отброшено строк без опоры на рассказ: ${r.dropped.length}.` : '';
     $('draftNote').textContent = (r.provider === 'claude' ? 'Черновик от Claude.' : 'Заготовка без ИИ: сократите значения до коротких фраз.') + dropped + (r.note ? ' ' + r.note : '');
     if (r.help) showHelp(r.help);
   } catch (e) {
+    if (my !== state.drafting) return; // поздний ответ (в том числе «нехватка») не очищает уже выбранный пример
     // Не нехватка (stop, технический ответ, ошибка) — флаг снимается, иначе кнопка перепроверки была бы мёртвой.
     if (!(e.data && e.data.kind === 'insufficient')) state.insufficient = false;
     // ИР-02: «проверка недоступна» — экран организатора целиком (тексты редактора повествования, PM-01).
     $('draftNote').textContent = stopText(e, 'Черновик остановлен фильтром безопасности.');
-  } finally { $('draftBtn').disabled = false; }
+  } finally { if (my === state.drafting) $('draftBtn').disabled = false; }
 }
 $('draftBtn').addEventListener('click', requestDraft);
 
@@ -237,6 +240,8 @@ $('example').addEventListener('change', async () => {
   if (!id) return;
   const data = await (await fetch(`/examples/${id}.json`)).json();
   $('story').value = data.story;
+  state.drafting++; // ответ черновика, запрошенного до выбора примера, не применяется
+  $('draftBtn').disabled = false;
   state.insufficient = false; // вымышленный пример со своим рассказом — обычный маршрут
   state.episode = sanitizeEpisode(data.episode); state.draft = structuredClone(state.episode); state.provider = 'example';
   state.t = T.titleHold - 0.5;

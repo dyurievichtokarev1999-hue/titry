@@ -10,7 +10,7 @@ import { MOODS, TRACKS, sanitizeEpisode, validateEpisode, episodeToText } from '
 import { makeDraft, hasClaudeCredentials, DEFAULT_MODEL, modelSafetyCheck } from './draft.js';
 import { renderEpisode, ROOT } from './render.js';
 import { logError, safeCode } from './errlog.js';
-import { loadHelp, helpMessage, assessEpisodeRisk, validateSafeEpisode } from './safety.js';
+import { loadHelp, helpMessage, assessEpisodeRisk, validateSafeEpisode, INSUFFICIENT_TEXT } from './safety.js';
 import { makeGate } from './gate.js';
 import { makeLedger, KEY_ENV, KEY_VERSION_ENV } from './ledger.js';
 
@@ -147,7 +147,7 @@ const TECHNICAL = {
 // Решение владельца 1 (PR 11): если исключался фрагмент уровня concern, в ответе ещё help — тот же блок помощи,
 // что у прежней карточки concern (helpMessage('concern')); экран показывает его сразу за репликой.
 // Признак concern — уровень всего рассказа (r.risk.level), как у прежней карточки concern: сознательно то же условие.
-export const INSUFFICIENT_TEXT = 'Не получилось собрать титры только из твоих слов. Сегодня можно без ролика.';
+export { INSUFFICIENT_TEXT }; // текст — в server/safety.js
 const INSUFFICIENT = { kind: 'insufficient', error: INSUFFICIENT_TEXT };
 const SCOPE = 'studio'; // монтажная — одна общая область запретов
 
