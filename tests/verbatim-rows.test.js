@@ -524,3 +524,14 @@ test('перенос признака на следующую фразу, сар
   assert.equal(rowWordsGrounded({ role: 'Я', value: 'я', source: long }, long), false);
   assert.ok(Date.now() - t0 < 3000);
 });
+
+// ── Разбор 772a5dd7 ──────────────────────────────────────────────────────────
+
+test('пробуждение без сомнений, перенос сказанного и источника, формы оценок', () => {
+  for (const { story, row } of fx.review13.reject) {
+    assert.equal(rowWordsGrounded(row, story), false, `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+  for (const { story, row } of fx.review13.accept) {
+    assert.deepEqual(rowWordProblems(row, story), [], `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+});
