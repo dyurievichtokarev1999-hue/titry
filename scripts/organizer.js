@@ -103,6 +103,8 @@ export async function liftTechnical({ area, story, root = ROOT, env = process.en
     // Сбой записи после начала изменения — состояние файла не подтверждено (не «не изменено»).
     try { await ledger.clearTechnical(area, story); } catch { return 'write_unconfirmed'; }
     if (!(await ledger.flush())) return 'write_unconfirmed';
+    // Замок оставался нашим всё время записи — иначе результат не подтверждён (другая команда могла писать).
+    if (!mutex.holds()) return 'write_unconfirmed';
     return 'ok';
   } finally { releaseAll(); }
 }

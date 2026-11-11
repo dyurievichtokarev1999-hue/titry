@@ -476,3 +476,28 @@ test('ИР10-2 В1: при SIGTERM внутри критической секц�
     assert.deepEqual(await fs.readdir(path.join(stateDir, 'run')), []);
   } finally { await fs.rm(r.root, { recursive: true, force: true }); }
 });
+
+test('ИР10-2 (разбор 46f17f77): нечитаемый или каталог вместо owner, остатки .stale-*, потеря замка во время записи', async () => {
+  const sl = await import('../server/service-lock.js');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-olock2-'));
+  try {
+    const run = path.join(dir, 'run'); const lock = path.join(run, 'organizer.lock');
+    // Каталог на месте owner — испорченный владелец: занято, пока свежий; старше 30 с — брошенный.
+    await fs.mkdir(path.join(lock, 'owner'), { recursive: true });
+    assert.throws(() => sl.acquireOrganizerMutex(dir), { code: 'busy_organizer' });
+    const old = new Date(Date.now() - sl.STALE_EMPTY_MS - 1000);
+    await fs.utimes(lock, old, old);
+    const m = sl.acquireOrganizerMutex(dir); m.release();
+    // Старые остатки уборки убираются, свежие не трогаются.
+    await fs.mkdir(path.join(run, 'organizer.lock.stale-1-a'));
+    await fs.utimes(path.join(run, 'organizer.lock.stale-1-a'), old, old);
+    await fs.mkdir(path.join(run, 'organizer.lock.stale-2-b'));
+    const m2 = sl.acquireOrganizerMutex(dir);
+    assert.deepEqual((await fs.readdir(run)).sort(), ['organizer.lock', 'organizer.lock.stale-2-b']);
+    // Потеря замка (его перехватили) — holds() = false; release() чужой замок не трогает.
+    await fs.writeFile(path.join(lock, 'owner'), '1 1\n');
+    assert.equal(m2.holds(), false);
+    m2.release();
+    assert.ok((await fs.readdir(run)).includes('organizer.lock'), 'чужой замок не снят');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});

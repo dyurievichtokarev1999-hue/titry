@@ -124,6 +124,9 @@ export function holdServiceLock(stateDir, role) {
  * (переименовать может только один), затем сверка — в переименованном каталоге тот же брошенный владелец;
  * если нет (успели переименовать свежий замок другой команды) — переименование обратно и отказ.
  * Нечитаемый файл владельца (права) — code 'lock_unreadable' (подсказка про права), а не «занято».
+ * Остаток: при вытеснении процесса посреди уборки и третьей команде одновременно замок может оказаться у двух
+ * команд (разбор 46f17f77). Поэтому команда проверяет замок до и после записи; нарушение после записи —
+ * write_unconfirmed. Худший исход — вернувшаяся запись technical (осторожная сторона), safety не затрагивается.
  * Возвращает { release, holds }: holds() — замок всё ещё наш (проверяется перед записью хранилища).
  */
 export const STALE_EMPTY_MS = 30_000;
@@ -134,12 +137,21 @@ export function acquireOrganizerMutex(stateDir, { pid = process.pid, now = Date.
     try { return fs.readFileSync(path.join(d, 'owner'), 'utf8'); } catch (e) {
       if (e?.code === 'ENOENT') return '';
       if (e?.code === 'EACCES' || e?.code === 'EPERM') throw lockError('lock_unreadable');
-      throw e;
+      return '\u0000'; // EISDIR, ELOOP и т. п. — испорченный владелец: брошен по возрасту, как пустой
+
     }
   };
   const parse = (text) => { const m = /^(\d+)(?: (\d+))?\n$/.exec(text); return m ? { pid: Number.parseInt(m[1], 10), start: m[2] ?? null } : null; };
   const start = startTime(pid);
   const mine = start === null ? `${pid}\n` : `${pid} ${start}\n`;
+  // Остатки уборки (авария между rename и rm) старше STALE_EMPTY_MS убираются; на замок не влияют.
+  try {
+    for (const n of fs.readdirSync(runDir(stateDir))) {
+      if (!n.startsWith('organizer.lock.stale-')) continue;
+      const f = path.join(runDir(stateDir), n);
+      try { if (now() - fs.statSync(f).mtimeMs > STALE_EMPTY_MS) fs.rmSync(f, { recursive: true, force: true }); } catch { /* не мешает */ }
+    }
+  } catch { /* не мешает */ }
   for (let attempt = 0; attempt < 3; attempt++) {
     try { fs.mkdirSync(dir, { mode: 0o700 }); } catch (e) {
       if (e?.code !== 'EEXIST') throw e;
@@ -159,7 +171,12 @@ export function acquireOrganizerMutex(stateDir, { pid = process.pid, now = Date.
       fs.rmSync(aside, { recursive: true, force: true });
       continue;
     }
-    const fd = fs.openSync(path.join(dir, 'owner'), 'wx', 0o600);
+    let fd;
+    // Каталог успели унести как брошенный (гонка уборки) — это «занято», а не ошибка прав.
+    try { fd = fs.openSync(path.join(dir, 'owner'), 'wx', 0o600); } catch (e) {
+      if (e?.code === 'ENOENT' || e?.code === 'EEXIST') throw lockError('busy_organizer');
+      throw e;
+    }
     try { fs.writeSync(fd, mine); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     let held = true;
     const holds = () => { try { return held && ownerOf(dir) === mine; } catch { return false; } };
