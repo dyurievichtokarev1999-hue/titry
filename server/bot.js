@@ -679,6 +679,8 @@ export function createBot({
           if (risk.level === 'urgent') { s.story = ctx; return stopForSafety(chatId, s, 'urgent', { at: 'edit' }); }
           // concern, который внесла сама правка: строка не берётся, рядом — тот же блок помощи, что у рассказа с concern
           // (одним сообщением, как в PR 11). Реплики нехватки здесь нет: прежний черновик остаётся.
+          // Если рассказ уже был concern, блок помощи человек видел вместе с черновиком: правка, которая сама по себе
+          // none, отклоняется ниже правилом титров без повторного блока (четвёртый разбор, мелочь 3).
           concern = risk.level === 'concern' && (prevLevel === 'none' || assessRisk(own).level !== 'none');
         }
         const before = structuredClone(s.episode);

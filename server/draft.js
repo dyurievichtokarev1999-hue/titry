@@ -346,7 +346,8 @@ export function draftRuleBased(story, { date = todayIso(), period = 'day' } = {}
   const threats = threatSentences(story);
   // Решение владельца 11.11 12:05, п. 3: фраза, чьё местоимение указывает на человека из исключённой угрозы, тоже не берётся.
   const pronounToThreat = threatPronounFilter(story);
-  const parts = sentences(story).filter((s) => !touchesThreat(s, threats, story) && !threatPhrase(s) && !pronounToThreat(s));
+  const all = sentences(story);
+  const parts = all.filter((s) => !touchesThreat(s, threats, story) && !threatPhrase(s) && !pronounToThreat(s));
   const last = parts[parts.length - 1] || '';
   const post = parts.length > 3 && last.length <= 72 ? { text: last, source: last.replace(/[.!?…]+$/, '') } : { text: '', source: '' };
   const pool = post.text ? parts.slice(0, -1) : parts;
@@ -367,7 +368,8 @@ export function draftRuleBased(story, { date = todayIso(), period = 'day' } = {}
     rows,
     post,
   });
-  return { episode: ep, dropped: [], insufficient: rows.length < LIMITS.rowsMin };
+  // excluded — какие-то фразы не взяты по правилу «угроза не в титрах» (для кода причины нехватки и метрики).
+  return { episode: ep, dropped: [], insufficient: rows.length < LIMITS.rowsMin, excluded: parts.length < all.length };
 }
 
 /**
@@ -430,7 +432,7 @@ export async function makeDraft(story, opts = {}) {
   // Решение владельца 11.11 12:05, п. 4: обычная нехватка у заготовки (меньше LIMITS.rowsMin строк из слов человека,
   // исключений не было) — тот же исход и та же реплика, что после исключения: без черновика с ⚠ и без ролика.
   // Модель сюда попадает только через заготовку (мало строк у модели → заготовка), поэтому реплика одна для обоих путей.
-  if (result.insufficient) return { risk, episode: null, provider, insufficient: true, code: INSUFFICIENT_MATERIAL };
+  if (result.insufficient) return { risk, episode: null, provider, insufficient: true, code: result.excluded ? INSUFFICIENT_AFTER_EXCLUSION : INSUFFICIENT_MATERIAL };
   return { ...result, validation, risk, provider, note };
 }
 

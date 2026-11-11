@@ -344,9 +344,9 @@ const ADVS = String.raw`(?:\s+${DOOM_ADV}){0,2}`;
 // Пожелания смерти: «чтоб ты сдох», «сдохни, брат», «желаю брату сдохнуть», «пусть он сдохнет».
 const DEATH_WISH = String.raw`(?:чтоб(?:ы)?\s+(?:\S+\s+){0,2}(?:сдох|сдохла|сдохли|подох|подохла|подохли|сгнил|сгнила)|сдохни|сдохните|подохни|(?:желаю|пусть)\s+(?:\S+\s+){0,2}(?:сдохн\S*|подохн\S*|сдох\S*))`;
 // Глаголы расправы, которых нет в фильтре остановки («Брата закопаю»): для титров — при человеке рядом.
-const HARM_EXTRA = String.raw`(?:закопа(?:ю|ем)|приконч(?:у|им)|грохн(?:у|ем)|замоч(?:у|им)|урою|уроем)`;
+const HARM_EXTRA = String.raw`(?:закопа(?:ю|ем)|приконч(?:у|им)|грохн(?:у|ем)|урою|уроем|(?:ноги|ногу|руки|руку|шею|кости|ребра)\s+(?:переломаю|сломаю|поломаю))`;
 const DOOM_PERSON = new RegExp([
-  String.raw`${LEAD}${PERSON_ANY}(?![а-я])${ADVS}\s+${DOOM_STRONG}${ADVS}${DOOM_TAIL}`,
+  String.raw`${LEAD}${PERSON_ANY}(?![а-я])${ADVS}\s+(?!не\s+проснется${ADVS}\s+(?:если|когда)(?![а-я]))${DOOM_STRONG}${ADVS}${DOOM_TAIL}`,
   String.raw`${LEAD}${PERSON_DAT}(?![а-я])${ADVS}\s+${DOOM_WEAK}${ADVS}${DOOM_TAIL}`,
   String.raw`(?<![а-я])${DEATH_WISH}(?![а-я])`,
   String.raw`(?<![а-я])(?:${PERSON}|его|ее|их)(?![а-я])(?:\s+\S+)?\s+${HARM_EXTRA}(?![а-я])`,
@@ -503,7 +503,9 @@ const ANY_ROOTS = new Set(['сосед', 'коллег', 'бывш', 'партн
   'тренер', 'директор', 'шеф', 'преподавател', 'охранник', 'одногруппни', 'родственни']);
 // Люди для разрешения местоимений: список правила титров плюс слова из словаря угроз (разбор 08ead472: «Тренеру не жить.
 // Он…» — тренер должен распознаваться так же, как брат).
-const PRON_PERSONS = new RegExp(PERSON_WORDS.source.replace('(?:брат|', '(?:бабушк|дедушк|деда|деду|дед|тренер|директор|шеф|преподавател|охранник|одногруппни|родственни|брат|'), 'g');
+const PERSON_ROOTS_SRC = PERSON_WORDS.source.replace(/^\(\?<!\[а-я\]\)\(\?:/, '').replace(/\)\[а-я\]\*$/, '');
+if (PERSON_ROOTS_SRC === PERSON_WORDS.source) throw new Error('PERSON_WORDS: неожиданная форма');
+const PRON_PERSONS = new RegExp(`(?<![а-я])(?:бабушк|дедушк|деда|деду|дед|тренер|директор|шеф|преподавател|охранник|одногруппни|родственни|${PERSON_ROOTS_SRC})[а-я]*`, 'g');
 const pronRoot = (w) => { const m = /^(бабушк|дедушк|дед|тренер|директор|шеф|преподавател|охранник|одногруппни|родственни)/.exec(w); return m ? (m[1] === 'дедушк' ? 'дед' : m[1]) : personRoot(w); };
 function compatible(pron, root) {
   const g = PRON_GENDER[pron] || 'mfp';
@@ -526,7 +528,10 @@ export function threatPronounFilter(story) {
   // Угроза человеку есть: названный человек или местоимение в предложении с угрозой. Угроза другому без
   // распознанного человека («Я бы урыл Серёгу») — любое местоимение после неё неясно, о ком (лишнее исключение допустимо).
   const unknownTarget = sents.some((x, i) => isThreatSent[i] && isThreatUnit(x) && !peopleIn(x).length && !new RegExp(PRON_ALL.source).test(flat(x)));
-  if (!targets.size && !unknownTarget && !sents.some((x, i) => isThreatSent[i] && new RegExp(PRON_ALL.source).test(flat(x)))) return () => false;
+  // Местоимение во фразе-угрозе — цель, только если рядом (в этой или предыдущей фразе) назван человек; иначе это
+  // скорее предмет («Телефон старый, он скоро сдохнет», «чтоб он сдох» о принтере) — четвёртый разбор.
+  const pronIsPerson = sents.map((x, i) => peopleIn(x).length > 0 || (i > 0 && peopleIn(sents[i - 1]).length > 0));
+  if (!targets.size && !unknownTarget && !sents.some((x, i) => isThreatSent[i] && pronIsPerson[i] && new RegExp(PRON_ALL.source).test(flat(x)))) return () => false;
   const mentions = [];
   const verdict = new Map(); // предложение (flat) → указывает ли местоимение на угрозу
   sents.forEach((x, i) => {
@@ -537,13 +542,16 @@ export function threatPronounFilter(story) {
     found.sort((a, b) => a.pos - b.pos);
     let hit = false;
     for (const f of found) {
+      f.sent = i;
       if (f.kind === 'person') { f.threat = isThreatSent[i] || targets.has(f.root); mentions.push(f); continue; }
-      if (isThreatSent[i]) f.threat = true;
+      if (isThreatSent[i]) f.threat = pronIsPerson[i];
       else {
         const fits = (c) => (c.kind === 'person' ? compatible(f.word, c.root) : (PRON_GENDER[c.word] || 'x').split('').some((g) => (PRON_GENDER[f.word] || '').includes(g)));
         const ante = [...mentions].reverse().find(fits);
         // Ближайший подходящий человек — не из угрозы, но раньше есть подходящий из угрозы: неясно, о ком речь (разбор 940f41cc).
-        f.threat = !ante || ante.threat || mentions.some((c) => c.threat && fits(c)) || (unknownTarget && i > sents.findIndex((x, k) => isThreatSent[k]));
+        // Человек, названный в той же фразе раньше местоимения («Муж — он принёс торт»), — антецедент без сомнений.
+        if (ante && ante.sent === i && !ante.threat) f.threat = false;
+        else f.threat = !ante || ante.threat || mentions.some((c) => c.threat && fits(c)) || (unknownTarget && i > sents.findIndex((x, k) => isThreatSent[k]));
       }
       mentions.push(f);
       if (f.threat) hit = true;
