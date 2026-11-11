@@ -405,3 +405,59 @@ test('время проверки линейно: рассказ ~6000 знак�
     assert.ok(Date.now() - t0 < 3000, `${big.slice(0, 14)}…: ${Date.now() - t0} мс`);
   }
 });
+
+// ── Разбор 776098de ──────────────────────────────────────────────────────────
+
+test('чужие слова и мнение где угодно во фразе, намерение по общему правилу, вопрос, сон через границу фразы', () => {
+  for (const { story, row } of fx.review7.reject) {
+    assert.equal(rowWordsGrounded(row, story), false, `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+  for (const { story, row } of fx.review7.accept) {
+    assert.deepEqual(rowWordProblems(row, story), [], `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+  // заготовка не делает строку-факт из вопроса и из чужого мнения
+  const r = draftRuleBased('По её мнению я ленивая. Я поехала на дачу? Нет, осталась дома. Утром работа. Днём встреча с другом.', { date: '2026-11-11' });
+  const got = r.episode.rows.map((x) => `${x.role} — ${x.value}`);
+  assert.ok(!got.some((x) => /ленивая|мнению|на дачу/i.test(x)), JSON.stringify(got));
+});
+
+test('заготовка: фраза в 20 тысяч знаков не разбирается долго', () => {
+  const big = 'утром пила чай '.repeat(1400);
+  const t0 = Date.now();
+  pairFromSentence(big, new Set(), big);
+  draftRuleBased(big, { date: '2026-11-11' });
+  assert.ok(Date.now() - t0 < 3000, `${Date.now() - t0} мс`);
+});
+
+// ── Разбор 8fb7f3de ──────────────────────────────────────────────────────────
+
+test('мнение, неуверенность, вопрос без «?», сон до конца абзаца, план и нужда, отказ от сказанного', () => {
+  for (const { story, row } of fx.review8.reject) {
+    assert.equal(rowWordsGrounded(row, story), false, `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+  for (const { story, row } of fx.review8.accept) {
+    assert.deepEqual(rowWordProblems(row, story), [], `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+});
+
+test('вырожденный рассказ из одного слова и null в строках: быстро и без падения', () => {
+  const ep = { date: '2026-11-11', title: 'Т', genre: 'камерное кино', mood: 'quiet', music: 'quiet', period: 'day',
+    rows: Array.from({ length: 6 }, () => ({ role: 'В', value: 'в', source: 'в' })) };
+  for (const big of ['в '.repeat(3000), 'и '.repeat(3000), 'а '.repeat(3000)]) {
+    const t0 = Date.now();
+    validateEpisode(ep, big);
+    assert.ok(Date.now() - t0 < 3000, `${big.slice(0, 4)}…: ${Date.now() - t0} мс`);
+  }
+  assert.doesNotThrow(() => validateEpisode({ ...ep, rows: [null, { role: 'Т', value: 'т', source: 'т' }] }, 'т'));
+});
+
+// ── Разбор cf0c2497 ──────────────────────────────────────────────────────────
+
+test('сон через переводы строк и «проснулась» внутри сна; обрезка после «не» через много прозрачных слов', () => {
+  for (const { story, row } of fx.review9.reject) {
+    assert.equal(rowWordsGrounded(row, story), false, `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+  for (const { story, row } of fx.review9.accept) {
+    assert.deepEqual(rowWordProblems(row, story), [], `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+});
