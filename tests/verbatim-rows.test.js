@@ -490,3 +490,21 @@ test('монтажная: рассказ длиннее 6000 знаков — 41
     assert.equal(renders, 0);
   } finally { server.closeAllConnections(); server.close(); await fs.rm(dataDir, { recursive: true, force: true }); }
 });
+
+// ── Разбор ed1298f1 ──────────────────────────────────────────────────────────
+
+test('чужие оценки, пробуждение только от первого лица, синонимы сна, перенос из конца фразы, источники', () => {
+  for (const { story, row } of fx.review11.reject) {
+    assert.equal(rowWordsGrounded(row, story), false, `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+  for (const { story, row } of fx.review11.accept) {
+    assert.deepEqual(rowWordProblems(row, story), [], `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+});
+
+test('makeDraft: длинный опасный рассказ останавливается по безопасности, а не ошибкой длины', async () => {
+  const r = await makeDraft('Утром я пила чай. '.repeat(400) + 'Я не хочу больше жить.', { provider: 'manual' });
+  assert.equal(r.episode, null);
+  assert.equal(r.risk.level, 'urgent');
+  await assert.rejects(makeDraft('Утром я пила чай. '.repeat(400), { provider: 'manual' }), (e) => e.code === 'too_long');
+});
