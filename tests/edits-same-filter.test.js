@@ -52,8 +52,10 @@ async function quiet(fn) {
 
 // ── п. 2: фраза из словаря угроз в строке никогда не попадает в титры ───────
 
-test('условие: «Брату — не жить» фильтр остановки не останавливает, а правило титров отклоняет', () => {
-  assert.equal(assessRisk(`${SAFE}\nБрату не жить`).level, 'none', 'фильтр остановки этот пример пропускает');
+test('условие: «Брату — не жить» фильтр остановки не останавливает (concern по словарю, решение 15:05), а правило титров отклоняет', () => {
+  const r = assessRisk(`${SAFE}\nБрату не жить`);
+  assert.equal(r.level, 'concern', 'не остановка, а concern');
+  assert.deepEqual(r.matches, ['threat_phrase']);
   for (const t of ['Брату — не жить', 'Начальнику конец', 'Соседу — достанется', 'Мама — меня убьёт за двойку', 'Брату — убью']) assert.equal(threatPhrase(t), true, t);
   for (const t of ['Утром — пила чай', 'Полку — прибила', 'Рекорд — побил', 'Капец — устала', 'Брат — получит подарок', 'Последний автобус — ушёл']) assert.equal(threatPhrase(t), false, t);
 });
@@ -79,18 +81,19 @@ test('черновик модели: строка-фраза из словаря
   assert.equal(g.dropped.length, 1);
 });
 
-test('бот: рассказ без угрозы + правка «+ Брату — не жить» → строка не в титрах, короткая реплика, без помощи и без нехватки', async () => {
+test('бот: рассказ без угрозы + правка «+ Брату — не жить» → строка не в титрах, короткая реплика и блок concern, без нехватки', async () => {
   const b = botSetup();
   await b.say(SAFE);
   const was = JSON.stringify(b.s().episode);
   const log = await quiet(() => b.say('+ Брату — не жить'));
   assert.equal(JSON.stringify(b.s().episode), was, 'черновик не изменён');
   assert.doesNotMatch(fields(b.s().episode), /жить|Брат/);
-  assert.equal(b.texts().at(-1), EDIT_NOT_IN_TITLES_TEXT);
+  // С 15:05 словарь угроз поднимает уровень до concern: реплика и блок помощи concern одним сообщением.
+  assert.equal(b.texts().at(-1), `${EDIT_NOT_IN_TITLES_TEXT}\n\n${helpMessage('concern')}`);
   assert.equal(TEXT.editExcluded, EDIT_NOT_IN_TITLES_TEXT, 'текст в одном месте');
   assert.ok(!b.texts().includes(REPLY)); assert.doesNotMatch(b.texts().join('\n'), URGENT_CARD);
   assert.doesNotMatch(log + JSON.stringify(b.events), /жить|Брат/, 'текста правки нет в журнале и метриках');
-  assert.deepEqual(b.events.at(-1), { event: 'edit_excluded', level: 'none' });
+  assert.deepEqual(b.events.at(-1), { event: 'edit_excluded', level: 'concern' });
   // Черновик без этой строки собирается; отдельная проверка видит и правку (контекст рассказа + правка).
   await b.press(`play:${b.s().draftId}`);
   assert.equal(b.counters.video, 1);
@@ -408,7 +411,7 @@ test('повторный разбор: в боте «+ Брату — скоро
     const b = botSetup();
     await b.say(SAFE);
     await b.say(edit);
-    assert.equal(b.texts().at(-1), EDIT_NOT_IN_TITLES_TEXT, edit);
+    assert.ok(b.texts().at(-1).startsWith(EDIT_NOT_IN_TITLES_TEXT), edit);
     assert.doesNotMatch(fields(b.s().episode), /конец|жилец/, edit);
   }
   const ok = botSetup();
@@ -560,4 +563,29 @@ test('владелец 15:05, п. 4: реплика «не берём» — ша
     await b.say(edit);
     assert.ok(b.texts().at(-1).startsWith(EDIT_NOT_IN_TITLES[field]), `${edit}: ${b.texts().at(-1).slice(0, 40)}`);
   }
+});
+
+// ── Решение владельца 11.11 15:05: assessRisk поднимает уровень по словарю угроз ──
+
+test('assessRisk: фраза из словаря угроз поднимает none до concern; бытовые фразы и уровни других правил не меняются', () => {
+  for (const t of ['Брата прикончу.', 'Брат — покойник.', 'Ноги переломаю соседу.', 'Зарежу.', 'Пристрелю!', 'Иди сдохни.', `${SAFE} Брату не жить.`]) {
+    const r = assessRisk(t);
+    assert.equal(r.level, 'concern', t); assert.deepEqual(r.matches, ['threat_phrase'], t);
+  }
+  for (const t of [SAFE, 'Прибью полку завтра.', 'Убью время до вечера.', 'Сессия меня прикончит.', 'Приз достанется брату.', 'Брат не проснётся до обеда.', ...EVERYDAY, ...EVERYDAY_3]) {
+    assert.equal(assessRisk(t).level, 'none', t);
+  }
+  // Монотонность: urgent и concern других правил остаются как были.
+  assert.equal(assessRisk(URGENT).level, 'urgent');
+  assert.equal(assessRisk('Завтра зарежу соседа. Брату не жить.').level, 'urgent');
+  assert.equal(assessRisk('Мама меня убьёт за опоздание.').level, 'concern');
+});
+
+test('assessRisk: рассказ со словарной угрозой даёт черновик с блоком помощи concern, фраза не в титрах', async () => {
+  const st = 'Утром я пила чай. Вечером я читала книгу. Брату не жить.';
+  const b = botSetup();
+  await b.say(st);
+  assert.ok(b.texts().includes(helpMessage('concern')));
+  assert.ok(b.s().episode);
+  assert.doesNotMatch(fields(b.s().episode), /не жить/);
 });

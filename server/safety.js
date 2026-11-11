@@ -286,7 +286,16 @@ export function assessRisk(text, modelFlag = false) {
   const full = riskCore(t, text, modelFlag);
   // Все проверки — на исходном тексте; исключение только понижает тревогу, вызванную одной гиперболой.
   if (full.level === 'urgent' && !modelFlag && onlyHyperbole(t)) return { level: 'concern', matches: ['hyperbole_threat_with_reason'], byModel: false };
+  // Решение владельца 11.11 15:05: фраза из словаря угроз титров (threatPhrase — одна точка правды, без второго списка)
+  // поднимает none до concern: «Брата прикончу», «Брат — покойник», «Ноги переломаю соседу», «Зарежу», «Иди сдохни».
+  // Только повышение: уровни других правил не меняются (монотонность).
+  if (full.level === 'none' && phraseParts(text).some(threatPhrase)) return { level: 'concern', matches: ['threat_phrase'], byModel: false };
   return full;
+}
+/** Части текста для словаря угроз: предложения и их части через запятую, точку с запятой, двоеточие. */
+function phraseParts(text) {
+  const sents = String(text || '').split(/(?<=[.!?…;])\s+|\n+/).map((x) => x.trim()).filter(Boolean);
+  return [...sents, ...sents.flatMap((x) => x.split(/[,;:]\s+/).map((y) => y.trim()).filter((y) => y && y !== x))];
 }
 
 /**
@@ -345,7 +354,10 @@ const ADVS = String.raw`(?:\s+${DOOM_ADV}){0,2}`;
 const DEATH_WISH = String.raw`(?:чтоб(?:ы)?\s+(?:\S+\s+){0,2}(?:сдох|сдохла|сдохли|подох|подохла|подохли|сгнил|сгнила)|сдохни|сдохните|подохни|(?:желаю|пусть)\s+(?:\S+\s+){0,2}(?:сдохн\S*|подохн\S*|сдох\S*))`;
 // Глаголы расправы, которых нет в фильтре остановки («Брата закопаю»): для титров — при человеке рядом.
 const HARM_EXTRA = String.raw`(?:закопа(?:ю|ем)|приконч(?:у|им)|грохн(?:у|ем)|урою|уроем|(?:ноги|ногу|руки|руку|шею|кости|ребра)\s+(?:переломаю|сломаю|поломаю))`;
+// Голая угроза глаголом от первого лица — вся часть фразы («Зарежу.», «Я его… » не нужно: «Пристрелю!»).
+const BARE_KILL = String.raw`(?:я\s+)?(?:${DOOM_ADV}\s+){0,2}(?:убью|зарежу|пристрелю|застрелю|урою|прикончу|задушу|придушу|грохну|закопаю|прибью|отравлю|порешу)(?:\s+${DOOM_ADV}){0,2}`;
 const DOOM_PERSON = new RegExp([
+  String.raw`^\s*${BARE_KILL}\s*$`,
   String.raw`${LEAD}${PERSON_ANY}(?![а-я])${ADVS}\s+(?!не\s+проснется${ADVS}\s+(?:если|когда)(?![а-я]))${DOOM_STRONG}${ADVS}${DOOM_TAIL}`,
   String.raw`${LEAD}${PERSON_DAT}(?![а-я])${ADVS}\s+${DOOM_WEAK}${ADVS}${DOOM_TAIL}`,
   String.raw`(?<![а-я])${DEATH_WISH}(?![а-я])`,
