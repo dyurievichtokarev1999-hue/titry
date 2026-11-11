@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS, episodeToText } from '../engine/episode.js';
 import { makeDraft, modelSafetyCheck, hasClaudeCredentials } from './draft.js';
 import { makeGate } from './gate.js';
-import { helpMessage, assessEpisodeRisk, validateSafeEpisode } from './safety.js';
+import { helpMessage, assessEpisodeRisk, validateSafeEpisode, assessRisk } from './safety.js';
 import { renderEpisode, ROOT } from './render.js';
 import { logError, safeCode } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS, cleanupVoiceOrphans } from './stt.js';
@@ -548,7 +548,9 @@ export function createBot({
       }
     }
     if (text.startsWith('/')) return tg.send(chatId, TEXT.start);
-    if (text.length < 12) return tg.send(chatId, 'Расскажи чуть подробнее: что было, что запомнилось.');
+    // Короткий текст с признаками опасности идёт обычным путём рассказа (остановка и помощь), а не получает
+    // «Расскажи чуть подробнее»: просить подробностей после слов об опасности нельзя (решение владельца 11.11 12:05).
+    if (text.length < 12 && assessRisk(text).level === 'none') return tg.send(chatId, 'Расскажи чуть подробнее: что было, что запомнилось.');
     return handleStory(chatId, s, text, 'text');
   }
 
