@@ -101,7 +101,12 @@ const SENTENCE_MARKERS = new Set([
   'вроде', 'вряд', 'кажется', 'казалось', 'показалось', 'наверное', 'наверно', 'возможно', 'может', 'типа',
   'видимо', 'похоже', 'по\u2011моему', 'по\u2011видимому', 'уверена', 'уверен', 'надеюсь', 'надеялась', 'надеялся',
   'снилось', 'приснилось', 'снился', 'снилась', 'приснился', 'приснилась', 'снится', 'снятся', 'сне', 'сон', 'сна',
-  'говорят', 'говорили', 'словам', 'мнению', 'слухам', 'якобы', 'вероятно', 'пожалуй', 'наверняка', 'думают', 'считают', 'мерещится', 'померещилось',
+  'говорят', 'говорили', 'словам', 'мнению', 'слухам', 'слухи', 'слух',
+  'подозреваю', 'подозревала', 'чувствую', 'чувствовала', 'сомневаюсь', 'сомневалась', 'непонятно', 'видно', 'сдается',
+  'взгляд', 'ощущениям', 'ощущение', 'судя', 'вдруг', 'интересно', 'неужели', 'разве', 'ежели', 'коли', 'пусть', 'пускай',
+  'кошмар', 'кошмаре', 'грезилось', 'грезится', 'представляла', 'представлял', 'представляю', 'воображала', 'фантазировала', 'фантазирую',
+  'мечта', 'мечтах', 'мечты', 'планах', 'план', 'планы', 'задумала', 'задумал', 'надо', 'нужно', 'нужен', 'нужна', 'нужны', 'хочу', 'хочется',
+  'вру', 'шучу', 'наврала', 'соврала', 'приврала', 'не\u2011а', 'фига', 'фиг', 'вероятно', 'пожалуй', 'наверняка', 'думают', 'считают', 'мерещится', 'померещилось',
   'кажись', 'небось', 'видать', 'полагаю', 'полагала', 'полагал', 'скорее', 'почудилось', 'привиделось', 'мерещилось', 'чудится',
 ]);
 /**
@@ -133,7 +138,7 @@ const TRANSPARENT = new Set([
 export const isMarkerWord = (w) => isMarker(String(w || '').toLowerCase().replace(/ё/g, 'е'));
 const isMarker = (w) => isNext(w) || INTENT.test(w) || SENTENCE_MARKERS.has(w) || REPORT_VERBS.has(w) || NEG.has(w);
 /** Глаголы речи, мысли и мнения по основе: признак, если после них «что», знак или подлежащее-местоимение. */
-const REPORT_STEM = /^(сказ|говор|писа|напис|пиш|дума|подума|счита|увер|сообщ|объясн|крич|орал|ора|заяв|обеща|утвержд|слыш|помн|зна[юел]|ответ|спрос|рассказ|жалова|намек|орет|ворч|тверд|шепч|шепт|бормоч|бормот|повтор|называ|назвал|обзыва|обозвал|визж|упрека|упрекн|клян|клял|божи|уверя|убежда|полага|предполага|счел|сочл|мнил|винил|обвиня|обвинил|руга|хвали|клеветал|сплетнича)/;
+const REPORT_STEM = /^(сказ|говор|писа|напис|пиш|дума|подума|счита|увер|сообщ|объясн|крич|орал|ора|заяв|обеща|утвержд|слыш|помн|зна[юел]|ответ|спрос|рассказ|жалова|намек|орет|ворч|тверд|шепч|шепт|бормоч|бормот|повтор|называ|назвал|обзыва|обозвал|визж|упрека|упрекн|клян|клял|божи|уверя|убежда|полага|предполага|счел|сочл|мнил|винил|обвиня|обвинил|руга|хвали|клеветал|сплетнича|бурч|бубн|наор|заор|причит|оправдыв|оправда|прочита|читала|прочел|узнала|узнал|передал|передава|жалуе|намека|утвержда)/;
 /** Глагольные окончания: «ответил» — глагол, «ответа» — нет. */
 const VERB_END = /(л|ла|ли|ло|лся|лась|лись|ю|ет|ют|ит|ят|ешь|ишь|ем|им|ете|ите|ть|ться|ется|ются|ал|яла|ял)$/;
 const SUBJECT = new Set(['я', 'ты', 'он', 'она', 'оно', 'мы', 'вы', 'они']);
@@ -182,9 +187,14 @@ function splitPhrases(text) {
 /** Фразы текста, каждая — { words, marks }: marks — признаки всей фразы. */
 const DREAM = /^(сни(лся|лась|лось|лись|тся|ятся)|присни(лся|лась|лось|лись)|сон|сне|сна|снах|привиде(лся|лась|лось|лись)|мереща?(лся|лась|лось|лись|тся|ится)|померещи(лся|лась|лось|лись)|почуди(лся|лась|лось|лись)|чуди(тся|лось))$/;
 
+const RETRACT = new Set(['вру', 'шучу', 'наврала', 'соврала', 'приврала', 'не\u2011а', 'фига', 'фиг']);
+const WAKE = /^(просну(лась|лся|лись)|проснувшись)$/;
+
 function sentencesOf(text, homo = true) {
-  let dreamCarry = false; // сон или видение действует и на следующую фразу: «Мне снилась мама. Она живая.»
-  return splitPhrases(text).map(({ text: raw, end }) => {
+  // сон или видение действует до конца абзаца (пустая строка) или до «проснулась»: «Приснилась бабушка. Мы сидели…»
+  let dreamCarry = false;
+  const list = splitPhrases(text).map(({ text: raw, end }) => {
+    if (!wordsOf(raw, homo).length && end === '\n') dreamCarry = false; // пустая строка — новый абзац
     const words = wordsOf(raw, homo);
     const low = raw.toLowerCase().replace(/ё/g, 'е');
     const marks = new Set();
@@ -211,9 +221,18 @@ function sentencesOf(text, homo = true) {
     const dreamHere = words.some((w) => DREAM.test(w));
     if (dreamCarry && words.length) marks.add('сон');
     if (dreamHere) marks.add('сон');
-    if (words.length) dreamCarry = dreamHere;
+    if (words.some((w) => WAKE.test(w))) dreamCarry = false;
+    else if (dreamHere) dreamCarry = true;
     return { words, marks };
   }).filter((x) => x.words.length);
+  // отказ от сказанного действует и на предыдущую фразу: «Чай пила. Вру, не пила.»
+  for (let k = 0; k < list.length; k++) {
+    if (list[k].words.some((w) => RETRACT.has(w)) || /(^|\s)хотя\s+нет(\s|$)/.test(list[k].words.join(' '))) {
+      list[k].marks.add('отказ');
+      if (k > 0) list[k - 1].marks.add('отказ');
+    }
+  }
+  return list;
 }
 
 /** Слова текста и номер части фразы для каждого (части — до знака препинания). */
@@ -302,31 +321,38 @@ function storyAnalysis(story) {
   const toks = [], sid = [];
   sents.forEach((s, k) => s.words.forEach((w) => { toks.push(w); sid.push(k); }));
   const { cl } = tokensWithClauses(story); // те же слова, с номерами частей фразы
-  storyCache = { story, data: { sents, toks, sid, cl } };
+  // заранее: есть ли признак части фразы раньше слова и «не я» после него — проверка цитаты за O(1)
+  const scopeBefore = new Array(toks.length).fill(false);
+  for (let j = 1; j < toks.length; j++) scopeBefore[j] = cl[j - 1] === cl[j] && (scopeBefore[j - 1] || scopeWord(toks, j - 1));
+  const negPronAfter = new Array(toks.length + 1).fill(false);
+  for (let j = toks.length - 1; j >= 0; j--) {
+    const here = NEG.has(toks[j]) && PRONOUNS.includes(toks[j + 1]);
+    negPronAfter[j] = here || (j + 1 < toks.length && cl[j + 1] === cl[j] && negPronAfter[j + 1]);
+  }
+  storyCache = { story, data: { sents, toks, sid, cl, scopeBefore, negPronAfter } };
   return storyCache.data;
 }
 
 function quoteContext(source, story) {
   const src = wordsOf(source);
-  const { sents, toks, sid, cl } = storyAnalysis(String(story || ''));
+  const { sents, toks, sid, cl, scopeBefore, negPronAfter } = storyAnalysis(String(story || ''));
   const out = [];
   for (let s = 0; s + src.length <= toks.length; s++) {
     if (!src.every((w, k) => toks[s + k] === w)) continue;
     let cut = false;
     // 1) «буду», «не», «почти» прямо перед цитатой (через прозрачные слова) в той же фразе;
     //    «не» в самом конце предыдущей фразы («Я не. Пила чай.») — тоже обрезка
-    for (let j = s - 1; j >= 0; j--) {
+    for (let j = s - 1; j >= 0 && j >= s - 12; j--) {
       // через границу фразы — только «не», «буду», «почти» (не намерение: «Купила всё, что хотела. Утром…»)
       if (sid[j] !== sid[s] && !(isNext(toks[j]) || NEG.has(toks[j]) || TRANSPARENT.has(toks[j]))) break;
       if (isNext(toks[j]) || NEG.has(toks[j]) || (sid[j] === sid[s] && (toks[j] === 'без' || scopeWord(toks, j)))) { cut = true; break; }
       if (!TRANSPARENT.has(toks[j])) break;
     }
     // 2) отрицание, «без» или намерение раньше в той же части фразы: «не стала пить чай» — цитата «пить чай» обрезана
-    for (let j = s - 1; !cut && j >= 0 && cl[j] === cl[s]; j--) if (scopeWord(toks, j)) cut = true;
+    if (!cut && scopeBefore[s]) cut = true;
     // 3) «не я» после цитаты в той же части фразы: «Ужин готовила не я»
-    for (let j = s + src.length; !cut && j < toks.length && cl[j] === cl[s + src.length - 1]; j++) {
-      if (NEG.has(toks[j]) && PRONOUNS.includes(toks[j + 1])) cut = true;
-    }
+    const e = s + src.length;
+    if (!cut && e < toks.length && cl[e] === cl[e - 1] && negPronAfter[e]) cut = true;
     const marks = new Set();
     for (let k = sid[s]; k <= sid[s + src.length - 1]; k++) sents[k].marks.forEach((m) => marks.add(m));
     out.push({ cut, marks });
@@ -528,7 +554,7 @@ export function validateEpisode(ep, story) {
   if (!genre) errors.push(field('genre', 'Нужен жанр.'));
   else if (genre.length > LIMITS.genre) errors.push(field('genre', `Жанр длиннее ${LIMITS.genre} знаков.`));
 
-  const rows = Array.isArray(ep.rows) ? ep.rows : [];
+  const rows = (Array.isArray(ep.rows) ? ep.rows : []).map((r) => (r && typeof r === 'object' ? r : {}));
   const filled = rows.filter((r) => String(r.role || '').trim() || String(r.value || '').trim());
   if (filled.length < LIMITS.rowsMin) errors.push(field('rows', `Нужно хотя бы ${LIMITS.rowsMin} строки.`));
   if (filled.length > LIMITS.rowsMax) errors.push(field('rows', `Не больше ${LIMITS.rowsMax} строк: длинные титры не дочитывают.`));

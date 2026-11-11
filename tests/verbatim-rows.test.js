@@ -428,3 +428,25 @@ test('заготовка: фраза в 20 тысяч знаков не разб
   draftRuleBased(big, { date: '2026-11-11' });
   assert.ok(Date.now() - t0 < 3000, `${Date.now() - t0} мс`);
 });
+
+// ── Разбор 8fb7f3de ──────────────────────────────────────────────────────────
+
+test('мнение, неуверенность, вопрос без «?», сон до конца абзаца, план и нужда, отказ от сказанного', () => {
+  for (const { story, row } of fx.review8.reject) {
+    assert.equal(rowWordsGrounded(row, story), false, `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+  for (const { story, row } of fx.review8.accept) {
+    assert.deepEqual(rowWordProblems(row, story), [], `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+});
+
+test('вырожденный рассказ из одного слова и null в строках: быстро и без падения', () => {
+  const ep = { date: '2026-11-11', title: 'Т', genre: 'камерное кино', mood: 'quiet', music: 'quiet', period: 'day',
+    rows: Array.from({ length: 6 }, () => ({ role: 'В', value: 'в', source: 'в' })) };
+  for (const big of ['в '.repeat(3000), 'и '.repeat(3000), 'а '.repeat(3000)]) {
+    const t0 = Date.now();
+    validateEpisode(ep, big);
+    assert.ok(Date.now() - t0 < 3000, `${big.slice(0, 4)}…: ${Date.now() - t0} мс`);
+  }
+  assert.doesNotThrow(() => validateEpisode({ ...ep, rows: [null, { role: 'Т', value: 'т', source: 'т' }] }, 'т'));
+});
