@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS, episodeToText } from '../engine/episode.js';
 import { makeDraft, modelSafetyCheck, hasClaudeCredentials, pairFromSentence } from './draft.js';
 import { makeGate } from './gate.js';
-import { helpMessage, prepareHelp, assessRisk, assessEpisodeRisk, validateSafeEpisode, threatErrors, INSUFFICIENT_TEXT, INSUFFICIENT_AFTER_EXCLUSION, INSUFFICIENT_MATERIAL, EDIT_NOT_IN_TITLES_TEXT, TELEGRAM_TEXT_LIMIT } from './safety.js';
+import { helpMessage, prepareHelp, assessRisk, assessEpisodeRisk, validateSafeEpisode, threatErrors, threatPronounFilter, INSUFFICIENT_TEXT, INSUFFICIENT_AFTER_EXCLUSION, INSUFFICIENT_MATERIAL, EDIT_NOT_IN_TITLES_TEXT, TELEGRAM_TEXT_LIMIT } from './safety.js';
 import { renderEpisode, ROOT } from './render.js';
 import { logError, safeCode } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS, cleanupVoiceOrphans } from './stt.js';
@@ -95,11 +95,13 @@ export function insufficientMessages(concern, { help, log = logError } = {}) {
  * Ответ, когда строку из правки не берём в титры. При concern, внесённом правкой, — одним сообщением «реплика, пустая
  * строка, блок помощи concern» (как у нехватки в PR 11); если вместе не помещается — сначала блок помощи.
  */
-export function editExcludedMessages(concern, { help } = {}) {
+export function editExcludedMessages(concern, { help, log = logError } = {}) {
   if (!concern) return [EDIT_NOT_IN_TITLES_TEXT];
   const block = help ? helpMessage('concern', help) : helpMessage('concern');
   const one = `${EDIT_NOT_IN_TITLES_TEXT}\n\n${block}`;
-  return one.length <= TELEGRAM_TEXT_LIMIT ? [one] : [block, EDIT_NOT_IN_TITLES_TEXT];
+  if (one.length <= TELEGRAM_TEXT_LIMIT) return [one];
+  log('edit', { code: 'message_too_long' });
+  return [block, EDIT_NOT_IN_TITLES_TEXT];
 }
 
 // ── Чистые функции: разбор правок ────────────────────────────────────────────
@@ -663,27 +665,42 @@ export function createBot({
     if ((s.stage === 'draft' || s.stage === 'watched') && s.episode) {
       const cmd = parseEdit(text);
       if (cmd) {
-        const before = structuredClone(s.episode);
-        const err = applyEdit(s.episode, cmd);
-        if (err) return tg.send(chatId, err);
+        // Решение владельца 11.11 12:05, п. 1: правка — такой же вход, как рассказ. Её текст проходит тот же фильтр
+        // остановки в контексте всего рассказа (рассказ + прежние правки + эта) ДО разбора правки: ошибка номера строки
+        // или лимита не пропускает текст мимо фильтра (разбор 940f41cc). Опора и контекст — только в памяти сессии;
+        // текст правки не пишется ни в журнал, ни в метрики (там — только уровень и место).
         const own = editCorpus(cmd);
+        // Правка — отдельная фраза контекста: без точки она склеилась бы с соседним текстом в одну часть.
+        const ctx = own ? `${s.story}\n${/[.!?…]$/.test(own) ? own : `${own}.`}` : s.story;
+        let concern = false;
         if (own) {
-          // Решение владельца 11.11 12:05, п. 1: правка — такой же вход, как рассказ. Её текст проходит тот же фильтр
-          // остановки в контексте всего рассказа (рассказ + прежние правки + эта). Опора и контекст — только в памяти
-          // сессии; текст правки не пишется ни в журнал, ни в метрики (там — только уровень и место).
           const prevLevel = assessRisk(s.story).level;
-          s.story = `${s.story}\n${own}`;
-          const risk = assessRisk(s.story);
-          if (risk.level === 'urgent') return stopForSafety(chatId, s, 'urgent', { at: 'edit' });
+          const risk = assessRisk(ctx);
+          if (risk.level === 'urgent') { s.story = ctx; return stopForSafety(chatId, s, 'urgent', { at: 'edit' }); }
           // concern, который внесла сама правка: строка не берётся, рядом — тот же блок помощи, что у рассказа с concern
           // (одним сообщением, как в PR 11). Реплики нехватки здесь нет: прежний черновик остаётся.
-          const editConcern = risk.level === 'concern' && (prevLevel === 'none' || assessRisk(own).level !== 'none');
-          // п. 2: «угроза не в титрах» — и для фраз из словаря угроз, которые фильтр остановки пропустил как гиперболу.
+          concern = risk.level === 'concern' && (prevLevel === 'none' || assessRisk(own).level !== 'none');
+        }
+        const before = structuredClone(s.episode);
+        if (!concern) {
+          const err = applyEdit(s.episode, cmd);
+          if (err) return tg.send(chatId, err);
+        }
+        let excluded = concern;
+        if (own) {
+          s.story = ctx;
+          // п. 2: «угроза не в титрах» — и для фраз из словаря угроз, которые фильтр остановки пропустил как гиперболу;
+          // п. 3 для правок: местоимение в строке правки, указывающее на человека из исключённой угрозы.
           const path = editedPath(cmd, s.episode);
-          if (editConcern || (path && threatErrors(s.story, s.episode).some((e) => e.path === path))) {
-            s.episode = before;
-            await metrics.log(chatId, 'edit_excluded', { level: editConcern ? 'concern' : 'none' });
-            for (const t of editExcludedMessages(editConcern)) await tg.send(chatId, t);
+          if (!excluded && path && (threatErrors(ctx, s.episode).some((e) => e.path === path)
+            || (/^rows\./.test(path) && threatPronounFilter(ctx)(own)))) excluded = true;
+          if (excluded) s.episode = before;
+          // Один вердикт на правку: та же проверка, что перед рендером (рассказ + поля эпизода). Если она даёт urgent,
+          // остановка сейчас, а не обещание «черновик на месте» и остановка на «Смотреть».
+          if (assessEpisodeRisk(ctx, s.episode).level === 'urgent') return stopForSafety(chatId, s, 'urgent', { at: 'edit' });
+          if (excluded) {
+            await metrics.log(chatId, 'edit_excluded', { level: concern ? 'concern' : 'none' });
+            for (const t of editExcludedMessages(concern)) await tg.send(chatId, t);
             return;
           }
         }

@@ -285,3 +285,82 @@ test('validateSafeEpisode по-прежнему пропускает обычн�
   const r = await manual(SAFE);
   assert.equal(validateSafeEpisode(r.episode, SAFE).ok, true);
 });
+
+// ── Замечания независимого разбора 940f41cc ─────────────────────────────────
+
+test('разбор, блокер: текст правки проходит фильтр и при ошибке номера строки или лимита строк', async () => {
+  const b = botSetup();
+  await b.say(SAFE);
+  await b.say('9: я не хочу больше жить');
+  assert.equal(b.texts().at(-1), helpMessage('urgent'));
+  assert.equal(b.s().episode, null);
+  const full = botSetup();
+  await full.say('Утром я пила чай. Днём я читала книгу. Вечером я гуляла в парке. Ночью я смотрела кино. Потом я мыла посуду. Затем я писала письмо.');
+  while (full.s().episode.rows.length < 6) await full.say(`+ Строка${full.s().episode.rows.length} — тихий вечер`);
+  await full.say('+ Мысль — не хочу больше жить');
+  assert.equal(full.texts().at(-1), helpMessage('urgent'));
+  await full.press(`play:${full.s().draftId}`);
+  assert.equal(full.counters.video, 0);
+});
+
+test('разбор, важно: один вердикт на правку — нет «черновик на месте», а потом остановки на «Смотреть»', async () => {
+  for (const edit of ['+ Брата — я бы убила', '+ Брат — хочу его ударить', '+ Соседу — жить не дам']) {
+    const b = botSetup();
+    await b.say(SAFE);
+    await b.say(edit);
+    if (b.s().episode) await b.press(`play:${b.s().draftId}`);
+    assert.ok(!b.events.some((e) => e.event === 'safety' && e.at === 'render'), edit);
+    const stopped = b.events.some((e) => e.event === 'safety' && e.at === 'edit');
+    assert.equal(b.counters.video, stopped ? 0 : 1, edit);
+    if (!stopped) assert.ok(b.texts().includes(EDIT_NOT_IN_TITLES_TEXT) || b.texts().some((t) => t.startsWith(EDIT_NOT_IN_TITLES_TEXT)), edit);
+  }
+});
+
+test('разбор, важно: словарь не задевает бытовые фразы на уровне рассказа', async () => {
+  for (const st of [
+    'Брат пожалеет, что не пошёл с нами в кино. Мы смотрели комедию. Потом ели пиццу.',
+    'Маме достанется последний кусок торта. Утром я пила чай. Вечером я читала книгу.',
+    'Конец урока, учитель отпустил нас раньше. Утром я пила чай. Вечером я читала книгу.',
+    'Телефон сдохнет к обеду, зарядку забыла. Утром я пила чай. Вечером я читала книгу.',
+    'Подруга пожалеет, что не пришла. Утром я пила чай. Вечером я читала книгу.',
+  ]) {
+    const r = await manual(st);
+    assert.ok(r.episode, st); assert.ok(!r.insufficient, st);
+    assert.equal(validateSafeEpisode(r.episode, st).ok, true, st);
+  }
+  for (const t of ['Маме — достанется торт', 'Телефон — сдохнет к вечеру', 'Конец урока, учитель отпустил нас']) assert.equal(threatPhrase(t), false, t);
+});
+
+test('разбор, важно: перестановки и синонимы угрозы ловятся', async () => {
+  for (const t of ['Брату — жить не дам', 'Брату — недолго осталось', 'Брату — капут', 'Брату — кирдык', 'Мама — меня придушит за вазу', 'Мама — меня закопает за вазу']) assert.equal(threatPhrase(t), true, t);
+  const b = botSetup();
+  await b.say(SAFE);
+  await b.say('+ Брату — жить не дам');
+  assert.doesNotMatch(fields(b.s()?.episode || {}), /жить не дам/);
+  assert.equal(b.counters.video, 0);
+});
+
+test('разбор, мелочь: два подходящих по роду человека, один из угрозы, — местоимение неясно, строка отбрасывается', () => {
+  assert.equal(threatPronounFilter('Я бы убил брата. Папа пришёл вечером. Он опять кричал.')('Он опять кричал'), true);
+  assert.equal(threatPronounFilter('Я бы убил брата. Мама позвонила. Она плакала.')('Она плакала'), false);
+});
+
+test('разбор, мелочь: правка с местоимением на человека из угрозы в рассказе с concern не идёт в титры', async () => {
+  const b = botSetup();
+  await b.say('Я бы убила брата. Утром я пила чай. Вечером я читала книгу.');
+  assert.ok(b.s().episode);
+  await b.say('+ Он — опять кричал');
+  assert.ok(!b.s().episode.rows.some((r) => /кричал/.test(r.value)));
+  assert.equal(b.texts().at(-1), EDIT_NOT_IN_TITLES_TEXT);
+});
+
+test('разбор, мелочь: деление длинного ответа «не берём» пишет в журнал только код', () => {
+  const logs = [];
+  // Блок помощи сам ≤ 4096, вместе с репликой — длиннее.
+  const base = helpMessage('concern', { contacts: [{ label: '', phone: '112' }] }).length;
+  const long = { contacts: [{ label: 'Ж'.repeat(4090 - base), phone: '112' }] };
+  assert.ok(helpMessage('concern', long).length <= 4096);
+  const parts = editExcludedMessages(true, { help: long, log: (stage, e) => logs.push({ stage, ...e }) });
+  assert.deepEqual(parts, [helpMessage('concern', long), EDIT_NOT_IN_TITLES_TEXT]);
+  assert.deepEqual(logs, [{ stage: 'edit', code: 'message_too_long' }]);
+});

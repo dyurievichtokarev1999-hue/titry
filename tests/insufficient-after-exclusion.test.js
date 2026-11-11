@@ -322,11 +322,15 @@ test('бот: правка не возвращает исключённый фр
     const s = b.bot.sessions.get(chat.id);
     const was = JSON.stringify(s.episode);
     await b.say(edit);
-    assert.equal(JSON.stringify(s.episode), was, `${edit}: черновик не изменён`);
-    assert.doesNotMatch(fields(s.episode), THREAT_WORDS, edit);
+    if (s.episode) assert.equal(JSON.stringify(s.episode), was, `${edit}: черновик не изменён`);
+    if (s.episode) assert.doesNotMatch(fields(s.episode), THREAT_WORDS, edit);
     assert.ok(!b.texts().includes(REPLY), `${edit}: реплики нехватки нет`);
     await b.press(`play:${s.draftId}`);
-    assert.equal(b.counters.video <= 1, true, edit);
+    // Один вердикт на правку: либо остановка сразу на правке (тогда ролика нет), либо прежний черновик собирается
+    // без остановки на «Смотреть» (разбор 940f41cc).
+    assert.ok(!b.events.some((e) => e.event === 'safety' && e.at === 'render'), `${edit}: нет остановки на рендере`);
+    if (b.events.some((e) => e.event === 'safety' && e.at === 'edit')) { assert.equal(b.counters.render, 0, edit); assert.equal(b.counters.video, 0, edit); }
+    else assert.equal(b.counters.video, 1, edit);
   }
   const u = botSetup();
   await u.say(MIX);
