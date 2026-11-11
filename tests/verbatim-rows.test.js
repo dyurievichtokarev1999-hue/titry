@@ -6,6 +6,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { LIMITS, rowWordProblems, rowWordsGrounded, sanitizeEpisode, validateEpisode } from '../engine/episode.js';
+import { pairFromSentence } from '../server/draft.js';
 import { validateSafeEpisode } from '../server/safety.js';
 import { draftRuleBased, draftWithClaude, groundDraft, makeDraft, SYSTEM_PROMPT } from '../server/draft.js';
 import { applyEdit, createBot, draftMessage, makeMetrics, parseEdit } from '../server/bot.js';
@@ -151,9 +152,10 @@ test('заготовка без ИИ: все строки проходят пр�
   assert.equal(one.episode.rows.length, 0);
 });
 
-test('заготовка без ИИ: «не» остаётся при слове, время — в роли', () => {
+test('заготовка без ИИ: «не» остаётся при слове, порядок слов цитаты', () => {
   const r = draftRuleBased('Я не пила чай. Утром работа.', { date: '2026-11-11' });
-  assert.deepEqual(r.episode.rows.map((x) => `${x.role} — ${x.value}`), ['Чай — не пила', 'Утром — работа']);
+  // порядок слов как в цитате: «не» уходит в роль вместе со словом (разбор dfee587e)
+  assert.deepEqual(r.episode.rows.map((x) => `${x.role} — ${x.value}`), ['Не пила — чай', 'Утром — работа']);
 });
 
 test('примеры examples/*.json проходят новое правило', async () => {
@@ -326,4 +328,33 @@ test('бот: правка «N: пила чай» при «Я не пила ча
   // разные причины — разные понятные тексты
   const e1 = validateEpisode(sanitizeEpisode({ ...episode, rows: [{ role: 'Чай', value: 'пила', source: 'пила чай' }, episode.rows[1]] }), story);
   assert.match(draftMessage(episode, e1), /перед этими словами стоит «не»/);
+});
+
+// ── Разбор головы dfee587e ───────────────────────────────────────────────────
+
+test('признак через «...», перевод строки после двоеточия и кавычки; чужие слова, сон, неуверенность; «почти» при своём слове; «нечего», «без»; намерение', () => {
+  for (const { story, row } of fx.review4.reject) {
+    assert.equal(rowWordsGrounded(row, story), false, `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+  for (const { story, row } of fx.review4.accept) {
+    assert.deepEqual(rowWordProblems(row, story), [], `${row.role} — ${row.value} ← ${story}`);
+  }
+});
+
+test('заготовка: порядок слов цитаты, признак не роль, все строки по правилу', () => {
+  const story = fx.ruleBased4.story;
+  const r = draftRuleBased(story, { date: '2026-11-11' });
+  const got = r.episode.rows.map((x) => `${x.role} — ${x.value}`);
+  for (const bad of fx.ruleBased4.forbidden) assert.ok(!got.includes(bad), bad);
+  for (const row of r.episode.rows) {
+    assert.ok(rowWordsGrounded(row, story), `${row.role} — ${row.value}`);
+    // роль стоит в цитате раньше значения
+    const src = row.source.toLowerCase();
+    assert.ok(src.indexOf(row.role.toLowerCase()) < src.indexOf(row.value.toLowerCase()), `порядок: ${row.role} — ${row.value}`);
+  }
+  for (const s of ['Почти уснула за рулём.', 'Еле дошла до дома.', 'Мне снится, что я лечу.']) {
+    const pair = pairFromSentence(s, new Set(), s);
+    assert.ok(!pair || !/^(Почти|Еле|Снится)/.test(pair.row.role), s);
+  }
+  assert.equal(pairFromSentence('Моя дочь пошла в школу.', new Set(), 'Моя дочь пошла в школу.').row.role, 'Дочь');
 });

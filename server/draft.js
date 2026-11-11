@@ -4,7 +4,7 @@
 // В обоих случаях каждая строка проверяется по рассказу: без цитаты в рассказе строка в титры не попадает.
 import { safeCode } from './errlog.js';
 import Anthropic from '@anthropic-ai/sdk';
-import { LIMITS, MOODS, blankEpisode, detectGender, rowWordsGrounded, sanitizeEpisode, sourceFound, todayIso, validateEpisode, wordsOf } from '../engine/episode.js';
+import { LIMITS, MOODS, blankEpisode, detectGender, isMarkerWord, rowWordsGrounded, sanitizeEpisode, sourceFound, todayIso, validateEpisode, wordsOf } from '../engine/episode.js';
 import { assessRisk, threatSentences, touchesThreat, validateSafeEpisode } from './safety.js';
 
 export const DEFAULT_MODEL = process.env.TITRY_MODEL || 'claude-opus-5-5';
@@ -225,7 +225,8 @@ const NOT_ROLE = new Set(`я ты он она оно мы вы они меня �
 это этот эта эти этого этой этому этим этом тот та то те того той тому тем том там тут здесь вот весь вся все всё всего всех что кто как где когда куда зачем почему
 и а но да или либо же ли то тоже также ведь вот лишь только даже ну уж потом затем и вряд ли бы б нет
 в во на с со к ко по за у о об обо от до из изо без для про над под при через между перед около после вместо кроме среди вокруг
-был была было были быть есть буду будет стал стала стало стали`.split(/\s+/).map((w) => w.replace(/ё/g, 'е')));
+был была было были быть есть буду будет стал стала стало стали
+сколько столько никто ничего нечего некогда кто-то что-то как-то`.split(/\s+/).map((w) => w.replace(/ё/g, 'е')));
 
 /** Слова, на которых значение не может кончаться. */
 const DANGLING = new Set(['не', 'ни', 'то', 'только', 'чтобы', 'чтоб', 'бы', 'б', 'ли', 'если', 'что', 'как', 'когда', 'будет', 'буду', 'был', 'была', 'было']);
@@ -234,7 +235,7 @@ const EDGE_WORDS = new Set(['я', 'и', 'а', 'но', 'или', 'да']);
 /** Предлоги: берутся в роль вместе со следующим словом («На работе»). */
 const PREPOSITIONS = new Set(['в', 'во', 'на', 'с', 'со', 'к', 'ко', 'по', 'за', 'у', 'о', 'об', 'от', 'до', 'из', 'без', 'для', 'про', 'над', 'под', 'при', 'через', 'после', 'перед', 'вместо', 'кроме', 'среди', 'вокруг']);
 /** Похоже на глагол: прошедшее время или инфинитив. Только для порядка выбора роли, не для проверки. */
-const VERB_LIKE = /[аеиоуыэюя]л(а|о|и|ся|ась|ось|ись)?$|[аеиоуыяю]ть(ся|сь)?$|чь(ся)?$|[йзс]ти(сь)?$/;
+const VERB_LIKE = /[аеиоуыэюя]л(а|о|и|ся|ась|ось|ись)?$|[аеиоуыяю]ть(ся|сь)?$|^.{3,}[ео]чь(ся)?$|[йзс]ти(сь)?$/;
 /** Определения, которые берутся в роль вместе со следующим словом. */
 const ROLE_MODIFIERS = new Set(['весь', 'вся', 'все', 'целый', 'целая', 'целое', 'этот', 'эта', 'этим', 'тот', 'та',
   // числительные словами не отрываются от существительного: «два часа»
@@ -257,9 +258,8 @@ function capitalizedInside(word, story) {
 }
 
 /**
- * Пара «роль — значение» из одной фразы. Роль — одно-два слова фразы (слово с предлогом, «весь», числительным).
- * Значение — непрерывный кусок той же фразы сразу после роли (до конца фразы или до конца её части),
- * иначе — сразу перед ролью. Порядок и форма слов — как у человека. Пара берётся, только если проходит
+ * Пара «роль — значение» из одной фразы. Роль — одно-два слова фразы (слово с предлогом, «весь», числительным, «не»).
+ * Значение — непрерывный кусок той же фразы сразу после роли (до конца фразы или до конца её части): порядок слов как в цитате. Порядок и форма слов — как у человека. Пара берётся, только если проходит
  * правило слов строки (rowWordsGrounded); иначе null.
  */
 export function pairFromSentence(sentence, usedRoles = new Set(), story = sentence) {
@@ -278,16 +278,16 @@ export function pairFromSentence(sentence, usedRoles = new Set(), story = senten
   for (const verbs of [false, true]) {
     for (let i = 0; i < raw.length; i++) {
       const w = one(i);
-      if (!w || w.length < 3 || NOT_ROLE.has(w) || ROLE_MODIFIERS.has(w) || usedRoles.has(w) || /^\d/.test(w)) continue;
+      if (!w || w.length < 3 || NOT_ROLE.has(w) || ROLE_MODIFIERS.has(w) || isMarkerWord(w) || usedRoles.has(w) || /^\d/.test(w)) continue;
       if (VERB_LIKE.test(w) !== verbs) continue;
       // «весь день», «на работе», «два часа»: предлог, определение или числительное уходит в роль вместе со словом.
       const prev = one(i - 1);
-      const withPrev = i > 0 && !ends(raw[i - 1]) && (/^\d/.test(raw[i - 1]) || (prev && (ROLE_MODIFIERS.has(prev) || PREPOSITIONS.has(prev))));
+      // «не» перед словом тоже уходит в роль вместе с ним: «Не пила — чай» сохраняет и отрицание, и порядок слов
+      const withPrev = i > 0 && !ends(raw[i - 1]) && (/^\d/.test(raw[i - 1]) || (prev && (ROLE_MODIFIERS.has(prev) || PREPOSITIONS.has(prev) || prev === 'не')));
       const from = withPrev ? i - 1 : i;
       const roleWord = trimEdge(raw.slice(from, i + 1).join(' ').replace(/^[«"„“(]+|[»"”)]+$/g, ''));
       if (!roleWord) continue;
       // границы части фразы (до запятой, двоеточия, тире)
-      let cs = from; while (cs > 0 && !ends(raw[cs - 1])) cs--;
       let ce = i; while (ce < raw.length - 1 && !ends(raw[ce])) ce++;
       const variants = [];
       // после роли — только если это продолжение, а не новый член через союз («лампу и плед» — не «Лампу — плед»)
@@ -296,7 +296,7 @@ export function pairFromSentence(sentence, usedRoles = new Set(), story = senten
         variants.push(raw.slice(i + 1)); // до конца фразы
         variants.push(raw.slice(i + 1, ce + 1)); // до конца части
       }
-      if (from > 0 && !ends(raw[from - 1])) variants.push(raw.slice(cs, from)); // сразу перед ролью
+      // значение — только после роли: порядок слов как в цитате («Утром — пила чай», а не «Чай — пила»)
       // сначала кусок с глаголом: «Вещи — собирала», а не «Вещи — два часа»
       const hasVerb = (v) => v.some((t) => VERB_LIKE.test(wordsOf(t)[0] || ''));
       variants.sort((x, y) => Number(hasVerb(clean(y))) - Number(hasVerb(clean(x))));
