@@ -461,3 +461,77 @@ test('сон через переводы строк и «проснулась» 
     assert.deepEqual(rowWordProblems(row, story), [], `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
   }
 });
+
+// ── Разбор 9a7a206b ──────────────────────────────────────────────────────────
+
+test('сон до явного «я проснулась», видения и кошмар, -сть/-зть, источник без глагола, признак в конце фразы, предел фразы', () => {
+  for (const { story, row } of fx.review10.reject) {
+    assert.equal(rowWordsGrounded(row, story), false, `${row.role} — ${row.value} ← ${JSON.stringify(story).slice(0, 90)}`);
+  }
+  for (const { story, row } of fx.review10.accept) {
+    assert.deepEqual(rowWordProblems(row, story), [], `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+  // заготовка не делает служебные слова ролью и не берёт строки из сна и источника
+  const r = draftRuleBased('Мне снилось море. Бабушка проснулась. Мама пекла пироги. Рейс, согласно табло, отменён. Уже поздно.', { date: '2026-11-11' });
+  assert.ok(!r.episode.rows.some((x) => /^(Уже|Согласно|Мама)/.test(x.role)), JSON.stringify(r.episode.rows));
+});
+
+test('монтажная: рассказ длиннее 6000 знаков — 413 до проверки строк, рендер не вызывается', async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-vr-long-'));
+  let renders = 0;
+  const server = createApp({ dataDir, safetyCheck: async () => false, render: async (e, o) => { renders++; return { seconds: 1, outPath: o.outPath }; } });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const post = async (p, body) => (await fetch(`http://127.0.0.1:${server.address().port}${p}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })).status;
+  try {
+    const story = 'Утром я пила чай. '.repeat(400);
+    const ep = episodeWith({ role: 'Утром', value: 'чай', source: 'Утром я пила чай' });
+    assert.equal(await post('/api/validate', { episode: ep, story }), 413);
+    assert.equal(await post('/api/render', { episode: ep, story }), 413);
+    assert.equal(renders, 0);
+  } finally { server.closeAllConnections(); server.close(); await fs.rm(dataDir, { recursive: true, force: true }); }
+});
+
+// ── Разбор ed1298f1 ──────────────────────────────────────────────────────────
+
+test('чужие оценки, пробуждение только от первого лица, синонимы сна, перенос из конца фразы, источники', () => {
+  for (const { story, row } of fx.review11.reject) {
+    assert.equal(rowWordsGrounded(row, story), false, `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+  for (const { story, row } of fx.review11.accept) {
+    assert.deepEqual(rowWordProblems(row, story), [], `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+});
+
+test('makeDraft: длинный опасный рассказ останавливается по безопасности, а не ошибкой длины', async () => {
+  const r = await makeDraft('Утром я пила чай. '.repeat(400) + 'Я не хочу больше жить.', { provider: 'manual' });
+  assert.equal(r.episode, null);
+  assert.equal(r.risk.level, 'urgent');
+  await assert.rejects(makeDraft('Утром я пила чай. '.repeat(400), { provider: 'manual' }), (e) => e.code === 'too_long');
+});
+
+// ── Разбор 116cb152 ──────────────────────────────────────────────────────────
+
+test('перенос признака на следующую фразу, сарказм после пробуждения, оценки, паузы перед инфинитивом', () => {
+  for (const { story, row } of fx.review12.reject) {
+    assert.equal(rowWordsGrounded(row, story), false, `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+  for (const { story, row } of fx.review12.accept) {
+    assert.deepEqual(rowWordProblems(row, story), [], `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+  // цитата длиннее предела фразы не источник и не разбирается долго
+  const long = 'я '.repeat(3000);
+  const t0 = Date.now();
+  assert.equal(rowWordsGrounded({ role: 'Я', value: 'я', source: long }, long), false);
+  assert.ok(Date.now() - t0 < 3000);
+});
+
+// ── Разбор 772a5dd7 ──────────────────────────────────────────────────────────
+
+test('пробуждение без сомнений, перенос сказанного и источника, формы оценок', () => {
+  for (const { story, row } of fx.review13.reject) {
+    assert.equal(rowWordsGrounded(row, story), false, `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+  for (const { story, row } of fx.review13.accept) {
+    assert.deepEqual(rowWordProblems(row, story), [], `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+});

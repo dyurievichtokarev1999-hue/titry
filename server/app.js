@@ -42,6 +42,10 @@ function send(res, code, body, type = 'application/json; charset=utf-8') {
   res.end(buf);
 }
 
+/** Предел длины рассказа — как в makeDraft (server/draft.js). */
+const STORY_MAX = 6000;
+const TOO_LONG = 'Рассказ слишком длинный для одного эпизода.';
+
 async function readJson(req, limit = 200_000) {
   let size = 0; const chunks = [];
   for await (const c of req) { size += c.length; if (size > limit) throw Object.assign(new Error('Слишком большой запрос.'), { status: 413, expose: true }); chunks.push(c); }
@@ -249,6 +253,8 @@ export function createApp({
     'POST /api/validate': async (req) => {
       const body = await readJson(req);
       const ep = sanitizeEpisode(body.episode);
+      // длина рассказа ограничивается до проверки (тот же предел, что у черновика)
+      if (String(body.story || '').length > STORY_MAX) return { status: 413, body: { error: TOO_LONG } };
       return { episode: ep, validation: validateSafeEpisode(ep, String(body.story || '')), text: episodeToText(ep) };
     },
 
@@ -258,6 +264,8 @@ export function createApp({
       const story = String(body.story || '');
       const risk = assessEpisodeRisk(story, ep);
       if (risk.level === 'urgent') { gate.markSafety(SCOPE, story); return safetyStop(risk); }
+      // длина — после остановки по безопасности (длинный опасный рассказ всё равно останавливается), до проверки строк
+      if (story.length > STORY_MAX) return { status: 413, body: { error: TOO_LONG } };
       const v = validateSafeEpisode(ep, story);
       if (!v.ok) return { status: 422, body: { error: 'Исправьте ошибки перед рендером.', validation: v } };
       // Инвариант: после остановки по рассказу ни один запрос с ним не запускает рендер и не отдаёт ролик.

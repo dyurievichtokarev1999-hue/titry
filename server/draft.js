@@ -229,7 +229,8 @@ const NOT_ROLE = new Set(`я ты он она оно мы вы они меня �
 и а но да или либо же ли то тоже также ведь вот лишь только даже ну уж потом затем и вряд ли бы б нет
 в во на с со к ко по за у о об обо от до из изо без для про над под при через между перед около после вместо кроме среди вокруг
 был была было были быть есть буду будет стал стала стало стали
-сколько столько никто ничего нечего некогда кто-то что-то как-то назад скорее всего`.split(/\s+/).map((w) => w.replace(/ё/g, 'е')));
+сколько столько никто ничего нечего некогда кто-то что-то как-то назад скорее всего
+уже ещё еще согласно просто очень тоже опять снова даже вообще ну вот`.split(/\s+/).map((w) => w.replace(/ё/g, 'е')));
 
 /** Слова, на которых значение не может кончаться. */
 const DANGLING = new Set(['не', 'ни', 'то', 'только', 'чтобы', 'чтоб', 'бы', 'б', 'ли', 'если', 'что', 'как', 'когда', 'будет', 'буду', 'был', 'была', 'было']);
@@ -381,11 +382,11 @@ export function draftRuleBased(story, { date = todayIso(), period = 'day' } = {}
 export async function makeDraft(story, opts = {}) {
   const text = String(story || '').trim();
   if (!text) throw Object.assign(new Error('Пустой рассказ.'), { code: 'empty' });
-  if (text.length > 6000) throw Object.assign(new Error('Рассказ слишком длинный для одного эпизода.'), { code: 'too_long' });
-
   // Остановка безусловная: никакой флаг запроса её не отменяет (решение базы, задача координатора 7.11).
+  // Проверка безопасности — до проверки длины: длинный опасный рассказ тоже останавливается.
   let risk = assessRisk(text);
   if (risk.level === 'urgent') return { risk, episode: null, provider: null };
+  if (text.length > 6000) throw Object.assign(new Error('Рассказ слишком длинный для одного эпизода.'), { code: 'too_long' });
 
   const useClaude = opts.provider === 'claude' || (opts.provider !== 'manual' && hasClaudeCredentials());
   let result, provider, note = '';
