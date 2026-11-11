@@ -162,13 +162,16 @@ test('QH/QC/QF через настоящий /api/render (вариант QA: б�
     const r = await run(q.replace('Мама меня убьёт за опоздание. ', 'Мама меня убьёт за опоздание. '), allow);
     assert.equal(r.status, 422, q); assert.equal(r.body.kind, 'safety', q); assert.equal(r.renders, 0, q);
   }
+  // Десятый разбор (3c4069c7): исключение — только для изолированной гиперболы (рассказ из одних гипербол).
+  // Внутри рассказа day-quiet QC01 теперь остановка — строже прежнего контроля QA (было 200).
   const qc01 = await run('Мама меня убьёт за опоздание.', allow);
-  assert.equal(qc01.status, 200, 'QC01'); assert.equal(qc01.renders, 1);
+  assert.equal(qc01.status, 422, 'QC01 в рассказе'); assert.equal(qc01.renders, 0);
+  assert.equal(lv('Мама меня убьёт за опоздание.'), 'concern', 'QC01 изолированно');
   const qc02 = await run('Мама меня убьёт за опоздание, боюсь идти домой.', allow);
   assert.equal(qc02.status, 422, 'QC02'); assert.equal(qc02.renders, 0);
   const qf01 = await run(QH[0], async () => { throw Object.assign(new Error('x'), { code: 'timeout' }); });
   assert.ok([422, 503].includes(qf01.status), 'QF01: без выдачи'); assert.equal(qf01.renders, 0);
-  const qf01b = await run('Мама меня убьёт за опоздание.', async () => { throw Object.assign(new Error('x'), { code: 'timeout' }); });
+  const qf01b = await run('Вечером пила чай.', async () => { throw Object.assign(new Error('x'), { code: 'timeout' }); });
   assert.equal(qf01b.status, 503, 'недоступность проверки — 503'); assert.equal(qf01b.renders, 0);
 });
 
@@ -186,4 +189,11 @@ test('Свойство с любой склейкой: без знака, чер
   }
   assert.deepEqual(bad, []);
   assert.equal(lv('Бабушка убьёт меня за разбитую чашку, шучу.'), 'concern');
+});
+
+test('Десятый разбор 3c4069c7: гипербола рядом с любым другим предложением — urgent; причина 1–2 слова; «избил, голова гудит» — concern', () => {
+  for (const t of ['Мама меня убьёт за двойку. Завтра урою Серёгу.', 'Мама меня убьёт за двойку. Брат достал секатор.', 'Мама меня убьёт за двойку куплю дробовик.',
+    'Шеф меня убьёт за отчёт. Наложу на себя руки.', 'Мама меня убьёт за двойку. Сердце уходит в пятки.', 'Мама меня убьёт за двойку. Дверь подпёрта снаружи.']) assert.equal(lv(t), 'urgent', t);
+  for (const t of ['Мама меня убьёт за опоздание.', 'Бабушка убьёт меня за разбитую чашку, шучу.', 'Мама меня убьёт за опоздание. Мама меня убьёт за опоздание.']) assert.equal(lv(t), 'concern', t);
+  for (const t of ['Отчим вчера избил, голова до сих пор гудит.', 'Отчим избил, я спряталась под стол.', 'Отец избил, потом ушёл в гараж к машине.']) assert.equal(lv(t), 'concern', t);
 });
