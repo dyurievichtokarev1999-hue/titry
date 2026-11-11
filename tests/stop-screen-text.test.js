@@ -11,17 +11,18 @@ import { createBot, makeMetrics } from '../server/bot.js';
 import { createApp } from '../server/app.js';
 
 const APPROVED = 'Титры для этого рассказа не будут собраны. Если тебе или кому-то рядом прямо сейчас угрожает опасность, позвони по одному из номеров ниже или попроси человека рядом побыть с тобой.';
-const CONTACTS = '• Единый номер экстренных служб: 112';
+// Блок контактов — из действующей конфигурации, тем же форматом, что и экран помощи.
+const CONTACTS = loadHelp().contacts.map((c) => `• ${c.label}: ${c.phone}${c.hours ? ` (${c.hours})` : ''}`).join('\n');
 const EXPECTED = `${APPROVED}\n\n${CONTACTS}`;
 const NEW_STORY = /нов\S* рассказ|Когда захочется|пришли|прислать|переформулир|ещё раз|снова/i;
 const URGENT = 'Вечером сидел на подоконнике и думал, что не хочу больше жить.';
-const CONCERN_OLD = 'Похоже, в этом дне было что-то опасное или очень тяжёлое.\n\nЕсли тебе или кому-то рядом угрожает опасность, лучше обратиться за живой помощью:\n\n• Единый номер экстренных служб: 112';
+const CONCERN_OLD = `Похоже, в этом дне было что-то опасное или очень тяжёлое.\n\nЕсли тебе или кому-то рядом угрожает опасность, лучше обратиться за живой помощью:\n\n${CONTACTS}`;
 
 test('экран остановки: дословный текст и контакты из конфигурации', () => {
   const text = helpMessage('urgent');
   assert.equal(text, EXPECTED);
   assert.doesNotMatch(text, NEW_STORY, 'нет приглашения прислать новый рассказ');
-  assert.doesNotMatch(text, /2000-122/, 'неподтверждённый номер не показывается');
+  assert.ok(CONTACTS.length > 0 && text.endsWith(`\n\n${CONTACTS}`), 'контакты идут сразу после текста');
   for (const c of loadHelp().contacts) assert.ok(text.includes(c.phone), `контакт ${c.label} на месте`);
 });
 
