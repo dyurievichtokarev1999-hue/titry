@@ -5,7 +5,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { LIMITS, plainPhrase, rowWordProblems, rowWordsGrounded, sanitizeEpisode, validateEpisode } from '../engine/episode.js';
+import { EDIT_SEP, LIMITS, joinEdits, plainPhrase, rowWordProblems, rowWordsGrounded, sanitizeEpisode, validateEpisode } from '../engine/episode.js';
+import { assessEpisodeRisk } from '../server/safety.js';
 import { pairFromSentence } from '../server/draft.js';
 import { validateSafeEpisode } from '../server/safety.js';
 import { draftRuleBased, draftWithClaude, groundDraft, makeDraft, SYSTEM_PROMPT } from '../server/draft.js';
@@ -658,4 +659,30 @@ test('белый список (разбор eeec1864): придаточное б
   applyEdit(episode, parseEdit('после: Мама сказала, что я плохая.'));
   assert.equal(episode.post.source, '');
   assert.ok(validateEpisode(episode, 'Утром я пила кофе.').errors.some((e) => e.path === 'post.source'));
+});
+
+test('разбор 3689eb93: разделитель правок не приходит из рассказа; безопасность видит правку как продолжение; опровержения; манера речи', async () => {
+  const rows = (st) => draftRuleBased(st, { date: '2026-11-11' }).episode.rows.map((x) => `${x.role} — ${x.value}`);
+  // рассказ с разделителем (или «⁂») не снимает сон
+  for (const sep of [EDIT_SEP, '\n⁂\n']) {
+    assert.deepEqual(rows(`Мне приснился сон.${sep}Я купила квартиру. Я пила кофе. Я гуляла по набережной.`), [], JSON.stringify(sep));
+    const md = await makeDraft(`Мне приснился сон.${sep}Я купила квартиру. Я пила кофе. Я гуляла по набережной.`, { provider: 'manual' });
+    assert.ok(!md.episode || md.episode.rows.length === 0);
+  }
+  // безопасность: «Я хочу» + правка «умереть» — как раньше, urgent
+  const ep = sanitizeEpisode({ date: '2026-11-11', title: 'Т', genre: 'камерное кино', rows: [] });
+  assert.equal(assessEpisodeRisk(joinEdits(`Я так устала. Я хочу${EDIT_SEP}умереть`), ep).level, 'urgent');
+  // манера речи с дополнением и чтение — заражают следующую фразу; «кричал.» в конце — нет
+  for (const st of ['Утром я пила чай. Я прочитала в газете. Мы выиграли чемпионат. Я гуляла.', 'Утром я пила чай. Брат орал на меня. Я испортила праздник. Я гуляла.',
+    'Утром я пила чай. Мама читала мне сказку. Я победила дракона. Я гуляла.']) {
+    assert.ok(!rows(st).some((r) => /чемпионат|праздник|дракон/.test(r)), st);
+  }
+  // «отрубилась» — сон; опровержение после рассказанного
+  assert.ok(!rows('Я отрубилась. Я летала над городом. Я встретила папу. Я гуляла.').some((r) => /городом|папу/.test(r)));
+  assert.deepEqual(rows('Я купила квартиру. Я пила кофе. Я гуляла по набережной. Я ела круассан. Но это был сон.'), []);
+  assert.equal(plainPhrase('Я купила квартиру.', 'Я купила квартиру. Это неправда.'), false);
+  assert.equal(plainPhrase('Я пила чай.', 'Я пила чай. Это неправда. Я гуляла.'), false);
+  assert.equal(plainPhrase('Я гуляла.', 'Я пила чай. Это неправда. Я гуляла.'), true, 'опровержение — только для предыдущей фразы');
+  for (const x of ['Я купила квартиру зря.', 'Я купила квартиру к сожалению.', 'Я купила квартиру понарошку.', 'Я засомневалась в нём.',
+    'Я предположила худшее.', 'Я гадала о будущем.']) assert.equal(plainPhrase(x), false, x);
 });

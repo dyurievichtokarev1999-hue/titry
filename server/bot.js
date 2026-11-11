@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS, episodeToText, plainPhrase, EDIT_SEP } from '../engine/episode.js';
+import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS, episodeToText, plainPhrase, EDIT_SEP, cleanInput, joinEdits } from '../engine/episode.js';
 import { makeDraft, modelSafetyCheck, hasClaudeCredentials, pairFromSentence } from './draft.js';
 import { makeGate } from './gate.js';
 import { helpMessage, prepareHelp, assessRisk, assessEpisodeRisk, validateSafeEpisode, threatErrors, threatPronounFilter, INSUFFICIENT_TEXT, INSUFFICIENT_AFTER_EXCLUSION, INSUFFICIENT_MATERIAL, EDIT_NOT_IN_TITLES_TEXT, editNotInTitlesText, TELEGRAM_TEXT_LIMIT } from './safety.js';
@@ -571,7 +571,7 @@ export function createBot({
   async function doRender(chatId, s) {
     // Правки после черновика тоже проверяются: опасная строка не попадёт в ролик.
     if (s.verdict !== 'ok' || !s.episode) return tg.send(chatId, TEXT.noDraft);
-    const risk = assessEpisodeRisk(s.story, s.episode);
+    const risk = assessEpisodeRisk(joinEdits(s.story), s.episode); // правки — продолжение рассказа для проверки безопасности
     if (risk.level === 'urgent') return stopForSafety(chatId, s, 'urgent', { at: 'render' });
     const v = validateSafeEpisode(s.episode, s.story);
     if (!v.ok) { await showDraft(chatId, s); return; }
@@ -584,7 +584,7 @@ export function createBot({
     const story = s.story;
     // Отдельная проверка именно этой версии (рассказ + строки + пост + название/жанр) перед очередью.
     s.stage = 'rendering';
-    const g = await track(chatId, gate.verify(s.scope, original, ep, `${story}\n${episodeToText(ep)}`));
+    const g = await track(chatId, gate.verify(s.scope, original, ep, `${joinEdits(story)}\n${episodeToText(ep)}`));
     if (!alive(chatId, s) || s.draftId !== gen) return; // удалённая или заменённая сессия не оживает
     if (g.kind === 'safety') return stopForSafety(chatId, s, 'urgent', { at: 'check', byModel: true });
     if (!g.ok) {
@@ -634,7 +634,7 @@ export function createBot({
     const chatId = msg.chat.id;
     if (msg.chat.type !== 'private') return; // только личные чаты: истории не для групп
     const s = session(chatId);
-    const text = (msg.text || '').trim();
+    const text = cleanInput(msg.text || '').trim(); // разделитель правок не может прийти от человека
 
     if (text === '/start') { s.stage = 'idle'; s.period = 'day'; await metrics.log(chatId, 'start'); return tg.send(chatId, TEXT.start); }
     if (text === '/year') { s.stage = 'idle'; s.period = 'year'; await metrics.log(chatId, 'year'); return tg.send(chatId, TEXT.year); }
@@ -665,7 +665,7 @@ export function createBot({
       if (msg.voice.duration > MAX_VOICE_SECONDS) return tg.send(chatId, TEXT.voiceLong);
       await tg.action(chatId, 'typing');
       let story = '';
-      try { story = await transcribe(await tg.fileBuffer(msg.voice.file_id), { duration: msg.voice.duration }); }
+      try { story = cleanInput(await transcribe(await tg.fileBuffer(msg.voice.file_id), { duration: msg.voice.duration })); }
       catch (e) { logError('stt', e); }
       if (!alive(chatId, s)) return; // /delete во время распознавания: ничего не отвечаем
       if (!story) return tg.send(chatId, TEXT.voiceEmpty);
@@ -687,8 +687,9 @@ export function createBot({
         const ctx = own ? `${s.story}${EDIT_SEP}${/[.!?…]$/.test(own) ? own : `${own}.`}` : s.story;
         let concern = false;
         if (own) {
-          const prevLevel = assessRisk(s.story).level;
-          const risk = assessRisk(ctx);
+          // Для проверок безопасности правки — продолжение рассказа (joinEdits, PR 13): «Я хочу» + правка «умереть».
+          const prevLevel = assessRisk(joinEdits(s.story)).level;
+          const risk = assessRisk(joinEdits(ctx));
           if (risk.level === 'urgent') { s.story = ctx; return stopForSafety(chatId, s, 'urgent', { at: 'edit' }); }
           // concern, который внесла сама правка: строка не берётся, рядом — тот же блок помощи, что у рассказа с concern
           // (одним сообщением, как в PR 11). Реплики нехватки здесь нет: прежний черновик остаётся.
@@ -707,12 +708,13 @@ export function createBot({
           // п. 2: «угроза не в титрах» — и для фраз из словаря угроз, которые фильтр остановки пропустил как гиперболу;
           // п. 3 для правок: местоимение в строке правки, указывающее на человека из исключённой угрозы.
           const path = editedPath(cmd, s.episode);
-          if (!excluded && path && (threatErrors(ctx, s.episode).some((e) => e.path === path)
-            || (/^(?:rows\.|post$)/.test(path) && threatPronounFilter(ctx)(own)))) excluded = true;
+          const joined = joinEdits(ctx);
+          if (!excluded && path && (threatErrors(joined, s.episode).some((e) => e.path === path)
+            || (/^(?:rows\.|post$)/.test(path) && threatPronounFilter(joined)(own)))) excluded = true;
           if (excluded) s.episode = before;
           // Один вердикт на правку: та же проверка, что перед рендером (рассказ + поля эпизода). Если она даёт urgent,
           // остановка сейчас, а не обещание «черновик на месте» и остановка на «Смотреть».
-          if (assessEpisodeRisk(ctx, s.episode).level === 'urgent') return stopForSafety(chatId, s, 'urgent', { at: 'edit' });
+          if (assessEpisodeRisk(joined, s.episode).level === 'urgent') return stopForSafety(chatId, s, 'urgent', { at: 'edit' });
           if (excluded) {
             await metrics.log(chatId, 'edit_excluded', { level: concern ? 'concern' : 'none' });
             for (const t of editExcludedMessages(concern, { path })) await tg.send(chatId, t);
