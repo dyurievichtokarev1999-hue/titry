@@ -377,3 +377,27 @@ test('слово с символами регулярных выражений �
   assert.doesNotThrow(() => draftRuleBased(story, { date: '2026-11-11' }));
   assert.doesNotThrow(() => rowWordProblems({ role: 'Я', value: 'лентяйка', source: 'я лентяйка' }, story));
 });
+
+// ── Разбор 78b6630e ──────────────────────────────────────────────────────────
+
+test('«без» и намерение не приставляются, двоеточие без пробела, область через запятую перед инфинитивом, «могу»', () => {
+  for (const { story, row } of fx.review6.reject) {
+    assert.equal(rowWordsGrounded(row, story), false, `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+  for (const { story, row } of fx.review6.accept) {
+    assert.deepEqual(rowWordProblems(row, story), [], `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+  // рассказ строками без точек: строки остаются отдельными фразами, заготовка не пустая
+  assert.ok(draftRuleBased(fx.review6.lines, { date: '2026-11-11' }).episode.rows.length >= 2);
+});
+
+test('время проверки линейно: рассказ ~6000 знаков с повторами глагола речи — меньше 3 секунд', () => {
+  const ep = sanitizeEpisode({ date: '2026-11-11', title: 'Т', genre: 'камерное кино',
+    rows: Array.from({ length: 6 }, () => ({ role: 'Я', value: 'думала', source: 'думала думала' })) });
+  for (const big of ['думала '.repeat(850), 'сказала '.repeat(750), 'я сказала что '.repeat(430)]) {
+    const t0 = Date.now();
+    validateEpisode(ep, big);
+    draftRuleBased(big, { date: '2026-11-11' });
+    assert.ok(Date.now() - t0 < 3000, `${big.slice(0, 14)}…: ${Date.now() - t0} мс`);
+  }
+});

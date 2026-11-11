@@ -82,7 +82,7 @@ const NEXT_MARKERS = new Set(['не', 'ни', 'буду', 'будешь', 'бу�
  */
 const INTENT = /^(брос(ил|ила|или|ить|аю|ает)|переста(л|ла|ли|ть|ю|ет)|прекрати(л|ла|ли|ть)|хоте(л|ла|ли|ть|лось)|хоч(у|ет|ешь)|хотим|хочется|мечта(л|ла|ли|ю|ет)|собира(л|ла|лась|лся|юсь|ется|лись)|планир(ую|ует|овал|овала)|пыта(л|ла|лась|лся|юсь|ется)|попыта(лась|лся)|постара(лась|лся|юсь)|намерен(а)?|решил(а|и)?|отказал(ась|ся)|захоте(л|ла|ли)|обеща(л|ла|ли|ю)|забы(л|ла|ли)|долж(на|ен|ны|но))$/;
 /** «думала поехать»: глагол мысли или возможности с инфинитивом после него — тоже намерение. */
-const INTENT_INF = /^(дума(л|ла|ли|ю)|подума(л|ла)|сможе(т|шь)|мог(ла|ли)?)$/;
+const INTENT_INF = /^(дума(л|ла|ли|ю)|подума(л|ла)|смог(у|ла|ли)?|сможе(т|шь|м|те)|смогут|мог(у|ла|ли)?|може(т|шь|м|те)|могут)$/;
 const INFINITIVE = /(ть|ться|тись|ти|чь)$/;
 const isNext = (w) => NEXT_MARKERS.has(w);
 /**
@@ -163,8 +163,10 @@ function splitPhrases(text) {
     else if (c === '”') { if (stack.includes('“')) stack.splice(stack.lastIndexOf('“'), 1); }
     else if (c === '"' && !lockedPlain) { plainQuote = !plainQuote; if (oddPlain && plainQuote) lockedPlain = true; }
     const inQuote = stack.length > 0 || plainQuote;
-    // перевод строки — не граница (голосовой ввод, «сказала —\nты…»); граница — «.», «!», «?», «;» вне кавычек
-    const boundary = !inQuote && /[.!?;]/.test(c);
+    // перевод строки — граница, кроме случаев, когда строка обрывается на знаке или признаке («сказала —», «Во сне», «не»)
+    const lastWord = c === '\n' ? (wordsOf(cur).at(-1) || '') : '';
+    const softBreak = c === '\n' && (/[:—–,\-]\s*$/.test(cur) || isMarker(lastWord) || REPORT_STEM.test(lastWord));
+    const boundary = !inQuote && (/[.!?;]/.test(c) || (c === '\n' && !softBreak));
     if (boundary) { out.push(cur); cur = ''; } else cur += c === '\n' ? ' ' : c;
   }
   out.push(cur);
@@ -187,21 +189,36 @@ function sentencesOf(text, homo = true) {
     });
     // глагол речи, мысли или мнения с содержанием после него: «сказала, что…», «сказала: …», «сказала — …»,
     // «думаю, он…», «сказала я лентяйка» (подлежащее-местоимение после глагола)
+    // Позиции знаков считаются один раз на фразу: проверка линейна по длине рассказа.
+    const lastMark = Math.max(...['—', '–', ':', '«', '"', '„', '“'].map((c) => low.lastIndexOf(c)));
+    const seen = new Set();
     words.forEach((w, i) => {
-      if (!(REPORT_VERBS.has(w) || (REPORT_STEM.test(w) && VERB_END.test(w)))) return;
+      if (seen.has(w) || !(REPORT_VERBS.has(w) || (REPORT_STEM.test(w) && VERB_END.test(w)))) return;
+      seen.add(w);
       const esc = w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      // сразу после глагола — знак, «что», «будто», «как»
-      const after = new RegExp(`(^|[^а-я])${esc}\\s*([,:—–«"„“]|что|будто|как\\s)`).test(low);
+      const re = new RegExp(`(^|[^а-я])${esc}(?![а-я])`, 'g');
+      let m, first = -1, after = false;
+      while ((m = re.exec(low)) !== null) {
+        const end = m.index + m[0].length;
+        if (first < 0) first = end;
+        // сразу после глагола — знак, «что», «будто», «как»
+        if (/^\s*([,:—–«"„“]|что(?![а-я])|будто|как\s)/.test(low.slice(end, end + 12))) { after = true; break; }
+      }
       // дальше в той же фразе — тире, двоеточие или кавычки («написала в чате — лентяйка»)
-      const later = new RegExp(`(^|[^а-я])${esc}[^.!?]*[—–:«"„“]`).test(low);
+      const later = first >= 0 && lastMark >= first;
       // подлежащее-местоимение сразу после глагола (через «мне/нам…»): «сказала я лентяйка», «сказали мне я уволена»
-      let j = i + 1;
-      while (['мне', 'нам', 'ему', 'ей', 'им', 'тебе', 'вам'].includes(words[j])) j++;
-      if (after || later || SUBJECT.has(words[j])) marks.add(w);
+      const subj = words.some((x, k) => {
+        if (x !== w) return false;
+        let j = k + 1;
+        while (['мне', 'нам', 'ему', 'ей', 'им', 'тебе', 'вам'].includes(words[j])) j++;
+        return SUBJECT.has(words[j]);
+      });
+      if (after || later || subj) marks.add(w);
     });
     // общий признак чужих слов и мнения: «…, что …» и двоеточие после слова (не «7:30», не «:)»)
     if (/,\s*что(\s|$)/.test(low)) marks.add('что');
-    if (/[а-яa-z»"]\s*:(\s|«|"|„|“|$)/i.test(raw)) marks.add(':');
+    // двоеточие — признак чужих слов, кроме времени «7:30» и смайликов «:)»
+    if (/:/.test(raw.replace(/\d\s*:\s*\d/g, '').replace(/:-?[)(dDpPоО3]/g, ''))) marks.add(':');
     // в кавычках — чужие слова или название: строка берёт их только в кавычках
     if (/[«»"“”„]/.test(raw)) marks.add('«»');
     for (const [a, b] of SENTENCE_BIGRAMS) if (words.some((w, i) => w === a && words[i + 1] === b)) marks.add(`${a} ${b}`);
@@ -212,7 +229,14 @@ function sentencesOf(text, homo = true) {
 /** Слова текста и номер части фразы для каждого (части — до знака препинания). */
 function tokensWithClauses(text, homo = true) {
   const toks = [], cl = [];
-  String(text || '').split(/[,;:—–()«»"“”„.!?…\n]+|\s-\s/).forEach((part, k) => wordsOf(part, homo).forEach((w) => { toks.push(w); cl.push(k); }));
+  // часть, которая начинается с инфинитива, продолжает предыдущую: «хотела позвонить маме, рассказать про работу»
+  let id = -1;
+  String(text || '').split(/[,;:—–()«»"“”„.!?…\n]+|\s-\s/).forEach((part, k) => {
+    const ws = wordsOf(part, homo);
+    if (!ws.length) return;
+    if (!(k > 0 && id >= 0 && ws[0].length > 3 && INFINITIVE.test(ws[0]))) id++;
+    ws.forEach((w) => { toks.push(w); cl.push(id); });
+  });
   return { toks, cl };
 }
 
@@ -260,8 +284,9 @@ function quoteContext(source, story) {
     // 1) «буду», «не», «почти» прямо перед цитатой (через прозрачные слова) в той же фразе;
     //    «не» в самом конце предыдущей фразы («Я не. Пила чай.») — тоже обрезка
     for (let j = s - 1; j >= 0; j--) {
-      if (sid[j] !== sid[s]) { if (NEG.has(toks[j])) cut = true; break; }
-      if (isNext(toks[j]) || scopeWord(toks, j)) { cut = true; break; }
+      // через границу фразы — только «не», «буду», «почти» (не намерение: «Купила всё, что хотела. Утром…»)
+      if (sid[j] !== sid[s] && !(isNext(toks[j]) || NEG.has(toks[j]) || TRANSPARENT.has(toks[j]))) break;
+      if (isNext(toks[j]) || NEG.has(toks[j]) || (sid[j] === sid[s] && scopeWord(toks, j))) { cut = true; break; }
       if (!TRANSPARENT.has(toks[j])) break;
     }
     // 2) отрицание, «без» или намерение раньше в той же части фразы: «не стала пить чай» — цитата «пить чай» обрезана
@@ -323,6 +348,12 @@ export function rowWordProblems(row, story) {
   // роль и значение разделены «—» на экране; для признаков читаем их как «роль, значение»
   sentencesOf(`${String((row && row.role) || '')}, ${String((row && row.value) || '')}`, false).forEach((x) => x.marks.forEach((m) => rowMarks.add(m)));
   const marksOk = key(rowMarks) === key(srcMarks);
+  // «без» и намерение в строке должны относиться к слову, которое и в цитате стоит под ними:
+  // «Задачу — решила» из «Решила задачу» — да; «Чай — хотела» из «пила чай и хотела спать» — нет
+  const scopedBy = new Set();
+  src.forEach((w, i) => { if (plain(w) && rowSet.has(w)) scopeOf(srcT, srcC, i).forEach((x) => scopedBy.add(x)); });
+  const orphan = rowWords.find((w) => (w === 'без' || INTENT.test(w)) && !scopedBy.has(w));
+  if (orphan) problems.push({ field: wordsOf(String(row.role || ''), false).includes(orphan) ? 'role' : 'value', kind: 'bound', words: [orphan] });
   for (const fieldName of ['role', 'value']) {
     const rawText = String((row && row[fieldName]) || '');
     if (!rawText.trim()) continue;
@@ -340,13 +371,16 @@ export function rowWordProblems(row, story) {
     // «почти», «не», «без», «хотела»… в строке стоят прямо перед своим словом: «Почти — вернулась» не годится
     const dangling = words.findIndex((w, i) => isNext(w) && !(NEG.has(w) && PRONOUNS.includes(words[i + 1])) && !words.slice(i + 1).some((x) => !isNext(x) && !TRANSPARENT.has(x) && !FUNCTION_MARKERS.has(x)));
     if (dangling >= 0) { problems.push({ field: fieldName, kind: 'bound', words: [words[dangling]] }); continue; }
+    const { toks: fieldT, cl: fieldC } = tokensWithClauses(rawText, false);
     for (let i = 0; i < words.length; i++) {
       const w = words[i];
       if (!plain(w)) continue;
       const own = sigs.get(w);
       if (own.size > 1) { problems.push({ field: fieldName, kind: 'ambiguous', words: [w] }); break; }
       const [pre, neg] = [...own][0].split('|');
-      if (pre !== preSig(words, i) || (neg && !neg.split(' ').every((x) => rowSet.has(x)))) { problems.push({ field: fieldName, kind: 'bound', words: [w] }); break; }
+      // признак нельзя приставить к чужому слову: «Хотела чай», «Пила без — чай»
+      const fieldScope = scopeOf(fieldT, fieldC, i).join(' ');
+      if (pre !== preSig(words, i) || (neg && !neg.split(' ').every((x) => rowSet.has(x))) || (!neg && fieldScope)) { problems.push({ field: fieldName, kind: 'bound', words: [w] }); break; }
     }
   }
   return problems;
