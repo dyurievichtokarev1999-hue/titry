@@ -1,0 +1,287 @@
+// Решения владельца 11.11 12:05: правка человека — такой же вход, как рассказ; «угроза не в титрах» сильнее гиперболы;
+// местоимение на человека из исключённой угрозы; обычная нехватка у заготовки — та же реплика, что после исключения.
+// Только вымышленные короткие примеры.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { makeDraft, draftRuleBased, groundDraft } from '../server/draft.js';
+import { assessRisk, threatErrors, threatPhrase, threatPronounFilter, helpMessage, validateSafeEpisode,
+  INSUFFICIENT_TEXT, INSUFFICIENT_MATERIAL, INSUFFICIENT_AFTER_EXCLUSION, EDIT_NOT_IN_TITLES_TEXT } from '../server/safety.js';
+import { createBot, TEXT, editExcludedMessages } from '../server/bot.js';
+import { createApp } from '../server/app.js';
+import { rowWordsGrounded, wordsOf } from '../engine/episode.js';
+
+const REPLY = 'Не получилось собрать титры только из твоих слов. Сегодня можно без ролика.';
+const SAFE = 'Утром я пила чай. Вечером я читала книгу.';
+const ONE = 'Сегодня утром я долго пила чай.'; // одна фраза — у заготовки одна строка
+const URGENT = 'Сегодня всё валится из рук. Я не хочу больше жить.';
+const URGENT_CARD = /Сейчас важнее не титры/;
+const chat = { id: 88123, type: 'private' };
+const manual = (story, o = {}) => makeDraft(story, { ...o, provider: 'manual' });
+const fields = (ep) => [ep.title, ep.genre, ep.lead, ...(ep.rows || []).flatMap((r) => [r.role, r.value, r.source]), ep.post?.text, ep.post?.source].join(' | ');
+const modelClient = (raw) => ({ beta: { messages: { create: async () => ({ stop_reason: 'end_turn', model: 'm', usage: {}, content: [{ type: 'text', text: JSON.stringify(raw) }] }) } } });
+const modelDraft = (over) => ({ title: 'Обычный день', genre: 'тихая драма', mood: 'quiet', grammatical_gender: 'unknown', safety_flag: false, rows: [], post: { text: '', source: '' }, ...over });
+
+function botSetup({ check = () => false, draft = manual } = {}) {
+  const sent = []; const events = []; const counters = { render: 0, video: 0, check: 0 }; const checked = [];
+  const tg = {
+    send: async (c, text, extra = {}) => { sent.push({ text, extra }); }, action: async () => {}, answer: async () => {},
+    fileBuffer: async () => Buffer.from(''), sendVideo: async () => { counters.video++; },
+  };
+  const metrics = { hash: () => 'fictional', log: async (id, event, extra = {}) => { events.push({ event, ...extra }); }, forget: async () => {} };
+  const bot = createBot({
+    tg, metrics, draft,
+    safetyCheck: async (t) => { counters.check++; checked.push(t); return check(t, counters.check); },
+    render: async (e, o) => { counters.render++; return { seconds: 1, duration: 24, outPath: o.outPath }; },
+  });
+  const say = (text) => bot.handleUpdate({ message: { chat, text } });
+  const press = (data) => bot.handleUpdate({ callback_query: { id: 'q', data, message: { chat } } });
+  const s = () => bot.sessions.get(chat.id);
+  return { bot, sent, events, counters, checked, say, press, s, texts: () => sent.map((m) => m.text) };
+}
+
+// Перехват консоли: текст правки не должен уходить в журнал.
+async function quiet(fn) {
+  const out = []; const orig = { error: console.error, log: console.log, warn: console.warn };
+  console.error = console.log = console.warn = (...a) => out.push(a.join(' '));
+  try { await fn(); } finally { Object.assign(console, orig); }
+  return out.join('\n');
+}
+
+// ── п. 2: фраза из словаря угроз в строке никогда не попадает в титры ───────
+
+test('условие: «Брату — не жить» фильтр остановки не останавливает, а правило титров отклоняет', () => {
+  assert.equal(assessRisk(`${SAFE}\nБрату не жить`).level, 'none', 'фильтр остановки этот пример пропускает');
+  for (const t of ['Брату — не жить', 'Начальнику конец', 'Соседу — достанется', 'Мама — меня убьёт за двойку', 'Брату — убью']) assert.equal(threatPhrase(t), true, t);
+  for (const t of ['Утром — пила чай', 'Полку — прибила', 'Рекорд — побил', 'Капец — устала', 'Брат — получит подарок', 'Последний автобус — ушёл']) assert.equal(threatPhrase(t), false, t);
+});
+
+test('threatErrors: строка-угроза отклоняется и в рассказе без угрозы, и когда роль и значение безобидны по отдельности', () => {
+  const ep = { title: 'Чай', genre: 'драма', lead: 'ты', rows: [{ role: 'Утром', value: 'пила чай', source: 'Утром я пила чай' }, { role: 'Начальнику', value: 'конец', source: 'Начальнику конец' }], post: { text: '', source: '' } };
+  assert.deepEqual(threatErrors(`${SAFE}\nНачальнику конец`, ep).map((e) => e.path), ['rows.1']);
+  // Гипербола «мама меня убьёт за…» отменяет остановку (рассказ из одних гипербол — concern), но не правило титров.
+  const h = 'Мама меня убьёт за опоздание.';
+  assert.equal(assessRisk(h).level, 'concern');
+  const hep = { ...ep, rows: [{ role: 'Мама', value: 'меня убьёт за опоздание', source: 'Мама меня убьёт за опоздание' }] };
+  assert.deepEqual(threatErrors(h, hep).map((e) => e.path), ['rows.0']);
+});
+
+test('черновик модели: строка-фраза из словаря угроз отбрасывается даже в рассказе, где фильтр её пропустил', () => {
+  const story = `${SAFE} Брату не жить.`;
+  const raw = modelDraft({ rows: [
+    { role: 'Утром', value: 'пила чай', source: 'Утром я пила чай' },
+    { role: 'Брату', value: 'не жить', source: 'Брату не жить' },
+  ] });
+  const g = groundDraft(raw, story);
+  assert.doesNotMatch(fields(g.episode), /не жить/);
+  assert.equal(g.dropped.length, 1);
+});
+
+test('бот: рассказ без угрозы + правка «+ Брату — не жить» → строка не в титрах, короткая реплика, без помощи и без нехватки', async () => {
+  const b = botSetup();
+  await b.say(SAFE);
+  const was = JSON.stringify(b.s().episode);
+  const log = await quiet(() => b.say('+ Брату — не жить'));
+  assert.equal(JSON.stringify(b.s().episode), was, 'черновик не изменён');
+  assert.doesNotMatch(fields(b.s().episode), /жить|Брат/);
+  assert.equal(b.texts().at(-1), EDIT_NOT_IN_TITLES_TEXT);
+  assert.equal(TEXT.editExcluded, EDIT_NOT_IN_TITLES_TEXT, 'текст в одном месте');
+  assert.ok(!b.texts().includes(REPLY)); assert.doesNotMatch(b.texts().join('\n'), URGENT_CARD);
+  assert.doesNotMatch(log + JSON.stringify(b.events), /жить|Брат/, 'текста правки нет в журнале и метриках');
+  assert.deepEqual(b.events.at(-1), { event: 'edit_excluded', level: 'none' });
+  // Черновик без этой строки собирается; отдельная проверка видит и правку (контекст рассказа + правка).
+  await b.press(`play:${b.s().draftId}`);
+  assert.equal(b.counters.video, 1);
+  assert.match(b.checked.at(-1), /Брату не жить/);
+});
+
+test('реплика «не берём» — короткая и нейтральная: без морали, без позитива, без восклицаний', () => {
+  assert.ok(EDIT_NOT_IN_TITLES_TEXT.length <= 60);
+  assert.doesNotMatch(EDIT_NOT_IN_TITLES_TEXT, /!|нельзя|плохо|должн|всё будет|хорош|спасибо|понимаем/i);
+  assert.deepEqual(editExcludedMessages(false), [EDIT_NOT_IN_TITLES_TEXT]);
+  assert.deepEqual(editExcludedMessages(true), [`${EDIT_NOT_IN_TITLES_TEXT}\n\n${helpMessage('concern')}`]);
+});
+
+// ── п. 1: правка проходит тот же фильтр остановки в контексте всего рассказа ──
+
+test('бот: правка с concern → строка не берётся, реплика и блок помощи concern одним сообщением, без нехватки', async () => {
+  for (const edit of ['+ Брат — хочу его ударить', '2: хочу его ударить', 'после: хочу его ударить']) {
+    const b = botSetup();
+    await b.say(SAFE);
+    const n = b.sent.length;
+    const was = JSON.stringify(b.s().episode);
+    const log = await quiet(() => b.say(edit));
+    const after = b.sent.slice(n);
+    assert.equal(after.length, 1, edit);
+    assert.equal(after[0].text, `${EDIT_NOT_IN_TITLES_TEXT}\n\n${helpMessage('concern')}`, edit);
+    assert.equal(JSON.stringify(b.s().episode), was, `${edit}: черновик прежний`);
+    assert.ok(!b.texts().includes(REPLY), edit); assert.doesNotMatch(b.texts().join('\n'), URGENT_CARD, edit);
+    assert.doesNotMatch(log + JSON.stringify(b.events), /удар/, `${edit}: текста правки нет в журнале и метриках`);
+  }
+});
+
+test('бот: правка с urgent → остановка как у рассказа: карточка urgent, черновик уничтожен, без нехватки', async () => {
+  const b = botSetup();
+  await b.say(SAFE);
+  const old = b.s().draftId;
+  const log = await quiet(() => b.say('2: не хочу больше жить'));
+  assert.equal(b.texts().at(-1), helpMessage('urgent'));
+  assert.equal(b.s().episode, null);
+  assert.ok(!b.texts().includes(REPLY));
+  assert.deepEqual(b.events.at(-1), { event: 'safety', level: 'urgent', at: 'edit' });
+  assert.doesNotMatch(log + JSON.stringify(b.events), /жить/);
+  await b.press(`play:${old}`);
+  assert.match(b.texts().at(-1), URGENT_CARD); assert.equal(b.counters.render, 0);
+  // Тот же рассказ снова — остановка (рассказ запомнен как запрещённый).
+  await b.say(SAFE);
+  assert.match(b.texts().at(-1), URGENT_CARD);
+});
+
+test('бот: правка оценивается в контексте всего рассказа — сама по себе concern, вместе с рассказом urgent', async () => {
+  const story = 'Утром я наточила нож. Вечером я читала книгу.';
+  assert.equal(assessRisk(story).level, 'none');
+  assert.equal(assessRisk('Брат убью его').level, 'concern');
+  const b = botSetup();
+  await b.say(story);
+  assert.ok(b.s().episode);
+  await b.say('+ Брат — убью его');
+  assert.equal(b.texts().at(-1), helpMessage('urgent'));
+  assert.equal(b.s().episode, null);
+});
+
+test('бот: безобидная правка в рассказе с concern проходит как обычно', async () => {
+  const MIX = 'Я злюсь на брата и хочу его ударить. Утром я пила чай. Вечером я читала книгу.';
+  const b = botSetup();
+  await b.say(MIX);
+  await b.say('+ Вечером — гуляла в парке');
+  assert.ok(b.s().episode.rows.some((r) => r.role === 'Вечером' && r.value === 'гуляла в парке'));
+  assert.notEqual(b.texts().at(-1), EDIT_NOT_IN_TITLES_TEXT);
+});
+
+test('бот: слова строки из правки — только из текста этой правки (дословность PR 13)', async () => {
+  const b = botSetup();
+  await b.say(SAFE);
+  await b.say('2: долго гуляла в парке');
+  const row = b.s().episode.rows[1];
+  const own = new Set(wordsOf('долго гуляла в парке'));
+  for (const w of wordsOf(`${row.role} ${row.value}`)) assert.ok(own.has(w), `«${w}» из правки`);
+  assert.ok(rowWordsGrounded(row, 'долго гуляла в парке'));
+  assert.equal(b.s().validation.ok, true, JSON.stringify(b.s().validation.errors));
+});
+
+// ── п. 3: местоимение на человека из исключённой угрозы ─────────────────────
+
+test('заготовка: фраза с местоимением на человека из угрозы отбрасывается; другие люди и рассказы без угрозы — нет', () => {
+  const st = 'Я бы убил брата. Он опять кричал. Утром я пила чай. Вечером я читала книгу.';
+  assert.equal(assessRisk(st).level, 'concern');
+  const f = threatPronounFilter(st);
+  assert.equal(f('Он опять кричал'), true);
+  assert.equal(f('Утром я пила чай'), false);
+  const r = draftRuleBased(st);
+  assert.doesNotMatch(fields(r.episode), /кричал/);
+  assert.equal(r.episode.rows.length, 2);
+  // Местоимение в предложении с угрозой («Я бы его убил») — тоже цель угрозы.
+  assert.equal(threatPronounFilter('Брат опять кричал. Я бы его убил. Он потом ушёл.')('Он потом ушёл'), true);
+  // Ближайший человек — не из угрозы, род совпадает: строка остаётся.
+  assert.equal(threatPronounFilter('Я бы убил брата. Мама позвонила. Она плакала.')('Она плакала'), false);
+  // Род не совпадает («мама … он»): «он» — брат из угрозы.
+  assert.equal(threatPronounFilter('Я бы убил брата. Мама сказала, что он извинился.')('Мама сказала, что он извинился'), true);
+  // Рассказ без угрозы: местоимения не трогаются.
+  assert.equal(threatPronounFilter('Утром я пила чай. Он позвонил.')('Он позвонил'), false);
+});
+
+test('заготовка: после отбрасывания такой строки не хватает строк → путь нехватки после исключения', async () => {
+  const st = 'Я бы убил брата. Он опять кричал. Утром я пила чай.';
+  const r = await manual(st);
+  assert.equal(r.insufficient, true);
+  assert.equal(r.code, INSUFFICIENT_AFTER_EXCLUSION);
+  assert.equal(r.episode, null);
+});
+
+// ── п. 4: обычная нехватка у заготовки ──────────────────────────────────────
+
+test('(а) makeDraft: нехватка у заготовки без исключений → insufficient_material, без черновика и без ⚠', async () => {
+  assert.equal(draftRuleBased(ONE).insufficient, true);
+  const r = await manual(ONE);
+  assert.equal(r.insufficient, true);
+  assert.equal(r.code, INSUFFICIENT_MATERIAL);
+  assert.equal(r.episode, null);
+  assert.deepEqual(Object.keys(r).sort(), ['code', 'episode', 'insufficient', 'provider', 'risk']);
+  // Две строки — обычный черновик.
+  const ok = await manual(SAFE);
+  assert.ok(ok.episode); assert.ok(!ok.insufficient);
+});
+
+test('(а) бот: нехватка у заготовки → только реплика нехватки; ни черновика с ⚠, ни ролика; метрика — только код', async () => {
+  const b = botSetup();
+  await b.say(ONE);
+  const after = b.sent.slice(b.texts().indexOf(TEXT.working) + 1).map((m) => m.text);
+  assert.deepEqual(after, [REPLY]);
+  assert.doesNotMatch(b.texts().join('\n'), /Нужно хотя бы|⚠/);
+  assert.equal(b.s().episode, null);
+  assert.deepEqual(b.events, [{ event: INSUFFICIENT_MATERIAL }]);
+  for (let n = 0; n <= 2; n++) await b.press(`play:${n}`);
+  assert.equal(b.counters.render, 0); assert.equal(b.counters.video, 0);
+});
+
+async function withApp(opts, fn) {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-edits-'));
+  const counters = { render: 0 };
+  const server = createApp({
+    dataDir, draft: opts.draft || manual, safetyCheck: async () => false, hasKey: () => true,
+    render: async (e, o) => { counters.render++; return { seconds: 1, outPath: o.outPath }; },
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const post = async (p, body) => {
+    const res = await fetch(`http://127.0.0.1:${server.address().port}${p}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    return { status: res.status, body: await res.json() };
+  };
+  try { await fn({ post, counters }); } finally { server.close(); await fs.rm(dataDir, { recursive: true, force: true }); }
+}
+
+test('(а) монтажная: нехватка у заготовки → 422 { kind: insufficient, error: реплика } и ничего больше', async () => {
+  await withApp({}, async ({ post, counters }) => {
+    const r = await post('/api/draft', { story: ONE });
+    assert.equal(r.status, 422);
+    assert.deepEqual(r.body, { kind: 'insufficient', error: REPLY });
+    assert.equal(counters.render, 0);
+  });
+});
+
+test('(б) остановленный фильтром текст → только остановка, реплики нехватки нет (бот и монтажная)', async () => {
+  const b = botSetup();
+  await b.say(URGENT);
+  assert.match(b.texts().at(-1), URGENT_CARD);
+  assert.ok(!b.texts().includes(REPLY));
+  await withApp({}, async ({ post }) => {
+    const r = await post('/api/draft', { story: URGENT });
+    assert.equal(r.body.kind, 'safety');
+    assert.ok(!JSON.stringify(r.body).includes(REPLY));
+  });
+});
+
+test('(в) одна и та же реплика для модели и заготовки', async () => {
+  assert.equal(INSUFFICIENT_TEXT, REPLY);
+  const fewRows = modelDraft({ rows: [{ role: 'Утром', value: 'долго пила чай', source: 'утром я долго пила чай' }] });
+  const viaModel = (story, o) => makeDraft(story, { ...o, provider: 'claude', client: modelClient(fewRows) });
+  const rm = await viaModel(ONE, {});
+  const rr = await manual(ONE);
+  assert.equal(rm.insufficient, true); assert.equal(rr.insufficient, true);
+  assert.equal(rm.code, rr.code);
+  const bm = botSetup({ draft: viaModel });
+  const br = botSetup();
+  await bm.say(ONE); await br.say(ONE);
+  assert.equal(bm.texts().at(-1), REPLY);
+  assert.equal(br.texts().at(-1), REPLY);
+  await withApp({ draft: viaModel }, async ({ post }) => {
+    const r = await post('/api/draft', { story: ONE });
+    assert.deepEqual(r.body, { kind: 'insufficient', error: REPLY });
+  });
+});
+
+test('validateSafeEpisode по-прежнему пропускает обычный черновик из двух строк', async () => {
+  const r = await manual(SAFE);
+  assert.equal(validateSafeEpisode(r.episode, SAFE).ok, true);
+});

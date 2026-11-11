@@ -5,7 +5,7 @@
 import { safeCode } from './errlog.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { LIMITS, MOODS, blankEpisode, detectGender, isMarkerWord, rowWordsGrounded, sanitizeEpisode, sourceFound, todayIso, validateEpisode, wordsOf } from '../engine/episode.js';
-import { assessRisk, threatSentences, touchesThreat, validateSafeEpisode, insufficientAfterExclusion, INSUFFICIENT_AFTER_EXCLUSION } from './safety.js';
+import { assessRisk, threatSentences, touchesThreat, threatPhrase, threatPronounFilter, validateSafeEpisode, insufficientAfterExclusion, INSUFFICIENT_AFTER_EXCLUSION, INSUFFICIENT_MATERIAL } from './safety.js';
 
 export const DEFAULT_MODEL = process.env.TITRY_MODEL || 'claude-opus-5-5';
 
@@ -132,7 +132,7 @@ export function groundDraft(raw, story, { date = todayIso(), period = 'day' } = 
   const threat = (...xs) => xs.some((x) => touchesThreat(x, threats, story));
   for (const r of raw.rows || []) {
     // Слова роли и значения — только из цитаты этой строки, признаки («не», «бы», «если»…) не оторваны.
-    if (sourceFound(r.source, story) && rowWordsGrounded(r, story) && !threat(r.role, r.value, r.source)) rows.push({ role: r.role, value: r.value, source: r.source });
+    if (sourceFound(r.source, story) && rowWordsGrounded(r, story) && !threat(r.role, r.value, r.source) && !threatPhrase(`${r.role || ''} ${r.value || ''}`)) rows.push({ role: r.role, value: r.value, source: r.source });
     else dropped.push(r);
   }
   const post = raw.post && raw.post.text && sourceFound(raw.post.source, story) && !threat(raw.post.text, raw.post.source)
@@ -339,7 +339,9 @@ export function draftRuleBased(story, { date = todayIso(), period = 'day' } = {}
   const mood = (MOOD_WORDS.find(([re]) => re.test(t)) || [null, 'quiet'])[1];
   // Предложения с угрозой другому человеку в заготовку не берутся (правило «угроза не становится титром»).
   const threats = threatSentences(story);
-  const parts = sentences(story).filter((s) => !touchesThreat(s, threats, story));
+  // Решение владельца 11.11 12:05, п. 3: фраза, чьё местоимение указывает на человека из исключённой угрозы, тоже не берётся.
+  const pronounToThreat = threatPronounFilter(story);
+  const parts = sentences(story).filter((s) => !touchesThreat(s, threats, story) && !pronounToThreat(s));
   const last = parts[parts.length - 1] || '';
   const post = parts.length > 3 && last.length <= 72 ? { text: last, source: last.replace(/[.!?…]+$/, '') } : { text: '', source: '' };
   const pool = post.text ? parts.slice(0, -1) : parts;
@@ -367,7 +369,7 @@ export function draftRuleBased(story, { date = todayIso(), period = 'day' } = {}
  * Главная точка входа: безопасность → черновик (Claude или заготовка) → проверка.
  * Возвращает { episode, validation, risk, provider, dropped, note }. Исходы без черновика (episode: null), по старшинству:
  * остановка { risk: urgent } → недоступность { unavailable, code } → нехватка { insufficient: true,
- * code: 'insufficient_after_exclusion', risk } (risk тут none/concern; это не остановка).
+ * code: 'insufficient_after_exclusion' | 'insufficient_material', risk } (risk тут none/concern; это не остановка).
  */
 export async function makeDraft(story, opts = {}) {
   const text = String(story || '').trim();
@@ -420,6 +422,10 @@ export async function makeDraft(story, opts = {}) {
   if (insufficientAfterExclusion(result.episode, text, validation)) {
     return { risk, episode: null, provider, insufficient: true, code: INSUFFICIENT_AFTER_EXCLUSION };
   }
+  // Решение владельца 11.11 12:05, п. 4: обычная нехватка у заготовки (меньше LIMITS.rowsMin строк из слов человека,
+  // исключений не было) — тот же исход и та же реплика, что после исключения: без черновика с ⚠ и без ролика.
+  // Модель сюда попадает только через заготовку (мало строк у модели → заготовка), поэтому реплика одна для обоих путей.
+  if (result.insufficient) return { risk, episode: null, provider, insufficient: true, code: INSUFFICIENT_MATERIAL };
   return { ...result, validation, risk, provider, note };
 }
 

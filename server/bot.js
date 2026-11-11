@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS, episodeToText } from '../engine/episode.js';
 import { makeDraft, modelSafetyCheck, hasClaudeCredentials, pairFromSentence } from './draft.js';
 import { makeGate } from './gate.js';
-import { helpMessage, prepareHelp, assessEpisodeRisk, validateSafeEpisode, INSUFFICIENT_TEXT, TELEGRAM_TEXT_LIMIT } from './safety.js';
+import { helpMessage, prepareHelp, assessRisk, assessEpisodeRisk, validateSafeEpisode, threatErrors, INSUFFICIENT_TEXT, INSUFFICIENT_AFTER_EXCLUSION, INSUFFICIENT_MATERIAL, EDIT_NOT_IN_TITLES_TEXT, TELEGRAM_TEXT_LIMIT } from './safety.js';
 import { renderEpisode, ROOT } from './render.js';
 import { logError, safeCode } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS, cleanupVoiceOrphans } from './stt.js';
@@ -36,6 +36,7 @@ export const TEXT = {
   voiceOff: 'Голосовые пока не подключены. Напиши, пожалуйста, текстом.',
   voiceLong: `Голосовое длиннее ${Math.round(MAX_VOICE_SECONDS / 60)} минут. Для одной сцены хватит минуты.`,
   voiceEmpty: 'Не получилось разобрать голосовое. Можно повторить или написать текстом.',
+  editExcluded: EDIT_NOT_IN_TITLES_TEXT, // текст — в server/safety.js; окончательный утверждает редактор
   editHelp: [
     'Как поправить:',
     '<code>2: друг позвонил поговорить</code> — новая строка 2 из твоих слов',
@@ -90,7 +91,28 @@ export function insufficientMessages(concern, { help, log = logError } = {}) {
   return [block, TEXT.insufficient];
 }
 
+/**
+ * Ответ, когда строку из правки не берём в титры. При concern, внесённом правкой, — одним сообщением «реплика, пустая
+ * строка, блок помощи concern» (как у нехватки в PR 11); если вместе не помещается — сначала блок помощи.
+ */
+export function editExcludedMessages(concern, { help } = {}) {
+  if (!concern) return [EDIT_NOT_IN_TITLES_TEXT];
+  const block = help ? helpMessage('concern', help) : helpMessage('concern');
+  const one = `${EDIT_NOT_IN_TITLES_TEXT}\n\n${block}`;
+  return one.length <= TELEGRAM_TEXT_LIMIT ? [one] : [block, EDIT_NOT_IN_TITLES_TEXT];
+}
+
 // ── Чистые функции: разбор правок ────────────────────────────────────────────
+
+/** Поле эпизода, которое меняет правка (после applyEdit): путь как в ошибках проверки. */
+export function editedPath(cmd, ep) {
+  switch (cmd.op) {
+    case 'add': return `rows.${ep.rows.length - 1}`;
+    case 'row': return `rows.${cmd.n - 1}`;
+    case 'title': case 'genre': case 'lead': case 'post': return cmd.op;
+    default: return null;
+  }
+}
 
 /** Разобрать команду правки. Возвращает объект команды или null. */
 export function parseEdit(text) {
@@ -456,7 +478,7 @@ export function createBot({
       s.stage = 'idle';
       return tg.send(chatId, TEXT.checkUnavailable);
     }
-    if (r.insufficient) return replyInsufficient(chatId, s, story, gen, current, r.risk && r.risk.level === 'concern');
+    if (r.insufficient) return replyInsufficient(chatId, s, story, gen, current, r.risk && r.risk.level === 'concern', r.code);
     if (!r.episode) {
       // Остановка важнее всего, даже если ответ устарел: рассказ запоминается как запрещённый.
       if (s.draftId === gen) return stopForSafety(chatId, s, r.risk.level, { byModel: r.risk.byModel });
@@ -500,7 +522,9 @@ export function createBot({
   // «реплика, пустая строка, блок помощи» — между двумя сообщениями блок помощи мог бы потеряться. Длина
   // (реплика + helpMessage('concern')) ограничена тестом (≤ 3500) и проверяется при отправке (insufficientMessages):
   // сверх 4096 — сначала блок помощи, затем реплика, код message_too_long в журнале; сейчас 256 знаков.
-  async function replyInsufficient(chatId, s, story, gen, current, concern) {
+  // Решение владельца 11.11 12:05, п. 4: обычная нехватка у заготовки (insufficient_material) идёт тем же путём
+  // и с той же репликой; в метрику — только код причины из закрытого списка.
+  async function replyInsufficient(chatId, s, story, gen, current, concern, code = INSUFFICIENT_AFTER_EXCLUSION) {
     // Тот же рассказ сейчас в работе и ещё не остановлен: поздняя остановка (как в ветке !r.episode, at: 'late').
     // Без этого два подряд одинаковых рассказа, у первого из которых проверка вернула true, оставляли человека
     // без карточки помощи: первый ответ устарел, у второго current() уже false из-за safety — оба молча выходили.
@@ -525,7 +549,7 @@ export function createBot({
     }
     if (!current()) return;
     s.stage = 'idle'; // черновика нет: правки и кнопки не к чему применять
-    await metrics.log(chatId, 'insufficient_after_exclusion');
+    await metrics.log(chatId, code === INSUFFICIENT_MATERIAL ? INSUFFICIENT_MATERIAL : INSUFFICIENT_AFTER_EXCLUSION);
     if (!current()) return;
     for (const text of insufficientMessages(concern)) await tg.send(chatId, text);
   }
@@ -639,10 +663,30 @@ export function createBot({
     if ((s.stage === 'draft' || s.stage === 'watched') && s.episode) {
       const cmd = parseEdit(text);
       if (cmd) {
+        const before = structuredClone(s.episode);
         const err = applyEdit(s.episode, cmd);
         if (err) return tg.send(chatId, err);
         const own = editCorpus(cmd);
-        if (own) s.story = `${s.story}\n${own}`; // опора хранится только в памяти сессии
+        if (own) {
+          // Решение владельца 11.11 12:05, п. 1: правка — такой же вход, как рассказ. Её текст проходит тот же фильтр
+          // остановки в контексте всего рассказа (рассказ + прежние правки + эта). Опора и контекст — только в памяти
+          // сессии; текст правки не пишется ни в журнал, ни в метрики (там — только уровень и место).
+          const prevLevel = assessRisk(s.story).level;
+          s.story = `${s.story}\n${own}`;
+          const risk = assessRisk(s.story);
+          if (risk.level === 'urgent') return stopForSafety(chatId, s, 'urgent', { at: 'edit' });
+          // concern, который внесла сама правка: строка не берётся, рядом — тот же блок помощи, что у рассказа с concern
+          // (одним сообщением, как в PR 11). Реплики нехватки здесь нет: прежний черновик остаётся.
+          const editConcern = risk.level === 'concern' && (prevLevel === 'none' || assessRisk(own).level !== 'none');
+          // п. 2: «угроза не в титрах» — и для фраз из словаря угроз, которые фильтр остановки пропустил как гиперболу.
+          const path = editedPath(cmd, s.episode);
+          if (editConcern || (path && threatErrors(s.story, s.episode).some((e) => e.path === path))) {
+            s.episode = before;
+            await metrics.log(chatId, 'edit_excluded', { level: editConcern ? 'concern' : 'none' });
+            for (const t of editExcludedMessages(editConcern)) await tg.send(chatId, t);
+            return;
+          }
+        }
         s.edits = (s.edits || 0) + 1;
         s.stage = 'draft';
         return showDraft(chatId, s);

@@ -318,7 +318,28 @@ const ROOT_ALIAS = { мать: 'мам', матер: 'мам', матушк: 'м
 function personRoot(w) { const m = PERSON_ROOT.exec(w); const r = m ? m[1] : w; return ROOT_ALIAS[r] || r; }
 const threatMemo = new Map();
 const isThreatUnit = (u) => { if (threatMemo.has(u)) return threatMemo.get(u); const v = isThreatUnitRaw(u); if (threatMemo.size < 2000) threatMemo.set(u, v); return v; };
-const isThreatUnitRaw = (u) => { const t = stripIdioms(u); return !!harmPerson(t) || PAST_NO_OBJ.test(t) || CONCERN.some((re) => re.test(t)); };
+// Решение владельца 11.11 12:05, п. 2: фраза из словаря угроз в строке не попадает в титры никогда, даже если фильтр
+// остановки счёл её гиперболой или вообще не увидел опасности («Брату — не жить»: assessRisk даёт none). Гипербола
+// отменяет только остановку, но не правило «угроза не в титрах». Словарь проверяется на тексте БЕЗ вырезания гипербол.
+// Сильные слова — угроза сами по себе; слабые («конец», «крышка», «достанется»…) — только рядом с человеком.
+const DOOM_STRONG = /(?<![а-я])(?:не\s+жить|не\s+жилец|жить\s+(?:\S+\s+)?осталось|осталось\s+(?:\S+\s+)?жить|не\s+проснется|не\s+доживет|сдохнет|сдохнут|хана|кранты|каюк)(?![а-я])/;
+const DOOM_WEAK = String.raw`(?:конец|крышка|капец|достанется|не\s+поздоровится|несдобровать|не\s+сдобровать|мало\s+не\s+покажется|пожалеет|пожалеют|пожалеешь|огребет|огребут)`;
+const DOOM_PERSON = new RegExp(String.raw`(?<![а-я])${PERSON}\s+(?:\S+\s+)?${DOOM_WEAK}(?![а-я])|(?<![а-я])${DOOM_WEAK}\s+(?:\S+\s+)?${PERSON}(?![а-я])`);
+// «Мама меня убьёт за…» — гипербола для фильтра остановки (onlyHyperbole), но в титры не берётся.
+const THREATENED_ME = /(?<![а-я])(?:(?:убьет|убьют|прибьет|прибьют|уроет|зарежет|прикончит)\s+меня|меня\s+(?:\S+\s+)?(?:убьет|убьют|прибьет|прибьют|уроет|зарежет|прикончит))(?![а-я])/;
+/** Текст строки содержит фразу из словаря угроз (без учёта гипербол). Экспортируется для тестов. */
+// Угроза другому человеку без глагола («Брату не жить»): часть рассказа с ней исключается из титров целиком.
+const doomToOther = (u) => { const t = flat(u); return !!t && (DOOM_STRONG.test(t) || DOOM_PERSON.test(t)); };
+/**
+ * Текст поля титров содержит фразу из словаря угроз: угроза другому (с глаголом вреда или без) или «меня убьёт»
+ * (гипербола для фильтра остановки, но не для титров). Экспортируется для тестов.
+ */
+export function threatPhrase(text) {
+  const t = flat(text);
+  if (!t) return false;
+  return doomToOther(text) || THREATENED_ME.test(t) || isThreatUnit(String(text));
+}
+const isThreatUnitRaw = (u) => { const t = stripIdioms(u); return !!harmPerson(t) || PAST_NO_OBJ.test(t) || CONCERN.some((re) => re.test(t)) || doomToOther(u); };
 // А4: для титров опасной считается любая часть рассказа, которую фильтр сам по себе не пропускает (уровень выше none),
 // а не только угроза, найденная правилом «глагол + человек».
 // Кэш на время одного вызова threatErrors: одно и то же предложение проверяется для каждого поля эпизода.
@@ -433,9 +454,65 @@ export function threatErrors(story, ep) {
   if (strictHit(ep.title)) errors.push({ path: 'title', msg });
   if (strictHit(ep.genre)) errors.push({ path: 'genre', msg });
   if (strictHit(ep.lead)) errors.push({ path: 'lead', msg });
-  (ep.rows || []).forEach((r, i) => { if (hit(r.role, r.value, r.source)) errors.push({ path: `rows.${i}`, msg }); });
+  // Роль и значение проверяются и вместе: «Начальнику» + «конец» по отдельности безобидны.
+  (ep.rows || []).forEach((r, i) => { if (hit(r.role, r.value, r.source) || threatPhrase(`${r.role || ''} ${r.value || ''}`)) errors.push({ path: `rows.${i}`, msg }); });
   if (ep.post && (strictHit(ep.post.text) || hit(ep.post.source))) errors.push({ path: 'post', msg });
   return errors;
+}
+
+// Решение владельца 11.11 12:05, п. 3: строка заготовки (без ИИ), чьё местоимение указывает на человека из исключённой
+// угрозы, отбрасывается («Я бы убил брата. Он опять кричал.» — «он» здесь брат из угрозы). Разрешение местоимения —
+// эвристика: ближайшее предшествующее упоминание человека, совместимое по роду (в той же фразе раньше местоимения,
+// иначе в предыдущих). Местоимение в предложении с угрозой само считается целью угрозы. Если упоминания нет —
+// неясно, о ком речь, и строка тоже отбрасывается (лишнее исключение допустимо, пропуск — нет).
+const PRON_ALL = /(?<![а-я])(?:он|его|ему|него|нему|ним|она|ее|ей|нее|ней|они|их|им|ними|них)(?![а-я])/g;
+const PRON_GENDER = { он: 'm', его: 'mn', ему: 'm', него: 'm', нему: 'm', ним: 'mp', она: 'f', ее: 'f', ей: 'f', нее: 'f', ней: 'f', они: 'p', их: 'p', им: 'mp', ними: 'p', них: 'p' };
+const FEMALE_ROOTS = new Set(['мам', 'сестр', 'жен', 'подруг', 'доч', 'девушк', 'тет', 'мачех', 'тещ', 'внучк']);
+// Род по корню не определяется («соседка» и «сосед», «начальница» и «начальник»): подходят к любому местоимению.
+const ANY_ROOTS = new Set(['сосед', 'коллег', 'бывш', 'партнер', 'учител', 'одноклассни', 'начальни', 'ребен', 'малыш', 'дяд']);
+function compatible(pron, root) {
+  const g = PRON_GENDER[pron] || 'mfp';
+  if (g.includes('p') || ANY_ROOTS.has(root)) return true;
+  return FEMALE_ROOTS.has(root) ? g.includes('f') : g.includes('m');
+}
+/**
+ * Предикат для заготовки: true — местоимение в предложении указывает на человека из исключённой угрозы
+ * (или неясно, на кого, при угрозе человеку в рассказе). Рассказ без угрозы человеку — всегда false.
+ */
+export function threatPronounFilter(story) {
+  story = String(story || '').replace(/[^\S\n]+/g, ' ').replace(/\n\s*/g, '\n');
+  const threats = threatSentences(story);
+  if (!threats.length) return () => false;
+  const ctx = threatContext(threats, story);
+  const targets = new Set([...ctx.threatPeople, ...ctx.linked]);
+  const sents = sentencesOf(story).map((x) => x.trim()).filter(Boolean);
+  const isThreatSent = sents.map((x) => isThreatUnit(x) || threats.includes(flat(x)));
+  // Угроза человеку есть: названный человек или местоимение в предложении с угрозой.
+  if (!targets.size && !sents.some((x, i) => isThreatSent[i] && new RegExp(PRON_ALL.source).test(flat(x)))) return () => false;
+  const mentions = [];
+  const verdict = new Map(); // предложение (flat) → указывает ли местоимение на угрозу
+  sents.forEach((x, i) => {
+    const t = flat(x);
+    const found = [];
+    for (const m of t.matchAll(new RegExp(PERSON_WORDS.source, 'g'))) found.push({ pos: m.index, kind: 'person', root: personRoot(m[0]) });
+    for (const m of t.matchAll(PRON_ALL)) found.push({ pos: m.index, kind: 'pron', word: m[0] });
+    found.sort((a, b) => a.pos - b.pos);
+    let hit = false;
+    for (const f of found) {
+      if (f.kind === 'person') { f.threat = isThreatSent[i] || targets.has(f.root); mentions.push(f); continue; }
+      if (isThreatSent[i]) f.threat = true;
+      else {
+        const ante = [...mentions].reverse().find((c) => (c.kind === 'person' ? compatible(f.word, c.root) : (PRON_GENDER[c.word] || 'x').split('').some((g) => (PRON_GENDER[f.word] || '').includes(g))));
+        f.threat = ante ? ante.threat : true;
+      }
+      mentions.push(f);
+      if (f.threat) hit = true;
+    }
+    verdict.set(t, (verdict.get(t) || false) || (hit && !isThreatSent[i]));
+  });
+  // Заготовка режет рассказ на фразы чуть иначе (без «;»): совпадение по вхождению в любую сторону.
+  const bad = [...verdict].filter(([k, v]) => v && k).map(([k]) => k);
+  return (sentence) => { const t = flat(sentence); return !!t && bad.some((k) => t.includes(k) || k.includes(t)); };
 }
 
 /** validateEpisode + правило «угроза не становится титром». Для всех серверных проверок выдачи. */
@@ -447,8 +524,16 @@ export function validateSafeEpisode(ep, story) {
 
 /** Внутренняя причина: после исключения опасных частей рассказа не собирается обязательный элемент эпизода. */
 export const INSUFFICIENT_AFTER_EXCLUSION = 'insufficient_after_exclusion';
+/** Обычная нехватка материала у заготовки без ИИ (исключений не было): тот же исход и та же реплика. */
+export const INSUFFICIENT_MATERIAL = 'insufficient_material';
 /** Реплика при этой причине (редактор повествования), дословно. Единственное место текста: бот и монтажная берут отсюда. */
 export const INSUFFICIENT_TEXT = 'Не получилось собрать титры только из твоих слов. Сегодня можно без ролика.';
+/**
+ * Реплика, когда строку из правки человека не берём в титры (фраза из словаря угроз или часть, исключённая правилом
+ * «угроза не в титрах»). Решение владельца 11.11 12:05, п. 2: нейтрально, без морали и без навязанного позитива.
+ * ЧЕРНОВИК: окончательный текст утверждает редактор повествования. Единственное место текста.
+ */
+export const EDIT_NOT_IN_TITLES_TEXT = 'Эту строку в титры не берём.';
 
 /**
  * Не хватает ли материала ПОСЛЕ исключения опасных частей (threatSentences/threatErrors).

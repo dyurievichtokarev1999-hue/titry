@@ -314,20 +314,26 @@ test('бот: местный urgent → помощь без отдельной �
 // ── Критерий 6: ручная правка не обходит правило ───────────────────────────
 
 test('бот: правка не возвращает исключённый фрагмент и не обходит stop', async () => {
+  // Решение владельца 11.11 12:05, п. 1: правка — такой же вход, как рассказ. Правка, внёсшая concern, не применяется:
+  // реплика «не берём» и блок помощи concern одним сообщением; черновик остаётся прежним, без угрозы.
   for (const edit of ['+ Злость — хочу его ударить', '1: хочу его ударить', 'название: Ударить брата', 'после: хочу его ударить']) {
     const b = botSetup();
     await b.say(MIX);
-    await b.say(edit);
     const s = b.bot.sessions.get(chat.id);
-    assert.equal(s.validation.ok, false, `${edit}: правка с угрозой не проходит проверку`);
+    const was = JSON.stringify(s.episode);
+    await b.say(edit);
+    assert.equal(JSON.stringify(s.episode), was, `${edit}: черновик не изменён`);
+    assert.doesNotMatch(fields(s.episode), THREAT_WORDS, edit);
+    assert.ok(!b.texts().includes(REPLY), `${edit}: реплики нехватки нет`);
     await b.press(`play:${s.draftId}`);
-    assert.equal(b.counters.render, 0, edit); assert.equal(b.counters.video, 0, edit);
+    assert.equal(b.counters.video <= 1, true, edit);
   }
   const u = botSetup();
   await u.say(MIX);
   await u.say('+ Мысль — не хочу больше жить');
+  assert.match(u.texts().at(-1), HELP, 'правка с urgent сразу ведёт к остановке');
   await u.press(`play:${u.bot.sessions.get(chat.id).draftId}`);
-  assert.match(u.texts().at(-1), HELP, 'правка с urgent ведёт к остановке');
+  assert.match(u.texts().at(-1), HELP);
   assert.equal(u.counters.render, 0);
 });
 
