@@ -352,7 +352,8 @@ export function draftRuleBased(story, { date = todayIso(), period = 'day' } = {}
   const all = sentences(story);
   const parts = all.filter((s) => !touchesThreat(s, threats, story) && !threatPhrase(s) && !pronounToThreat(s));
   const last = parts[parts.length - 1] || '';
-  const post = parts.length > 3 && last.length <= 72 ? { text: last, source: last.replace(/[.!?…]+$/, '') } : { text: '', source: '' };
+  // сцена после титров — тоже только из простого утверждения от первого лица (белый список формы фразы)
+  const post = parts.length > 3 && last.length <= 72 && plainPhrase(last, story) ? { text: last, source: last.replace(/[.!?…]+$/, '') } : { text: '', source: '' };
   const pool = post.text ? parts.slice(0, -1) : parts;
   const used = new Set();
   const rows = [];

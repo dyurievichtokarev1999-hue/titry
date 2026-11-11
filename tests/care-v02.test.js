@@ -185,12 +185,12 @@ test('бот: правка от самого человека становитс
   // реплику нехватки без черновика. Поэтому здесь рассказ от первого лица с двумя строками; правки добавляют свои.
   await bot.handleUpdate({ message: { chat, text: 'Утром я пила чай. Вечером я пекла пирог.' } });
   // человек добавляет строки сам, их слова становятся опорой
-  await bot.handleUpdate({ message: { chat, text: '+ Работа — обсуждение жирафа' } });
-  await bot.handleUpdate({ message: { chat, text: '+ Друг — вечерний звонок' } });
+  await bot.handleUpdate({ message: { chat, text: '+ Утром — я кормила жирафа' } });
+  await bot.handleUpdate({ message: { chat, text: '+ Вечером — я звонила другу' } });
   await bot.handleUpdate({ callback_query: { id: 'a', data: `play:${playId(tg)}`, message: { chat } } });
   assert.equal(rendered.length, 1);
-  assert.ok(rendered[0].ep.rows.some((r) => r.value === 'обсуждение жирафа'));
-  assert.ok(rendered[0].opts.story.includes('обсуждение жирафа'), 'правка человека — часть опоры');
+  assert.ok(rendered[0].ep.rows.some((r) => r.value === 'я кормила жирафа'));
+  assert.ok(rendered[0].opts.story.includes('я кормила жирафа'), 'правка человека — часть опоры');
 
   await bot.handleUpdate({ message: { chat, text: '2: не хочу больше жить' } });
   await bot.handleUpdate({ callback_query: { id: 'b', data: `play:${playId(tg)}`, message: { chat } } });

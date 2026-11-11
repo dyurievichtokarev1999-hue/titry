@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS, episodeToText } from '../engine/episode.js';
+import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS, episodeToText, plainPhrase, EDIT_SEP } from '../engine/episode.js';
 import { makeDraft, modelSafetyCheck, hasClaudeCredentials, pairFromSentence } from './draft.js';
 import { makeGate } from './gate.js';
 import { helpMessage, prepareHelp, assessRisk, assessEpisodeRisk, validateSafeEpisode, threatErrors, threatPronounFilter, INSUFFICIENT_TEXT, INSUFFICIENT_AFTER_EXCLUSION, INSUFFICIENT_MATERIAL, EDIT_NOT_IN_TITLES_TEXT, editNotInTitlesText, TELEGRAM_TEXT_LIMIT } from './safety.js';
@@ -39,13 +39,14 @@ export const TEXT = {
   editExcluded: EDIT_NOT_IN_TITLES_TEXT, // текст — в server/safety.js; окончательный утверждает редактор
   editHelp: [
     'Как поправить:',
-    '<code>2: друг позвонил поговорить</code> — новая строка 2 из твоих слов',
-    '<code>2: Друг — позвонил поговорить</code> — роль и текст',
+    '<code>2: вечером я позвонила другу</code> — новая строка 2 из твоих слов',
+    '<code>2: Вечером — я позвонила другу</code> — роль и текст',
     '<code>-3</code> — убрать строку 3',
-    '<code>+ Окно — долгий вечер</code> — добавить строку',
+    '<code>+ Ночью — я смотрела в окно</code> — добавить строку',
+    'Строка — простая фраза о себе: «я…» или «мы…», без «не», «что», кавычек и вопросов.',
     '<code>название: Письмо, которое ушло</code>',
     '<code>жанр: тихая драма</code>',
-    '<code>после: Посуда — до завтра.</code> или <code>после: -</code>',
+    '<code>после: Я оставила посуду до завтра.</code> или <code>после: -</code>',
   ].join('\n'),
   noDraft: 'Сначала расскажи о дне: голосом или текстом.',
   fit: 'Хорошо. Ролик можно сохранить или переслать. На сегодня достаточно.',
@@ -135,7 +136,11 @@ export function parseEdit(text) {
 /** Строка из правки человека: цитата — его роль и текст в том порядке, как editCorpus добавляет их в опору. */
 function ownRow(role, value) {
   // Без обрезки: длинную роль или текст покажет проверка черновика понятной ошибкой длины.
-  return { role, value, source: `${role} ${value}` };
+  // Белый список формы фразы (решение 11.11): опорой становится только простое утверждение от первого лица.
+  // Иначе цитаты нет — проверка черновика покажет ошибку, ролик не соберётся; текст правки всё равно уходит
+  // в опору для проверки безопасности (editCorpus).
+  const text = `${role} ${value}`;
+  return { role, value, source: plainPhrase(text, text) ? text : '' };
 }
 
 /** Применить правку к эпизоду. Номера строк — как в сообщении с черновиком (без фиксированных строк). */
@@ -162,13 +167,15 @@ export function applyEdit(ep, cmd) {
         if (pair) { rows[idx] = { ...pair.row }; return null; }
       }
       rows[idx].value = cmd.value;
-      rows[idx].source = rows[idx].value; // слова самого человека; бот добавляет правку в опору (editCorpus)
+      rows[idx].source = ''; // не простое утверждение от первого лица — опоры нет, ролик не соберётся
       return null;
     case 'title': if (!cmd.value) return 'Название не может быть пустым.'; ep.title = cmd.value.slice(0, LIMITS.title); return null;
     case 'genre': if (!cmd.value) return 'Жанр не может быть пустым.'; ep.genre = cmd.value.slice(0, LIMITS.genre); return null;
     case 'lead': ep.lead = (cmd.value || 'ты').slice(0, 24); return null;
     case 'post':
-      ep.post = cmd.value === '-' || !cmd.value ? { text: '', source: '' } : { text: cmd.value.slice(0, LIMITS.post), source: cmd.value.slice(0, LIMITS.post) };
+      // сцена после титров — тоже только простое утверждение от первого лица (белый список); иначе опоры нет
+      ep.post = cmd.value === '-' || !cmd.value ? { text: '', source: '' }
+        : { text: cmd.value.slice(0, LIMITS.post), source: plainPhrase(cmd.value, cmd.value) ? cmd.value.slice(0, LIMITS.post) : '' };
       return null;
     default: return 'Не понял правку.';
   }
@@ -186,6 +193,10 @@ const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replac
 /** Ошибка проверки словами для человека: без «цитаты» и служебных терминов. */
 export function personMessage(e) {
   if (!e) return '';
+  if (/нет цитаты из рассказа/.test(e.msg || '') && /^rows\.\d+\.source$/.test(e.path || '')) {
+    const k = Number(e.path.split('.')[1]) + 1;
+    return `Строка ${k}: напиши её простой фразой о себе, например «${k}: Утром — я пила чай».`;
+  }
   if (!String(e.kind || '').startsWith('words:')) return e.msg;
   const n = e.row + 1;
   const redo = `Напиши её заново своими словами: «${n}: роль — текст».`;
@@ -671,8 +682,9 @@ export function createBot({
         // или лимита не пропускает текст мимо фильтра (разбор 940f41cc). Опора и контекст — только в памяти сессии;
         // текст правки не пишется ни в журнал, ни в метрики (там — только уровень и место).
         const own = editCorpus(cmd);
-        // Правка — отдельная фраза контекста: без точки она склеилась бы с соседним текстом в одну часть.
-        const ctx = own ? `${s.story}\n${/[.!?…]$/.test(own) ? own : `${own}.`}` : s.story;
+        // Правка — отдельная фраза контекста: без точки она склеилась бы с соседним текстом в одну часть; от рассказа она
+        // отделена EDIT_SEP (PR 13): признаки рассказа на неё не переходят, фильтр видит рассказ и правку вместе.
+        const ctx = own ? `${s.story}${EDIT_SEP}${/[.!?…]$/.test(own) ? own : `${own}.`}` : s.story;
         let concern = false;
         if (own) {
           const prevLevel = assessRisk(s.story).level;

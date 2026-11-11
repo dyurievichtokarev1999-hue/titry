@@ -167,18 +167,18 @@ test('бот: безобидная правка в рассказе с concern �
 test('бот: слова строки из правки — только из текста этой правки (дословность PR 13)', async () => {
   const b = botSetup();
   await b.say(SAFE);
-  await b.say('2: долго гуляла в парке');
+  await b.say('2: днём я гуляла в парке');
   const row = b.s().episode.rows[1];
-  const own = new Set(wordsOf('долго гуляла в парке'));
+  const own = new Set(wordsOf('днём я гуляла в парке'));
   for (const w of wordsOf(`${row.role} ${row.value}`)) assert.ok(own.has(w), `«${w}» из правки`);
-  assert.ok(rowWordsGrounded(row, 'долго гуляла в парке'));
+  assert.ok(rowWordsGrounded(row, 'днём я гуляла в парке'));
 });
 
 // На голове PR 13 225f6701 правка «N: текст» получала ⚠ «стоит с другим служебным словом»; поправлено в 7595d8d9.
-test('бот: правка «2: долго гуляла в парке» к безопасному рассказу проходит проверку черновика', async () => {
+test('бот: правка «2: днём я гуляла в парке» к безопасному рассказу проходит проверку черновика', async () => {
   const b = botSetup();
   await b.say(SAFE);
-  await b.say('2: долго гуляла в парке');
+  await b.say('2: днём я гуляла в парке');
   assert.equal(b.s().validation.ok, true, JSON.stringify(b.s().validation.errors));
 });
 
@@ -348,11 +348,7 @@ test('разбор, важно: словарь не задевает бытов�
     'Конец урока, учитель отпустил нас раньше. Утром я пила чай. Вечером я пекла пирог.',
     'Телефон сдохнет к обеду, зарядку забыла. Утром я пила чай. Вечером я пекла пирог.',
     'Подруга пожалеет, что не пришла. Утром я пила чай. Вечером я пекла пирог.',
-  ]) {
-    const r = await manual(st);
-    assert.ok(r.episode, st); assert.ok(!r.insufficient, st);
-    assert.equal(validateSafeEpisode(r.episode, st).ok, true, st);
-  }
+  ]) await nothingExcluded(st);
   for (const t of ['Маме — достанется торт', 'Телефон — сдохнет к вечеру', 'Конец урока, учитель отпустил нас']) assert.equal(threatPhrase(t), false, t);
 });
 
