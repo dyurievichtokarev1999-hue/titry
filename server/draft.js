@@ -138,6 +138,7 @@ export function groundDraft(raw, story, { date = todayIso(), period = 'day' } = 
     else dropped.push(r);
   }
   const post = raw.post && raw.post.text && sourceFound(raw.post.source, story) && !threat(raw.post.text, raw.post.source)
+    && !threatPhrase(raw.post.text) && !pronounToThreat(raw.post.source)
     ? { text: raw.post.text, source: raw.post.source } : { text: '', source: '' };
   if (raw.post && raw.post.text && !post.text) dropped.push({ role: 'после титров', ...raw.post });
   const mood = Object.hasOwn(MOODS, raw.mood ?? '') ? raw.mood : 'quiet'; // пустой или неизвестный mood — нейтральный quiet
@@ -345,7 +346,7 @@ export function draftRuleBased(story, { date = todayIso(), period = 'day' } = {}
   const threats = threatSentences(story);
   // Решение владельца 11.11 12:05, п. 3: фраза, чьё местоимение указывает на человека из исключённой угрозы, тоже не берётся.
   const pronounToThreat = threatPronounFilter(story);
-  const parts = sentences(story).filter((s) => !touchesThreat(s, threats, story) && !pronounToThreat(s));
+  const parts = sentences(story).filter((s) => !touchesThreat(s, threats, story) && !threatPhrase(s) && !pronounToThreat(s));
   const last = parts[parts.length - 1] || '';
   const post = parts.length > 3 && last.length <= 72 ? { text: last, source: last.replace(/[.!?…]+$/, '') } : { text: '', source: '' };
   const pool = post.text ? parts.slice(0, -1) : parts;
