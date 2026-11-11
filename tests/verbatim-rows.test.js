@@ -120,7 +120,7 @@ test('черновик модели: строки со словами не из 
   const r2 = await makeDraft(STORY, { provider: 'claude', client: c2 });
   assert.equal(r2.provider, 'manual');
   // Слияние с PR 14 (решение владельца 11.11 12:05, п. 4): если и заготовка не собирает двух строк — нехватка без черновика.
-  assert.ok(r2.insufficient || r2.episode.rows.every(rowWordsGrounded));
+  assert.equal(r2.insufficient, true); assert.equal(r2.code, 'insufficient_material'); assert.equal(r2.episode, null);
   const d = await draftWithClaude(STORY, { client: c2, date: '2026-11-11' });
   assert.equal(d.episode.rows.length, 0);
 });
