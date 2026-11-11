@@ -114,3 +114,36 @@ export function holdServiceLock(stateDir, role) {
   releaseOnExit(release);
   return release;
 }
+
+/**
+ * ИР10-2: взаимоисключение команд организатора между собой. Один общий файл-замок run/organizer.mutex,
+ * создаётся атомарно (wx). Если он есть и его владелец жив — отказ (code 'busy_organizer'). Отметка умершего
+ * владельца (pid и время старта не совпадают с живым процессом) удаляется, попытка повторяется один раз.
+ * Возвращает release().
+ */
+export function acquireOrganizerMutex(stateDir, { pid = process.pid } = {}) {
+  fs.mkdirSync(runDir(stateDir), { recursive: true, mode: 0o700 });
+  const file = path.join(runDir(stateDir), 'organizer.mutex');
+  const start = startTime(pid);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let fd;
+    try { fd = fs.openSync(file, 'wx', 0o600); } catch (e) {
+      if (e?.code !== 'EEXIST') throw e;
+      const mark = readMark(file);
+      if (mark === null) continue; // владелец только что снял замок
+      if (Number.isNaN(mark) || pidAlive(mark.pid, mark.start)) throw lockError('busy_organizer');
+      try { fs.rmSync(file, { force: true }); } catch { throw lockError('busy_organizer'); }
+      continue;
+    }
+    try { fs.writeSync(fd, start === null ? `${pid}\n` : `${pid} ${start}\n`); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    let held = true;
+    return () => {
+      if (!held) return;
+      held = false;
+      // Снимаем только свой замок (после аварии и повторного захвата другим процессом файл уже чужой).
+      const mark = readMark(file);
+      if (mark && !Number.isNaN(mark) && mark.pid === pid) { try { fs.rmSync(file, { force: true }); } catch { /* распознается по pid */ } }
+    };
+  }
+  throw lockError('busy_organizer');
+}

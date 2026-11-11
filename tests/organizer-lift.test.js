@@ -17,7 +17,8 @@ const VER = 'v-organizer-test';
 const env = { TITRY_BLOCKED_HMAC_KEY: KEY, TITRY_BLOCKED_KEY_VERSION: VER };
 const STORY = JSON.parse(await fs.readFile(path.join(repo, 'examples', 'day-quiet.json'), 'utf8')).story;
 const OTHER = 'Вымышленный день: утром дождь, днём библиотека, вечером чай.';
-const RETRY_AT = '2026-11-11T10:15:00.000Z';
+// Срок паузы в прошлом: снятие разрешено (ИР10-1 — ранние попытки проверяются отдельным тестом на подставных часах).
+const RETRY_AT = '2026-11-01T10:15:00.000Z';
 
 // Копия приложения во временном корне: server/, scripts/, engine/ копируются (иначе Node взял бы data/ репозитория).
 async function makeRoot() {
@@ -368,4 +369,66 @@ test('в выводе команды нет отпечатков, области
       assert.match(out, /^lift_technical: (ok|not_found|safety_kept|service_running|ledger_error|story_file_error|usage)\n$/);
     }
   } finally { sleeper.kill('SIGKILL'); await fs.rm(r.root, { recursive: true, force: true }); }
+});
+
+// ИР10-1 (критик реализации 11.11, принято Claude 05:05): не раньше retry_not_before_at; подставные часы.
+test('ИР10-1: до срока — too_early и хранилище побайтно не меняется; на границе и после — ok; неразборчивый срок — too_early', async () => {
+  const { liftTechnical } = await import('../scripts/organizer.js');
+  const ex = JSON.parse(await fs.readFile(path.join(repo, 'examples', 'day-quiet.json'), 'utf8'));
+  const at = Date.parse('2026-11-11T12:15:00.000Z');
+  for (const [now, expect] of [[at - 1, 'too_early'], [at - 899_998, 'too_early'], [at, 'ok'], [at + 60_000, 'ok']]) {
+    const r = await makeRoot();
+    try {
+      const l = ledgerAt(r.ledgerFile); await l.load();
+      await l.put({ scope: 'studio', story: ex.story, kind: 'technical', reason: 'check_incomplete_twice', retryNotBeforeAt: new Date(at).toISOString() });
+      await l.put({ scope: 'studio', story: 'другой вымышленный рассказ', kind: 'safety', reason: 'safety' });
+      assert.equal(await l.flush(), true);
+      const before = await fs.readFile(r.ledgerFile);
+      const code = await liftTechnical({ area: 'studio', story: ex.story, root: r.root, env, wallNow: () => now });
+      assert.equal(code, expect, String(now - at));
+      const after = ledgerAt(r.ledgerFile); await after.load();
+      if (expect === 'too_early') assert.deepEqual(await fs.readFile(r.ledgerFile), before, 'хранилище не изменено');
+      assert.equal(after.lookup('studio', ex.story).kind, expect === 'ok' ? null : 'technical');
+      assert.equal(after.lookup('studio', 'другой вымышленный рассказ').kind, 'safety', 'safety не тронута');
+    } finally { await fs.rm(r.root, { recursive: true, force: true }); }
+  }
+});
+
+// ИР10-2: две команды организатора не работают одновременно.
+test('ИР10-2: второй организатор при живом первом — organizer_running; после — входит; брошенный замок умершего не мешает; сервис ↔ команда по-прежнему', async () => {
+  const { acquireOrganizerMutex } = await import('../server/service-lock.js');
+  const { liftTechnical } = await import('../scripts/organizer.js');
+  const r = await makeRoot();
+  const stateDir = path.join(r.root, 'data', 'state');
+  try {
+    const ex = JSON.parse(await fs.readFile(r.storyFile, 'utf8'));
+    await seed(r.ledgerFile, [{ kind: 'technical', scope: 'studio', story: ex.story }, { kind: 'technical', scope: 'chat:42', story: ex.story }]);
+    // Первый организатор — отдельный живой процесс, держит замок.
+    const holder = spawn(process.execPath, ['-e', `import(${JSON.stringify(path.join(r.root, 'server', 'service-lock.js'))}).then((m) => { m.acquireOrganizerMutex(${JSON.stringify(stateDir)}); console.log('held'); setInterval(() => {}, 1000); })`], { stdio: ['ignore', 'pipe', 'ignore'] });
+    await new Promise((res) => holder.stdout.once('data', res));
+    assert.equal(await liftTechnical({ area: 'studio', story: ex.story, root: r.root, env }), 'organizer_running');
+    const l1 = ledgerAt(r.ledgerFile); await l1.load();
+    assert.equal(l1.lookup('studio', ex.story).kind, 'technical', 'хранилище не изменено');
+    holder.kill('SIGKILL'); await new Promise((res) => holder.once('exit', res));
+    // Замок умершего процесса остался на диске — не мешает.
+    assert.ok((await fs.readdir(path.join(stateDir, 'run'))).includes('organizer.mutex'));
+    assert.equal(await liftTechnical({ area: 'studio', story: ex.story, root: r.root, env }), 'ok');
+    // Две разные technical-записи снимаются по очереди и не теряют друг друга.
+    assert.equal(await liftTechnical({ area: 'chat:42', story: ex.story, root: r.root, env }), 'ok');
+    const l2 = ledgerAt(r.ledgerFile); await l2.load();
+    assert.equal(l2.lookup('studio', ex.story).kind, null); assert.equal(l2.lookup('chat:42', ex.story).kind, null);
+    assert.deepEqual(await fs.readdir(path.join(stateDir, 'run')), [], 'замок и отметки сняты');
+    // Одновременный старт: из двух захватов в одном процессе второй отказывает.
+    const rel = acquireOrganizerMutex(stateDir);
+    assert.throws(() => acquireOrganizerMutex(stateDir, { pid: process.pid + 1 }), { code: 'busy_organizer' });
+    rel();
+    // Сервис ↔ команда: живая отметка бота — по-прежнему service_running.
+    const sleeper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    try {
+      await seed(r.ledgerFile, [{ kind: 'technical', scope: 'studio', story: 'ещё один вымышленный рассказ' }]);
+      const stop = acquireLock(stateDir, 'bot', ['organizer'], { pid: sleeper.pid });
+      assert.equal(await liftTechnical({ area: 'studio', story: 'ещё один вымышленный рассказ', root: r.root, env }), 'service_running');
+      stop();
+    } finally { sleeper.kill('SIGKILL'); }
+  } finally { await fs.rm(r.root, { recursive: true, force: true }); }
 });

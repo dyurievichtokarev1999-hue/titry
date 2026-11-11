@@ -16,11 +16,11 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeLedger, KEY_ENV, KEY_VERSION_ENV } from '../server/ledger.js';
-import { acquireLock, releaseOnExit, ORGANIZER_ROLE, SERVICE_ROLES } from '../server/service-lock.js';
+import { acquireLock, acquireOrganizerMutex, releaseOnExit, ORGANIZER_ROLE, SERVICE_ROLES } from '../server/service-lock.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-export const EXIT = { ok: 0, not_found: 1, safety_kept: 2, service_running: 3, ledger_error: 4, story_file_error: 5, write_unconfirmed: 6, lock_error: 7, usage: 64 };
+export const EXIT = { ok: 0, not_found: 1, safety_kept: 2, service_running: 3, ledger_error: 4, story_file_error: 5, write_unconfirmed: 6, lock_error: 7, too_early: 8, organizer_running: 9, usage: 64 };
 
 const HINT = {
   not_found: 'Технической паузы для этого рассказа в этой области нет. Хранилище не изменено.',
@@ -30,6 +30,8 @@ const HINT = {
   write_unconfirmed: 'Запись хранилища не подтверждена: состояние неизвестно. Не запускайте монтажную и бота, сохраните копию каталога хранилища и обратитесь к владельцу кода.',
   lock_error: 'Не удалось поставить отметку команды (права на каталог хранилища). Хранилище не изменено.',
   story_file_error: 'Не удалось прочитать рассказ: нужен локальный файл с текстом или файл .json с полем "story".',
+  too_early: 'Техническую паузу можно снять не раньше чем через 15 минут после её начала. Хранилище не изменено.',
+  organizer_running: 'Уже работает другая команда организатора. Дождитесь её завершения и повторите. Хранилище не изменено.',
   usage: 'Использование: node scripts/organizer.js lift-technical --area studio|chat:<id> --story-file <файл>',
 };
 
@@ -64,10 +66,18 @@ async function readStory(file) {
  * Снять техническую паузу. Возвращает код события (ключ EXIT). Ничего не печатает.
  * root — корень приложения (каталог с data/); env — переменные окружения (ключ хранилища).
  */
-export async function liftTechnical({ area, story, root = ROOT, env = process.env }) {
+export async function liftTechnical({ area, story, root = ROOT, env = process.env, wallNow = Date.now }) {
   const stateDir = path.join(root, 'data', 'state');
+  // ИР10-2: сначала общий замок команд организатора (две команды одновременно не работают), затем отметка
+  // против запущенных сервисов.
+  let releaseMutex;
+  try { releaseMutex = acquireOrganizerMutex(stateDir); } catch (e) {
+    return e?.code === 'busy_organizer' ? 'organizer_running' : 'lock_error';
+  }
+  releaseOnExit(releaseMutex);
   let release;
   try { release = acquireLock(stateDir, ORGANIZER_ROLE, SERVICE_ROLES); } catch (e) {
+    releaseMutex();
     return e?.code === 'busy' ? 'service_running' : 'lock_error';
   }
   // Снять отметку и при аварийном выходе или сигнале (обработчик exit срабатывает и при process.exit).
@@ -84,11 +94,15 @@ export async function liftTechnical({ area, story, root = ROOT, env = process.en
     if (found.failed) return 'ledger_error';
     if (found.kind === 'safety') return 'safety_kept';
     if (found.kind !== 'technical') return 'not_found';
+    // ИР10-1: не раньше retry_not_before_at (15 минут — нижняя граница ручного повтора, не TTL). Неразборчивое
+    // время — тоже «ещё рано»: лучше отказать, чем снять паузу досрочно. Хранилище при этом не меняется.
+    const notBefore = Date.parse(found.retryNotBeforeAt);
+    if (!Number.isFinite(notBefore) || wallNow() < notBefore) return 'too_early';
     // Сбой записи после начала изменения — состояние файла не подтверждено (не «не изменено»).
     try { await ledger.clearTechnical(area, story); } catch { return 'write_unconfirmed'; }
     if (!(await ledger.flush())) return 'write_unconfirmed';
     return 'ok';
-  } finally { release(); }
+  } finally { release(); releaseMutex(); }
 }
 
 export async function main(argv = process.argv.slice(2), { out = console.log, err = console.error, root = ROOT, env = process.env } = {}) {
