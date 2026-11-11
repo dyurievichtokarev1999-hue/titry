@@ -7,8 +7,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { makeDraft, draftRuleBased } from '../server/draft.js';
-import { insufficientAfterExclusion, INSUFFICIENT_AFTER_EXCLUSION, validateSafeEpisode, assessRisk, helpMessage } from '../server/safety.js';
-import { createBot, TEXT } from '../server/bot.js';
+import { insufficientAfterExclusion, INSUFFICIENT_AFTER_EXCLUSION, validateSafeEpisode, assessRisk, helpMessage, loadHelp } from '../server/safety.js';
+import { createBot, TEXT, insufficientMessage, TELEGRAM_TEXT_LIMIT } from '../server/bot.js';
 import { createApp, INSUFFICIENT_TEXT } from '../server/app.js';
 import { LIMITS } from '../engine/episode.js';
 
@@ -179,13 +179,15 @@ function botSetup({ check = () => false, hasKey, draft = manual } = {}) {
 
 // Решение владельца 1 (PR 11): после исключения фрагмента уровня concern — реплика и сразу за ней тот же блок помощи,
 // что у прежней карточки concern; если исключались только фрагменты без concern — одна реплика.
-test('бот: нехватка после concern → реплика, сразу за ней блок помощи concern; без кнопок и черновика; метрика — только код', async () => {
+// Решение владельца 11.11 09:05: в Telegram — ОДНО сообщение «реплика, пустая строка, блок помощи».
+test('бот: нехватка после concern → ровно одна отправка: реплика, пустая строка, блок помощи; метрика — только код', async () => {
   assert.equal(TEXT.insufficient, REPLY);
   for (const id of CONCERN) {
     const b = botSetup();
     await b.say(byId[id]);
     const after = b.sent.slice(b.texts().indexOf(TEXT.working) + 1);
-    assert.deepEqual(after.map((m) => m.text), [REPLY, helpMessage('concern')], id);
+    assert.equal(after.length, 1, `${id}: ровно один вызов отправки`);
+    assert.equal(after[0].text, `${REPLY}\n\n${helpMessage('concern')}`, `${id}: порядок «реплика → блок», без переходной фразы`);
     for (const m of after) assert.equal(m.extra.reply_markup, undefined, `${id}: без кнопок`);
     assert.doesNotMatch(b.texts().join('\n'), /Сейчас важнее не титры/, `${id}: не карточка urgent`);
     assert.deepEqual(b.events, [{ event: 'insufficient_after_exclusion' }], `${id}: метрика без текста и номеров`);
@@ -194,6 +196,16 @@ test('бот: нехватка после concern → реплика, сразу
     assert.equal(b.counters.render, 0); assert.equal(b.counters.video, 0);
     assert.equal(b.bot.sessions.get(chat.id).episode, null);
   }
+});
+
+test('бот: сообщение нехватки с блоком помощи помещается в одно сообщение Telegram (4096), в том числе если все контакты help.json станут проверенными', async () => {
+  assert.equal(TELEGRAM_TEXT_LIMIT, 4096);
+  const help = loadHelp();
+  assert.ok(insufficientMessage(true, help).length < TELEGRAM_TEXT_LIMIT);
+  const cfg = JSON.parse(await fs.readFile(new URL('../config/help.json', import.meta.url), 'utf8'));
+  const all = { region: cfg.region, contacts: [cfg.emergency, ...(cfg.contacts || [])].map((c) => ({ ...c, phone: c.phone || '8-800-000-00-00' })) };
+  assert.ok(insufficientMessage(true, all).length < TELEGRAM_TEXT_LIMIT);
+  assert.equal(insufficientMessage(false), REPLY);
 });
 
 test('бот: нехватка без concern → ровно одна реплика, без блока помощи', async () => {

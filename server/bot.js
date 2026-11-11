@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS, episodeToText } from '../engine/episode.js';
 import { makeDraft, modelSafetyCheck, hasClaudeCredentials } from './draft.js';
 import { makeGate } from './gate.js';
-import { helpMessage, assessEpisodeRisk, validateSafeEpisode } from './safety.js';
+import { helpMessage, loadHelp, assessEpisodeRisk, validateSafeEpisode } from './safety.js';
 import { renderEpisode, ROOT } from './render.js';
 import { logError, safeCode } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS, cleanupVoiceOrphans } from './stt.js';
@@ -71,6 +71,12 @@ export const TEXT = {
   // без черновика, ролика, просьбы дописать и кнопок. Показывается только после stop и технических исходов.
   insufficient: 'Не получилось собрать титры только из твоих слов. Сегодня можно без ролика.',
 };
+
+/** Ответ при нехватке материала: реплика; при concern — одним сообщением с блоком помощи сразу после пустой строки. */
+export function insufficientMessage(concern, help = loadHelp()) {
+  return concern ? `${TEXT.insufficient}\n\n${helpMessage('concern', help)}` : TEXT.insufficient;
+}
+export const TELEGRAM_TEXT_LIMIT = 4096;
 
 // ── Чистые функции: разбор правок ────────────────────────────────────────────
 
@@ -440,8 +446,9 @@ export function createBot({
   // В метрики — только код события, без текста рассказа и номеров предложений.
   // Решение владельца 1 (PR 11): если исключался фрагмент уровня concern, сразу за репликой — тот же блок помощи,
   // что у прежней карточки concern (helpMessage('concern')), без переходной фразы, черновика и кнопок.
-  // Признак concern — уровень всего рассказа, как у прежней карточки. Между двумя сообщениями нет проверки current():
-  // блок помощи после реплики уходит всегда, даже если /delete пришёл между ними (помощь не скрывается).
+  // Признак concern — уровень всего рассказа, как у прежней карточки. Решение владельца 11.11 09:05: ОДНО сообщение
+  // «реплика, пустая строка, блок помощи» — между двумя сообщениями блок помощи мог бы потеряться. Длина
+  // (реплика + helpMessage('concern')) меньше лимита Telegram 4096; проверяется тестом, молча не делится.
   async function replyInsufficient(chatId, s, story, gen, current, concern) {
     if (!current()) return;
     const g = await track(chatId, gate.verify(s.scope, story, null, story));
@@ -456,8 +463,7 @@ export function createBot({
     s.stage = 'idle'; // черновика нет: правки и кнопки не к чему применять
     await metrics.log(chatId, 'insufficient_after_exclusion');
     if (!current()) return;
-    await tg.send(chatId, TEXT.insufficient);
-    if (concern) await tg.send(chatId, helpMessage('concern'));
+    return tg.send(chatId, insufficientMessage(concern));
   }
 
   async function doRender(chatId, s) {
