@@ -465,7 +465,7 @@ export function createBot({
     if (waiting >= 1 + MAX_RENDER_WAITING) { s.stage = 'draft'; return tg.send(chatId, TEXT.busy); }
     const ahead = waiting;
     waiting++;
-    const out = path.join(ROOT, 'data', 'tmp', `${metrics.hash(chatId)}-${Date.now()}.mp4`);
+    const out = path.join(botTmpDir(), `${metrics.hash(chatId)}-${Date.now()}.mp4`);
     const STALE = Symbol('stale');
     let job;
     try {
@@ -640,7 +640,12 @@ export function telegram(token) {
  * по рассказу. Вызывается до приёма задач, поэтому все такие файлы старше запуска. Каталог-ссылка или не каталог —
  * ошибка (запуск останавливается); ссылки внутри удаляются как ссылки, цели не трогаются; подкаталоги не трогаются.
  */
-export async function purgeBotTmp(dir = path.join(ROOT, 'data', 'tmp')) {
+// Каталог роликов бота: data/tmp рабочей копии или TITRY_BOT_TMP_DIR (тесты указывают временный каталог,
+// чтобы не трогать ролики работающего бота).
+export const botTmpDir = () => process.env.TITRY_BOT_TMP_DIR || path.join(ROOT, 'data', 'tmp');
+// Требование: один процесс бота на рабочую копию (два процесса и так конфликтуют в getUpdates). Второй процесс
+// при запуске удалил бы ролики первого, которые ещё рендерятся или отправляются.
+export async function purgeBotTmp(dir = botTmpDir()) {
   let st;
   try { st = await fs.lstat(dir); } catch (e) { if (e.code === 'ENOENT') return 0; throw e; }
   if (st.isSymbolicLink()) throw Object.assign(new Error('data/tmp — ссылка'), { code: 'EACCES' });
@@ -655,14 +660,15 @@ export async function purgeBotTmp(dir = path.join(ROOT, 'data', 'tmp')) {
 }
 
 export async function prepareBot({ cleanup = cleanupVoiceOrphans, cleanupTmp = purgeBotTmp, ledger, env = process.env, log = console.error } = {}) {
-  if (!env.METRICS_SALT || String(env.METRICS_SALT).length < METRICS_SALT_MIN) {
+  if (!env.METRICS_SALT || String(env.METRICS_SALT).trim().length < METRICS_SALT_MIN) {
     logError('metrics.salt', { code: 'metrics_salt' });
     throw Object.assign(new Error('startup'), { code: 'metrics_salt', stage: 'metrics.salt' });
   }
   try { await cleanup(); } catch (e) { logError('voice.cleanup', e); throw Object.assign(new Error('startup'), { code: safeCode(e), stage: 'voice.cleanup' }); }
   try {
     const removed = await cleanupTmp();
-    if (removed) log(JSON.stringify({ stage: 'tmp.cleanup', removed })); // только код этапа и число, без путей и имён
+    // Только этап и число, без путей и имён; формат строки — как у журнала ошибок.
+    if (removed) log(JSON.stringify({ at: new Date().toISOString(), level: 'info', stage: 'tmp.cleanup', removed }));
   } catch (e) { logError('tmp.cleanup', e); throw Object.assign(new Error('startup'), { code: safeCode(e), stage: 'tmp.cleanup' }); }
   const l = ledger || makeLedger({ file: path.join(ROOT, 'data', 'state', 'blocked-v1.json'), key: process.env[KEY_ENV], keyVersion: process.env[KEY_VERSION_ENV] || 'v1' });
   try { await l.load(); } catch (e) { logError('ledger.load', e); throw Object.assign(new Error('startup'), { code: 'ledger', stage: 'ledger.load' }); }

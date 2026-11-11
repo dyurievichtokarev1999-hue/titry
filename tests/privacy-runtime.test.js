@@ -210,7 +210,7 @@ globalThis.fetch = async (url) => {
 };`);
     const run = (env) => new Promise((resolve) => {
       const p = spawn(process.execPath, ['--import', preload, new URL('../server/bot.js', import.meta.url).pathname], {
-        env: { ...process.env, TELEGRAM_BOT_TOKEN: 'test-only', TITRY_RUNTIME_DIR: rt, TITRY_BLOCKED_HMAC_KEY: 'test-only-key-not-a-secret', TITRY_BLOCKED_KEY_VERSION: 'v-entry-test', METRICS_SALT: 'test-only-salt-not-a-secret', ...env },
+        env: { ...process.env, TELEGRAM_BOT_TOKEN: 'test-only', TITRY_RUNTIME_DIR: rt, TITRY_BLOCKED_HMAC_KEY: 'test-only-key-not-a-secret', TITRY_BLOCKED_KEY_VERSION: 'v-entry-test', METRICS_SALT: 'test-only-salt-not-a-secret', TITRY_BOT_TMP_DIR: path.join(rt, 'bot-tmp'), ...env },
         cwd: dir, stdio: ['ignore', 'pipe', 'pipe'],
       });
       let err = '';

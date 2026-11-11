@@ -71,7 +71,9 @@ test('purgeBotTmp: data/tmp — ссылка или файл — ошибка, �
 test('prepareBot: в журнал очистки — только этап и число, без путей и имён файлов', async () => {
   const lines = [];
   await prepareBot({ env: { METRICS_SALT: SALT }, cleanupTmp: async () => 2, cleanup: async () => 0, ledger: okLedger, log: (l) => lines.push(l) });
-  assert.deepEqual(lines.map((l) => JSON.parse(l)), [{ stage: 'tmp.cleanup', removed: 2 }]);
+  const rows = lines.map((l) => JSON.parse(l));
+  assert.deepEqual(rows.map(({ stage, removed, level }) => ({ stage, removed, level })), [{ stage: 'tmp.cleanup', removed: 2, level: 'info' }]);
+  assert.deepEqual(Object.keys(rows[0]).sort(), ['at', 'level', 'removed', 'stage']);
 });
 
 test('бот без METRICS_SALT: процесс завершается с кодом 3 до обращения к Telegram', { timeout: 30000 }, async () => {
@@ -88,4 +90,26 @@ test('бот без METRICS_SALT: процесс завершается с ко�
   assert.equal(r.code, 3);
   assert.match(r.err, /"stage":"metrics\.salt","code":"metrics_salt"/);
   assert.doesNotMatch(r.out, /запущен/);
+});
+
+test('замечания разбора: граница 15/16 знаков, соль из пробелов, порядок очисток, похожие имена не удаляются', async () => {
+  const ok = async (salt) => prepareBot({ env: { METRICS_SALT: salt }, cleanupTmp: async () => 0, cleanup: async () => 0, ledger: okLedger, log: () => {} });
+  await assert.rejects(ok('a'.repeat(15)), { code: 'metrics_salt' });
+  await assert.rejects(ok(' '.repeat(20)), { code: 'metrics_salt' });
+  assert.equal(await ok('a'.repeat(16)), okLedger);
+  let tmpTouched = false;
+  await assert.rejects(prepareBot({ env: { METRICS_SALT: SALT }, cleanup: async () => { throw Object.assign(new Error('x'), { code: 'EACCES' }); }, cleanupTmp: async () => { tmpTouched = true; return 0; }, ledger: okLedger }), { stage: 'voice.cleanup' });
+  assert.equal(tmpTouched, false, 'при сбое очистки голосовых data/tmp не трогается');
+  await withDir(async (d) => {
+    for (const n of ['a.MP4', 'b.mp4.part', 'c.mp4x', 'keep.txt']) await fs.writeFile(path.join(d, n), 'x');
+    assert.equal(await purgeBotTmp(d), 0);
+    assert.equal((await fs.readdir(d)).length, 4);
+  });
+  const prev = { s: process.env.METRICS_SALT, d: process.env.TITRY_DEV_METRICS };
+  try {
+    process.env.TITRY_DEV_METRICS = '1';
+    assert.equal(makeMetrics('/x', SALT).hash(7), makeMetrics('/y', SALT).hash(7), 'явная соль флагом разработки не подменяется');
+  } finally {
+    if (prev.d === undefined) delete process.env.TITRY_DEV_METRICS; else process.env.TITRY_DEV_METRICS = prev.d;
+  }
 });
