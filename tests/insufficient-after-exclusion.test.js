@@ -538,11 +538,12 @@ test('монтажная: вкладка A ещё пишет черновик (�
   const draft = (story, o) => (++n === 1
     ? new Promise((r) => { finishA = () => r({ risk: { level: 'urgent', byModel: true, matches: [] }, episode: null, provider: 'claude' }); })
     : manual(story, o));
-  await withApp({ draft }, async ({ post }) => {
+  await withApp({ draft }, async ({ post, counters }) => {
     const a = post('/api/draft', { story: byId.OI10 });
     while (!finishA) await new Promise((r) => setTimeout(r, 5));
     const b = post('/api/draft', { story: byId.OI10 });
-    await new Promise((r) => setTimeout(r, 30)); // B уже получила «безопасно» от проверки и ждёт черновик A
+    while (counters.check < 1) await new Promise((r) => setTimeout(r, 5)); // B дошла до проверки
+    await new Promise((r) => setTimeout(r, 20)); // и получила «безопасно», ждёт черновик A
     finishA();
     const [ra, rb] = await Promise.all([a, b]);
     assert.equal(ra.body.kind, 'safety');
@@ -560,8 +561,26 @@ test('бот: тот же рассказ дважды, первый чернов
   const p1 = b.say(byId.OI10);
   while (!finish) await tick();
   const p2 = b.say(byId.OI10);
-  for (let i = 0; i < 10; i++) await tick();
+  while (b.counters.check < 1) await tick(); // вторая отправка дошла до отдельной проверки и ждёт черновик первой
+  for (let i = 0; i < 5; i++) await tick();
   finish(); await p1; await p2; await tick();
   assert.ok(!b.texts().some((t) => t.startsWith(REPLY)), JSON.stringify(b.texts()));
   assert.equal(b.texts().filter((t) => /Сейчас важнее не титры/.test(t)).length, 1, JSON.stringify(b.texts()));
+});
+
+test('бот и монтажная: сосед завис дольше предела → «проверка недоступна» (check_pending), а не реплика', async () => {
+  const { makeGate } = await import('../server/gate.js');
+  let n = 0;
+  const check = () => (++n === 1 ? new Promise(() => {}) : false); // первая проверка никогда не отвечает
+  // Бот: свой gate с коротким пределом.
+  const sent = [];
+  const tg = { send: async (c, text) => { sent.push(text); }, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''), sendVideo: async () => {} };
+  const metrics = { hash: () => 'f', log: async () => {}, forget: async () => {} };
+  const gate = makeGate({ check, neighborWaitMs: 30 });
+  const bot = createBot({ tg, metrics, draft: manual, gate, safetyCheck: check });
+  const other = { chat, text: byId.OI10 };
+  gate.verify(`chat:${chat.id}`, byId.OI10, null, byId.OI10); // зависшая проверка того же рассказа
+  await bot.handleUpdate({ message: other });
+  assert.equal(sent.at(-1), TEXT.checkUnavailable);
+  assert.ok(!sent.some((t) => t.startsWith(REPLY)));
 });

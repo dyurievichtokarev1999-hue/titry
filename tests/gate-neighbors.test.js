@@ -94,3 +94,27 @@ test('рендер (verify без includeDrafts) черновик соседа �
   assert.equal((await gate.verify('x', S, null, S)).ok, true);
   d.resolve({ episode: {}, risk: { level: 'none' } });
 });
+
+test('решение открыто с входа в verify: пока первая проверка ждёт хранилище, вторая «безопасно» её ждёт', async () => {
+  const flush = deferred(); let flushes = 0;
+  const ledger = { lookup: () => ({}), flush: () => (++flushes === 1 ? flush.promise : Promise.resolve(true)), put: async () => {} };
+  const gate = makeGate({ check: async (text) => text === 'первая', ledger }); // первая — «опасно», вторая — «безопасно»
+  const first = gate.verify('x', S, null, 'первая'); // висит на ledgerOk до проверки модели
+  await tick();
+  let secondDone = false;
+  const second = gate.verify('x', S, null, 'вторая').then((r) => { secondDone = true; return r; });
+  for (let i = 0; i < 5; i++) await tick();
+  assert.equal(secondDone, false, 'вторая ждёт решения первой, хотя та ещё не дошла до модели');
+  flush.resolve(true);
+  const [a, b] = await Promise.all([first, second]);
+  assert.equal(a.kind, 'safety');
+  assert.equal(b.kind, 'safety', JSON.stringify(b));
+});
+
+test('holdDraft: остановку ставит только urgent; черновик без эпизода с concern — нет', async () => {
+  const gate = makeGate({ check: async () => false });
+  await gate.holdDraft('x', S, Promise.resolve({ episode: null, risk: { level: 'concern' } }));
+  assert.equal(gate.status('x', S).kind, null);
+  await gate.holdDraft('x', S, Promise.resolve({ episode: null, risk: { level: 'urgent' } }));
+  assert.equal(gate.status('x', S).kind, 'safety');
+});

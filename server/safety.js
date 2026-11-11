@@ -481,7 +481,7 @@ export function loadHelp(file = HELP_FILE) {
   const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
   // Только явно подтверждённые контакты: verified строго true («"false"», «"no"» не проходят).
   const contacts = [cfg.emergency, ...(Array.isArray(cfg.contacts) ? cfg.contacts : [])].filter((c) => c && c.verified === true && c.phone);
-  return { region: cfg.region, contacts };
+  return { region: typeof cfg.region === 'string' ? cfg.region.trim().toUpperCase() : cfg.region, contacts };
 }
 
 // Контакты помощи в памяти процесса (решение владельца по PR 11, 11.11 11:05): файл читается и проверяется

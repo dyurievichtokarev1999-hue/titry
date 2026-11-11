@@ -158,7 +158,8 @@ export function makeGate({ check, hasKey = () => true, monoNow = monotonic, wall
     const a = area(scope);
     const slot = reserve(a, storyDigest(story), 'draft');
     return Promise.resolve(promise).then((r) => {
-      if (r && !r.unavailable && !r.insufficient && !r.episode) markSafety(scope, story);
+      // Остановка — только явный urgent (как в монтажной); иной исход без эпизода сюда не записывается.
+      if (r && !r.unavailable && !r.insufficient && !r.episode && r.risk && r.risk.level === 'urgent') markSafety(scope, story);
       return r;
     }).finally(() => slot.close());
   }
