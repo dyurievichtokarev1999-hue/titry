@@ -132,7 +132,7 @@ export function groundDraft(raw, story, { date = todayIso(), period = 'day' } = 
   const threat = (...xs) => xs.some((x) => touchesThreat(x, threats, story));
   for (const r of raw.rows || []) {
     // Слова роли и значения — только из цитаты этой строки, признаки («не», «бы», «если»…) не оторваны.
-    if (sourceFound(r.source, story) && rowWordsGrounded(r) && !threat(r.role, r.value, r.source)) rows.push({ role: r.role, value: r.value, source: r.source });
+    if (sourceFound(r.source, story) && rowWordsGrounded(r, story) && !threat(r.role, r.value, r.source)) rows.push({ role: r.role, value: r.value, source: r.source });
     else dropped.push(r);
   }
   const post = raw.post && raw.post.text && sourceFound(raw.post.source, story) && !threat(raw.post.text, raw.post.source)
@@ -223,10 +223,12 @@ const MOOD_WORDS = [
 const NOT_ROLE = new Set(`я ты он она оно мы вы они меня мне мной тебя тебе тобой его ему им ее ей ей нас нам вас вам их
 мой моя мое мои твой твоя твое твои наш наша наше наши свой своя свое свои себя себе собой сам сама само сами
 это этот эта эти этого этой этому этим этом тот та то те того той тому тем том там тут здесь вот весь вся все всё всего всех что кто как где когда куда зачем почему
-и а но да или либо же ли то тоже также ведь вот лишь только даже ну уж потом затем и
+и а но да или либо же ли то тоже также ведь вот лишь только даже ну уж потом затем и вряд ли бы б нет
 в во на с со к ко по за у о об обо от до из изо без для про над под при через между перед около после вместо кроме среди вокруг
 был была было были быть есть буду будет стал стала стало стали`.split(/\s+/).map((w) => w.replace(/ё/g, 'е')));
 
+/** Слова, которые не остаются на краю значения. */
+const EDGE_WORDS = new Set(['я', 'и', 'а', 'но', 'или', 'да']);
 /** Предлоги: берутся в роль вместе со следующим словом («На работе»). */
 const PREPOSITIONS = new Set(['в', 'во', 'на', 'с', 'со', 'к', 'ко', 'по', 'за', 'у', 'о', 'об', 'от', 'до', 'из', 'без', 'для', 'про', 'над', 'под', 'при', 'через', 'после', 'перед', 'вместо', 'кроме', 'среди', 'вокруг']);
 /** Похоже на глагол: прошедшее время или инфинитив. Только для порядка выбора роли, не для проверки. */
@@ -244,7 +246,7 @@ const trimEdge = (s) => s.replace(/^[\s,;:—–-]+|[\s,;:—–.!?…-]+$/g, ''
  * Пара «роль — значение» из одной фразы: роль — первое пригодное слово, значение — остальные слова.
  * Пара берётся, только если проходит правило слов строки (rowWordsGrounded); иначе null.
  */
-export function pairFromSentence(sentence, usedRoles = new Set()) {
+export function pairFromSentence(sentence, usedRoles = new Set(), story = sentence) {
   const source = trimEdge(String(sentence || '').replace(/[.!?…]+$/, ''));
   const raw = source.split(/\s+/).filter((t) => wordsOf(t).length);
   const one = (j) => (j >= 0 && j < raw.length && wordsOf(raw[j]).length === 1 ? wordsOf(raw[j])[0] : null);
@@ -265,16 +267,17 @@ export function pairFromSentence(sentence, usedRoles = new Set()) {
       // знак препинания после взятого в роль слова остаётся в значении: «опоздал, ехал на такси»
       const tail = /[,;:]$/.exec(raw[i]);
       if (tail && from > 0 && i < raw.length - 1 && !/[,;:]$/.test(raw[from - 1])) rest[from - 1] = raw[from - 1] + tail[0];
-      let firstKept = from > 0; // значение начинается с первого слова фразы
-      while (rest.length && wordsOf(rest[0])[0] === 'я' && wordsOf(rest[0]).length === 1) { rest.shift(); firstKept = false; } // «я» в начале значения не нужно
-      let value = trimEdge(rest.join(' '));
+      // «я» в начале и висящие союзы по краям значения не нужны: «Папа — не мама позвонила», а не «…позвонила, а»
+      const edge = (t) => t && wordsOf(t).length === 1 && EDGE_WORDS.has(wordsOf(t)[0]);
+      while (rest.length && edge(rest[0])) rest.shift();
+      while (rest.length && edge(rest[rest.length - 1])) rest.pop();
+      // Форма и регистр — как набрал человек: значение не переводится в строчные (имена остаются с заглавной).
+      const value = trimEdge(rest.join(' '));
       if (!value) continue;
-      // заглавная буква в начале фразы — не часть слова (кроме сокращений вроде «МФЦ»): в середине строки она не нужна
-      if (firstKept && !(raw[0].length > 1 && raw[0] === raw[0].toUpperCase())) value = value.charAt(0).toLowerCase() + value.slice(1);
       const role = roleWord.charAt(0).toUpperCase() + roleWord.slice(1);
       if (role.length > LIMITS.role || value.length > LIMITS.value) continue;
       const row = { role, value, source };
-      if (rowWordsGrounded(row)) return { row, roleKey: w };
+      if (rowWordsGrounded(row, story)) return { row, roleKey: w };
     }
   }
   return null;
@@ -299,7 +302,7 @@ export function draftRuleBased(story, { date = todayIso(), period = 'day' } = {}
   const rows = [];
   for (const s of pool) {
     if (rows.length >= LIMITS.rowsMax) break;
-    const pair = pairFromSentence(s, used);
+    const pair = pairFromSentence(s, used, story);
     if (!pair) continue;
     used.add(pair.roleKey);
     rows.push(pair.row);

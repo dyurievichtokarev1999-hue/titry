@@ -88,9 +88,8 @@ export function parseEdit(text) {
 
 /** Строка из правки человека: цитата — его роль и текст в том порядке, как editCorpus добавляет их в опору. */
 function ownRow(role, value) {
-  const r = role.slice(0, LIMITS.role);
-  const v = value.slice(0, LIMITS.value);
-  return { role: r, value: v, source: `${r} ${v}` };
+  // Без обрезки: длинную роль или текст покажет проверка черновика понятной ошибкой длины.
+  return { role, value, source: `${role} ${value}` };
 }
 
 /** Применить правку к эпизоду. Номера строк — как в сообщении с черновиком (без фиксированных строк). */
@@ -111,7 +110,7 @@ export function applyEdit(ep, cmd) {
       if (cmd.role) { rows[idx] = ownRow(cmd.role, cmd.value); return null; }
       // Только новый текст: цитата — этот текст. Если прежней роли в нём нет, проверка черновика покажет ошибку
       // и ролик не соберётся; правку не отклоняем, чтобы её текст прошёл обычную проверку безопасности.
-      rows[idx].value = cmd.value.slice(0, LIMITS.value);
+      rows[idx].value = cmd.value;
       rows[idx].source = rows[idx].value; // слова самого человека; бот добавляет правку в опору (editCorpus)
       return null;
     case 'title': if (!cmd.value) return 'Название не может быть пустым.'; ep.title = cmd.value.slice(0, LIMITS.title); return null;

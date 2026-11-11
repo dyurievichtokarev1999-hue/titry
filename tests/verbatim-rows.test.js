@@ -60,6 +60,25 @@ test('признаки времени, условия, сослагательн�
   for (const row of fx.bound.accept) assert.equal(rowWordsGrounded(row), true, `${row.role} — ${row.value} ← ${row.source}`);
 });
 
+test('цитата, обрезанная после «не» или посреди слова, не отрывает отрицание (разбор 83bfda9, блокер 1)', () => {
+  const story = fx.cut.story;
+  const ep = (row) => sanitizeEpisode({
+    date: '2026-11-11', title: 'Без чая', genre: 'камерное кино', mood: 'quiet', music: 'quiet',
+    rows: [row, { role: 'Утром', value: 'я не пила', source: 'Утром я не пила' }],
+  });
+  for (const row of fx.cut.reject) {
+    const v = validateEpisode(ep(row), story);
+    assert.equal(v.ok, false, `${row.source}`);
+    assert.equal(rowWordsGrounded(row, story), false, row.source);
+  }
+  for (const row of fx.cut.accept) assert.deepEqual(validateEpisode(ep(row), story).errors, [], row.source);
+  // модель с обрезанной цитатой: строка отбрасывается
+  const { episode, dropped } = groundDraft({ title: 'Т', genre: 'камерное кино', mood: 'quiet', grammatical_gender: 'unknown',
+    rows: [...fx.cut.reject, ...fx.cut.accept, { role: 'Утром я не', value: 'пила', source: 'Утром я не пила' }], post: { text: '', source: '' } }, story, { date: '2026-11-11' });
+  assert.deepEqual(episode.rows.map((r) => r.source), fx.cut.accept.map((r) => r.source));
+  assert.equal(dropped.length, fx.cut.reject.length + 1, 'роль из трёх слов тоже отбрасывается');
+});
+
 test('е/ё и регистр при сопоставлении допускаются; на экран идёт набранная форма', () => {
   assert.equal(rowWordsGrounded({ role: 'ЁЖИК', value: 'Ел Яблоко', source: 'ежик ел яблоко' }), true);
   assert.equal(rowWordsGrounded({ role: 'ежик', value: 'ел яблоко', source: 'Ёжик ел яблоко' }), true);
