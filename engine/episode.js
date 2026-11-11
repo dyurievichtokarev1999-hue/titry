@@ -560,8 +560,9 @@ export function plainPhrase(sentence, story = sentence) {
   const first = words.some((w) => FIRST.has(w)) || PAST.test(words[i]);
   if (!first) return false;
   // признаки из контекста рассказа: сон, перенос с прошлой фразы, отказ — фраза должна быть чистой во всех вхождениях
-  const sents = sentencesOf(story);
-  const hits = sents.filter((x) => x.words.join(' ').includes(words.join(' ')));
+  const { sents } = storyAnalysis(String(story || '')); // разбор рассказа запоминается: заготовка проверяет много фраз
+  const key = ` ${words.join(' ')} `;
+  const hits = sents.filter((x) => ` ${x.words.join(' ')} `.includes(key));
   if (!hits.length) return false;
   return hits.every((x) => x.marks.size === 0 && x.words.length <= 25);
 }
