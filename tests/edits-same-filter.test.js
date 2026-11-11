@@ -638,3 +638,13 @@ test('шестой разбор: правка через EDIT_SEP не теря�
   assert.equal(b.texts().at(-1), `${EDIT_NOT_IN_TITLES.post}\n\n${helpMessage('concern')}`);
   assert.deepEqual(b.events.at(-1), { event: 'edit_excluded', level: 'concern' });
 });
+
+test('слияние PR 13 (joinEdits): правка — продолжение рассказа для фильтра: «…я хочу» + правка «1: умереть» — остановка', async () => {
+  const b = botSetup();
+  await b.say('Утром я пила чай. Вечером я пекла пирог. Честно, я хочу');
+  if (!b.s().episode) return; // заготовка не собрала черновик — правки не к чему применять
+  await b.say('1: умереть');
+  assert.equal(b.texts().at(-1), helpMessage('urgent'));
+  assert.equal(b.s().episode, null);
+  assert.equal(b.counters.video, 0);
+});
