@@ -614,3 +614,47 @@ test('белый список (разбор 7595d8d9): «мне/моя», име
     assert.ok(v.errors.some((e) => e.path.startsWith(`rows.${n}`)), `${edit}: ${JSON.stringify(episode.rows[n])}`);
   }
 });
+
+test('сессия PR 14: правка в боте не сверяется с признаками рассказа; «кричал.», «читала» не заражают следующую фразу', async () => {
+  // заготовка: глагол манеры речи в конце фразы не переносится
+  const d = draftRuleBased('Брат кричал. Утром я пила чай. Вечером я читала книгу. Днём я работала.', { date: '2026-11-11' });
+  assert.ok(d.episode.rows.some((x) => x.role === 'Утром' && x.value === 'пила чай'), JSON.stringify(d.episode.rows));
+  // бот: правка «N: текст» после «Вечером я читала книгу.» — без ⚠
+  const tg = fakeTelegram();
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-vr-pr14-'));
+  const bot = createBot({ safetyCheck: async () => false, tg, metrics: makeMetrics(path.join(dir, 'm.jsonl')), render: async (e, o) => ({ outPath: o.outPath, duration: 24, seconds: 1 }), draft: (st, o) => makeDraft(st, { ...o, provider: 'manual' }) });
+  const chat = { id: 78, type: 'private' };
+  try {
+    await bot.handleUpdate({ message: { chat, text: 'Утром я пила чай. Вечером я читала книгу. Мне снилось море.' } });
+    for (const edit of ['2: вечером я гуляла в парке', '2: я гуляла в парке с собакой', '1: Утром — я пила кофе']) {
+      await bot.handleUpdate({ message: { chat, text: edit } });
+      assert.doesNotMatch(tg.sent.at(-1).text, /⚠ Строка/, edit);
+    }
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('белый список (разбор eeec1864): придаточное без запятой, третье лицо после «и», роль «Я», «после:», кавычки ‘ ’, «？», приставки, пробуждение', () => {
+  for (const x of ['Я видела мама плакала.', 'Я поняла муж ушёл к другой.', 'Я услышала соседи развелись.', 'Я вспомнила папа умер.',
+    'Я почувствовала он врал.', 'Я плакала ведь он ушёл.', 'Я купила хлеб и мама испекла торт.', 'Я он меня ударил.', 'Мы соседи развелись.',
+    'Я получила ‘ты уволена’ от шефа.', "Я получила 'ты уволена' от шефа.", 'Я пила чай？', 'Я выиграла миллион‽', 'Я походу проспала работу.',
+    'Я пообещала себе отпуск.', 'Я запланировала отпуск.', 'Я заподозрила мужа в измене.']) {
+    assert.equal(plainPhrase(x), false, x);
+  }
+  for (const pre of ['Утром я проснулась.', 'Потом я проснулась.', 'Проснувшись, я встала.']) {
+    assert.equal(plainPhrase('Я купила квартиру.', `Мне снилось море. ${pre} Я купила квартиру.`), false, pre);
+  }
+  assert.equal(plainPhrase('Я выбежала на улицу.', 'Я вообразила себе пожар. Я выбежала на улицу.'), false);
+  assert.equal(plainPhrase('Я встретила президента.', 'Я легла рано. Я вырубилась. Я встретила президента.'), false);
+  for (const lie of ['Я всем приукрасила.', 'Я наплела всем с три короба.', 'Я пошутила.']) {
+    assert.equal(plainPhrase('Я выиграла миллион.', `${lie} Я выиграла миллион.`), false, lie);
+  }
+  // бот: роль «Я»/«Мы» и «после:» не из простой фразы — опоры нет
+  const { episode } = draftRuleBased('Утром я пила кофе. Днём я работала. Вечером мы гуляли.', { date: '2026-11-11' });
+  applyEdit(episode, parseEdit('2: Я — он меня ударил'));
+  assert.equal(episode.rows[1].source, '');
+  applyEdit(episode, parseEdit('+ Мы — соседи развелись'));
+  assert.equal(episode.rows.at(-1).source, '');
+  applyEdit(episode, parseEdit('после: Мама сказала, что я плохая.'));
+  assert.equal(episode.post.source, '');
+  assert.ok(validateEpisode(episode, 'Утром я пила кофе.').errors.some((e) => e.path === 'post.source'));
+});

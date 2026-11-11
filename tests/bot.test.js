@@ -70,7 +70,7 @@ test('сценарий бота: рассказ → правка → ролик 
   await bot.handleUpdate({ message: { chat, text: '/start' } });
   await bot.handleUpdate({ message: { chat, text: story } });
   assert.ok(tg.sent.some((m) => /Похоже на твой день/.test(m.text)));
-  await bot.handleUpdate({ message: { chat, text: '1: Утром — я отправил письмо' } });
+  await bot.handleUpdate({ message: { chat, text: '+ Утром — я отправил письмо' } });
   await bot.handleUpdate({ message: { chat, text: '+ Вечером — я смотрел сериал' } });
   await bot.handleUpdate({ callback_query: { id: 'q1', data: `mood:${playId(tg)}`, message: { chat } } });
   await bot.handleUpdate({ callback_query: { id: 'q2', data: `play:${playId(tg)}`, message: { chat } } });

@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS, episodeToText, plainPhrase } from '../engine/episode.js';
+import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS, episodeToText, plainPhrase, EDIT_SEP } from '../engine/episode.js';
 import { makeDraft, modelSafetyCheck, hasClaudeCredentials, pairFromSentence } from './draft.js';
 import { makeGate } from './gate.js';
 import { helpMessage, assessEpisodeRisk, validateSafeEpisode } from './safety.js';
@@ -45,7 +45,7 @@ export const TEXT = {
     'Строка — простая фраза о себе: «я…» или «мы…», без «не», «что», кавычек и вопросов.',
     '<code>название: Письмо, которое ушло</code>',
     '<code>жанр: тихая драма</code>',
-    '<code>после: Посуда — до завтра.</code> или <code>после: -</code>',
+    '<code>после: Я оставила посуду до завтра.</code> или <code>после: -</code>',
   ].join('\n'),
   noDraft: 'Сначала расскажи о дне: голосом или текстом.',
   fit: 'Хорошо. Ролик можно сохранить или переслать. На сегодня достаточно.',
@@ -127,7 +127,9 @@ export function applyEdit(ep, cmd) {
     case 'genre': if (!cmd.value) return 'Жанр не может быть пустым.'; ep.genre = cmd.value.slice(0, LIMITS.genre); return null;
     case 'lead': ep.lead = (cmd.value || 'ты').slice(0, 24); return null;
     case 'post':
-      ep.post = cmd.value === '-' || !cmd.value ? { text: '', source: '' } : { text: cmd.value.slice(0, LIMITS.post), source: cmd.value.slice(0, LIMITS.post) };
+      // сцена после титров — тоже только простое утверждение от первого лица (белый список); иначе опоры нет
+      ep.post = cmd.value === '-' || !cmd.value ? { text: '', source: '' }
+        : { text: cmd.value.slice(0, LIMITS.post), source: plainPhrase(cmd.value, cmd.value) ? cmd.value.slice(0, LIMITS.post) : '' };
       return null;
     default: return 'Не понял правку.';
   }
@@ -581,7 +583,8 @@ export function createBot({
         const err = applyEdit(s.episode, cmd);
         if (err) return tg.send(chatId, err);
         const own = editCorpus(cmd);
-        if (own) s.story = `${s.story}\n${own}`; // опора хранится только в памяти сессии
+        // правка — самостоятельный текст: отделена от рассказа, признаки рассказа на неё не переходят (сессия PR 14)
+        if (own) s.story = `${s.story}${EDIT_SEP}${own}`; // опора хранится только в памяти сессии
         s.edits = (s.edits || 0) + 1;
         s.stage = 'draft';
         return showDraft(chatId, s);

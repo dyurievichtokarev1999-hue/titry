@@ -184,12 +184,12 @@ test('бот: правка от самого человека становитс
   await bot.handleUpdate({ message: { chat, text: SAFE_STORY } });
   // рассказ не от первого лица: заготовка строк не берёт (белый список формы фразы, решение 11.11) —
   // человек добавляет строки сам, их слова становятся опорой
-  await bot.handleUpdate({ message: { chat, text: '+ Утром — я видела жирафа' } });
+  await bot.handleUpdate({ message: { chat, text: '+ Утром — я кормила жирафа' } });
   await bot.handleUpdate({ message: { chat, text: '+ Вечером — я звонила другу' } });
   await bot.handleUpdate({ callback_query: { id: 'a', data: `play:${playId(tg)}`, message: { chat } } });
   assert.equal(rendered.length, 1);
-  assert.ok(rendered[0].ep.rows.some((r) => r.value === 'я видела жирафа'));
-  assert.ok(rendered[0].opts.story.includes('я видела жирафа'), 'правка человека — часть опоры');
+  assert.ok(rendered[0].ep.rows.some((r) => r.value === 'я кормила жирафа'));
+  assert.ok(rendered[0].opts.story.includes('я кормила жирафа'), 'правка человека — часть опоры');
 
   await bot.handleUpdate({ message: { chat, text: '2: не хочу больше жить' } });
   await bot.handleUpdate({ callback_query: { id: 'b', data: `play:${playId(tg)}`, message: { chat } } });
