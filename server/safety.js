@@ -32,15 +32,17 @@ const VERB_FIRST = new RegExp(String.raw`^(?:причинить|слома|ра�
 const BODY = /^(?:бок|голов|лиц|морд|башк|рук|ног|шее|шею|горл|спин|живот|глаз|зуб|нос|челюст|ребр)/;
 // Неличное дополнение — только из короткого списка предметов (или «по/на» + не часть тела и не человек).
 // Неизвестное слово после глагола угрозу не снимает (разбор 18588362): пропуск хуже лишней остановки.
-const THING = /^(?:полк|доск|картин|гвозд|рекорд|время|день|вечер|час|пару|черновик|танцпол|шкаф|ковер|вешалк|тест|экзамен|таракан|мух|комар|муравь|сорняк|свой|свою|свое|свои|мой|мою|мое|мои|весь|всю|все|баннер|плакат|полочк|карниз|зеркал|часы|ящик|замок|дверь|двер|сетк|бумаг|черновик|тетрад|старые|старый|старую)/;
+const THING = /^(?:полку|полочку|полки|доску|доски|картину|картины|гвоздь|гвозди|рекорд|время|день|вечер|час|черновик|черновики|танцпол|шкаф|ковер|ковры|вешалку|тест|экзамен|таракана|тараканов|муху|мух|комара|комаров|муравьев|сорняки|свой|свою|свое|свои|мой|мою|мое|мои|весь|всю|баннер|плакат|карниз|зеркало|часы|ящик|замок|дверь|сетку|бумагу|бумаги|тетрадь|тетради|старые|старый|старую|старое|принтер|компьютер|ноутбук|грушу|мяч|зомби|босса)$/;
+// Безобидные продолжения с «по/на» — только из перечня («ударю по газам», «двину на дачу»); «убью на перемене» — угроза.
+const PO_NA_THING = /^(?:газам|газу|рукам|клавишам|клавиатуре|мячу|столу|стене|шайбе|воротам|тормозам|кнопке|кнопкам|струнам|барабанам|дачу|работу|природу|рыбалку|концерт|море|педали|педаль|танцпол|учебе|учебу)$/;
 const PERSON_WORD_RE = new RegExp(String.raw`^${PERSON}$`);
 function thingObjectAfter(s, pos) {
   const tail = s.slice(pos, pos + 80);
   if (/^\s*(?:[.!?…;:,—–-]|$)/.test(tail)) return false; // конец части — дополнение опущено
   const [a = '', b = ''] = tail.trim().split(/[^а-я]+/).filter(Boolean);
   if (!a || PERSON_WORD_RE.test(a)) return false;
-  if (/^(?:по|на)$/.test(a)) return !!b && !BODY.test(b) && !PERSON_WORD_RE.test(b);
-  return THING.test(a);
+  if (/^(?:по|на)$/.test(a)) return PO_NA_THING.test(b);
+  return THING.test(a); // целая форма винительного; творительный («полкой», «доской») — средство, угроза остаётся
 }
 const NOMINATIVE_SUBJ = /^(?:тренер|брат|сестра|мама|папа|отец|муж|жена|сосед|соседка|соседи|коллега|коллеги|начальник|начальница|друг|друзья|подруга|подруги|сын|учитель|учительница|бабушка|дедушка|ребенок|дети|родители|братья|сестры|люди|парень|девушка|шеф|директор|отчим|мачеха|тренеры|дядя|тетя)$/;
 const OWN_OBJECT = new RegExp(String.raw`^${HARM_VERB}\s+(?:свой|свою|свое|свои|своих|весь|всю|все|целый|целую|целое|время|рекорд|день|вечер|вечеринку|выходные|настроение|интерес)(?:\s+([а-я]+))?[,;:—–]`);
@@ -56,7 +58,9 @@ export function harmPerson(s) {
       // Подлежащее перед глаголом в прошедшем («Брат избил маму, завтра убью») — всегда отбрасывается, поиск идёт
       // дальше и находит «избил маму», «убью». Перед глаголом не в прошедшем — только при неличном дополнении.
       const verb = m[0].split(/\s+/).pop();
-      if (/(?:ил|ал|ул|ел|ыл|ял)(?:а|и|о)?$/.test(verb) || thingObjectAfter(s, m.index + m[0].length)) { re.lastIndex = m.index + 1; continue; }
+      // «бы» рядом («так бы и убил») — прошедшее время значит желание рассказчика, совпадение остаётся.
+      const wouldBe = /(?<![а-я])бы(?![а-я])/.test(s.slice(Math.max(0, m.index), m.index + m[0].length + 4));
+      if ((!wouldBe && /(?:ил|ал|ул|ел|ыл|ял)(?:а|и|о)?$/.test(verb)) || thingObjectAfter(s, m.index + m[0].length)) { re.lastIndex = m.index + 1; continue; }
     }
     const own = OWN_OBJECT.exec(m[0]);
     // Отбрасывается только «…рекорд, тренер меня обнял»: после запятой — человек в именительном (новое подлежащее).
@@ -287,7 +291,9 @@ const PERSON_ROOT = new RegExp('^(' + PERSON_WORDS.source.replace('(?<![а-я])(
 // Один ключ на человека: мать = мама, отец = папа = батя.
 const ROOT_ALIAS = { мать: 'мам', матер: 'мам', матушк: 'мам', мамк: 'мам', отец: 'пап', отц: 'пап', папк: 'пап', батя: 'пап', батю: 'пап', бате: 'пап', батей: 'пап' };
 function personRoot(w) { const m = PERSON_ROOT.exec(w); const r = m ? m[1] : w; return ROOT_ALIAS[r] || r; }
-const isThreatUnit = (u) => { const t = stripIdioms(u); return !!harmPerson(t) || CONCERN.some((re) => re.test(t)); };
+const threatMemo = new Map();
+const isThreatUnit = (u) => { if (threatMemo.has(u)) return threatMemo.get(u); const v = isThreatUnitRaw(u); if (threatMemo.size < 2000) threatMemo.set(u, v); return v; };
+const isThreatUnitRaw = (u) => { const t = stripIdioms(u); return !!harmPerson(t) || CONCERN.some((re) => re.test(t)); };
 // А4: для титров опасной считается любая часть рассказа, которую фильтр сам по себе не пропускает (уровень выше none),
 // а не только угроза, найденная правилом «глагол + человек».
 // Кэш на время одного вызова threatErrors: одно и то же предложение проверяется для каждого поля эпизода.
@@ -295,7 +301,7 @@ const riskMemo = new Map();
 const riskyUnit = (u) => {
   if (riskMemo.has(u)) return riskMemo.get(u);
   const v = isThreatUnit(u) || assessRisk(u).level !== 'none';
-  if (riskMemo.size < 10000) riskMemo.set(u, v);
+  if (riskMemo.size < 2000) riskMemo.set(u, v);
   return v;
 };
 const sentencesOf = (story) => String(story || '').split(/(?<=[.!?…;])\s+|\n+/).filter((x) => x.trim());
@@ -327,51 +333,62 @@ export function threatSentences(story) {
 }
 
 /** Строка опирается на часть рассказа с угрозой, сама содержит угрозу или пересказывает её. */
+// Контекст рассказа для правила титров считается один раз на (story, threats), а не для каждого поля эпизода.
+const ctxMemo = new Map();
+const IS_PERSON_WORD = new RegExp(`^(?:${PERSON_WORDS.source})$`);
+const stem4 = (w) => w.slice(0, 4);
+const wordsOf = (x) => (x.match(/[а-я]{3,}/g) || []).filter((w) => !STOP.has(w)).map((w) => (IS_PERSON_WORD.test(w) ? personRoot(w) : stem4(w)));
+function threatContext(threats, story) {
+  const key = story + '\u0000' + threats.join('\u0001');
+  if (ctxMemo.has(key)) return ctxMemo.get(key);
+  // Люди из угрозы другому человеку; в гиперболе «мама меня убьёт за…» мама — не цель угрозы.
+  const threatPeople = new Set(threats.filter((u) => isThreatUnit(u)).flatMap((u) => (u.match(PERSON_WORDS) || []).map(personRoot)));
+  const units = unitsOf(story).map(flat);
+  const safeText = units.filter((u) => !threats.includes(u)).join(' ');
+  // Для оформления угрозой считается всё предложение целиком («План готов: завтра…» — и «План готов» тоже).
+  const sentences = sentencesOf(story);
+  const wholeSet = new Set(threats);
+  const risky = sentences.map((x) => wholeSet.has(flat(x)) || riskyUnit(x));
+  // Целиком — только предложения с угрозой другому человеку; в остальных опасны лишь опасные части.
+  const whole = sentences.filter((x, i) => risky[i] && (wholeSet.has(flat(x)) || isThreatUnit(x))).map(flat);
+  const wholeAll = new Set(whole);
+  const threatStems = new Set([...threats, ...whole].flatMap(wordsOf));
+  const safeParts = sentences.flatMap((x) => (wholeAll.has(flat(x)) ? [] : unitsOf(x).map(flat).filter((u) => !wholeSet.has(u))));
+  const safeStems = new Set(safeParts.flatMap(wordsOf));
+  // А5: человек из соседнего предыдущего предложения, если угроза говорит о нём местоимением
+  // («Начальник опять наорал. Я бы его убил.» → «Начальнику не жить»).
+  const linked = new Set();
+  sentences.forEach((x, i) => { if (risky[i] && isThreatUnit(x) && i > 0 && PRONOUN.test(flat(x))) (flat(sentences[i - 1]).match(PERSON_WORDS) || []).forEach((w) => linked.add(personRoot(w))); });
+  const safeUnits = units.filter((u) => !threats.some((s) => s === u || s.includes(u) || u.includes(s)));
+  const ctx = { threatPeople, safeText, threatStems, safeStems, linked, safeUnits };
+  if (ctxMemo.size > 50) ctxMemo.clear();
+  ctxMemo.set(key, ctx);
+  return ctx;
+}
+
 export function touchesThreat(text, threats, story = '', { strict = false } = {}) {
   const t = flat(text);
   if (!t) return false;
   if (isThreatUnit(t)) return true;
   if (!threats.length) return false; // пересказ ищется только в рассказах, где угроза есть
   if (HARMISH.test(t)) return true;
+  const c = threatContext(threats, story);
   // Строка называет человека из угрозы, который не упоминается в безобидных частях рассказа («Брат под ударом»).
-  const stem = (w) => w.slice(0, 4);
   // Люди сравниваются по корню из списка («мама/мамой», «брат/братишка» — один корень; «брала», «сосиски» — нет).
-  const pstem = personRoot;
-  // Люди из угрозы другому человеку; в гиперболе «мама меня убьёт за…» мама — не цель угрозы.
-  const threatPeople = new Set(threats.filter((u) => isThreatUnit(u)).flatMap((u) => (u.match(PERSON_WORDS) || []).map(pstem)));
-  const safeText = unitsOf(story).map(flat).filter((u) => !threats.includes(u)).join(' ');
-  const named = (t.match(PERSON_WORDS) || []).map(pstem).filter((w) => threatPeople.has(w));
-  if (named.some((w) => !new RegExp(String.raw`(?<![а-я])${w}`).test(safeText))) return true;
+  const named = (t.match(PERSON_WORDS) || []).map(personRoot).filter((w) => c.threatPeople.has(w));
+  if (named.some((w) => !new RegExp(String.raw`(?<![а-я])${w}`).test(c.safeText))) return true;
   if (strict) {
     // Оформление (название, жанр, «в главной роли», пост) не опирается на угрозу даже частично:
     // человек из угрозы или слово, которое в рассказе есть только в угрозе («Тихая ночь», «План готов»), — отказ.
     if (named.length) return true;
-    const isPerson = (w) => new RegExp(`^(?:${PERSON_WORDS.source})$`).test(w);
-    const words = (x) => (x.match(/[а-я]{3,}/g) || []).filter((w) => !STOP.has(w)).map((w) => (isPerson(w) ? pstem(w) : stem(w)));
-    // Для оформления угрозой считается всё предложение целиком («План готов: завтра…» — и «План готов» тоже).
-    const sentences = sentencesOf(story);
-    const wholeSet = new Set(threats);
-    const risky = sentences.map((x) => wholeSet.has(flat(x)) || riskyUnit(x));
-    // Целиком — только предложения с угрозой другому человеку; в остальных опасны лишь опасные части.
-    const whole = sentences.filter((x, i) => risky[i] && (wholeSet.has(flat(x)) || isThreatUnit(x))).map(flat);
-    const wholeAll = new Set(whole);
-    const threatStems = new Set([...threats, ...whole].flatMap(words));
-    const safeParts = sentences.flatMap((x) => (wholeAll.has(flat(x)) ? [] : unitsOf(x).map(flat).filter((u) => !wholeSet.has(u))));
-    const safeStems = new Set(safeParts.flatMap(words));
-    // А5: человек из соседнего предыдущего предложения, если угроза говорит о нём местоимением
-    // («Начальник опять наорал. Я бы его убил.» → «Начальнику не жить»).
-    const linked = new Set();
-    sentences.forEach((x, i) => { if (risky[i] && isThreatUnit(x) && i > 0 && PRONOUN.test(flat(x))) (flat(sentences[i - 1]).match(PERSON_WORDS) || []).forEach((w) => linked.add(pstem(w))); });
-    if ((t.match(PERSON_WORDS) || []).map(pstem).some((w) => linked.has(w))) return true;
-    const own = words(t);
-    if (own.some((w) => threatStems.has(w) && !safeStems.has(w))) return true;
+    if ((t.match(PERSON_WORDS) || []).map(personRoot).some((w) => c.linked.has(w))) return true;
+    if (wordsOf(t).some((w) => c.threatStems.has(w) && !c.safeStems.has(w))) return true;
   }
   if (t.length < 4 || !threats.some((s) => s.includes(t) || t.includes(s))) return false;
   // Совпадение есть и вне угрозы (то же слово в безобидном предложении) — строка опирается не на угрозу.
-  const safeUnits = unitsOf(story).map(flat).filter((u) => !threats.some((s) => s === u || s.includes(u) || u.includes(s)));
   // Человек, упомянутый и в безобидной части в другом падеже («мама» / «с мамой»), — тоже опора вне угрозы.
-  const personOnly = /^[а-я]+$/.test(t) && new RegExp(`^(?:${PERSON_WORDS.source})$`).test(t);
-  return !safeUnits.some((u) => u.includes(t) || (personOnly && new RegExp(String.raw`(?<![а-я])${pstem(t)}`).test(u)));
+  const personOnly = /^[а-я]+$/.test(t) && IS_PERSON_WORD.test(t);
+  return !c.safeUnits.some((u) => u.includes(t) || (personOnly && new RegExp(String.raw`(?<![а-я])${personRoot(t)}`).test(u)));
 }
 
 /**
@@ -381,7 +398,7 @@ export function touchesThreat(text, threats, story = '', { strict = false } = {}
 export function threatErrors(story, ep) {
   // Длинные серии пробелов внутри предложения не меняют смысла, но делают разбор на части медленным.
   story = String(story || '').replace(/[^\S\n]+/g, ' ').replace(/\n\s*/g, '\n');
-  riskMemo.clear();
+  riskMemo.clear(); threatMemo.clear(); ctxMemo.clear();
   const threats = threatSentences(story);
   const errors = [];
   const msg = 'Угроза другому человеку не берётся в титры.';
