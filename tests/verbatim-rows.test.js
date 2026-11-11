@@ -508,3 +508,19 @@ test('makeDraft: длинный опасный рассказ останавли
   assert.equal(r.risk.level, 'urgent');
   await assert.rejects(makeDraft('Утром я пила чай. '.repeat(400), { provider: 'manual' }), (e) => e.code === 'too_long');
 });
+
+// ── Разбор 116cb152 ──────────────────────────────────────────────────────────
+
+test('перенос признака на следующую фразу, сарказм после пробуждения, оценки, паузы перед инфинитивом', () => {
+  for (const { story, row } of fx.review12.reject) {
+    assert.equal(rowWordsGrounded(row, story), false, `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+  for (const { story, row } of fx.review12.accept) {
+    assert.deepEqual(rowWordProblems(row, story), [], `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+  // цитата длиннее предела фразы не источник и не разбирается долго
+  const long = 'я '.repeat(3000);
+  const t0 = Date.now();
+  assert.equal(rowWordsGrounded({ role: 'Я', value: 'я', source: long }, long), false);
+  assert.ok(Date.now() - t0 < 3000);
+});
