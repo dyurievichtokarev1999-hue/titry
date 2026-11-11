@@ -292,7 +292,10 @@ export async function makeDraft(story, opts = {}) {
         risk = assessRisk(text, true);
         return { risk, episode: null, provider };
       }
-      if (result.episode.rows.length < 2) {
+      // Мало строк с опорой — или после исключения опасных частей черновик модели не собирается (название/жанр
+      // опираются на угрозу, пригодных строк меньше двух): сначала заготовка без ИИ, нехватка — только если и она
+      // не собирается. Заготовка проходит тот же validateSafeEpisode ниже.
+      if (result.episode.rows.length < 2 || insufficientAfterExclusion(result.episode, text)) {
         note = 'У черновика модели не хватило строк с опорой на рассказ, показана заготовка без ИИ.';
         result = draftRuleBased(text, opts);
         provider = 'manual';

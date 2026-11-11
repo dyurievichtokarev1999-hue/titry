@@ -69,9 +69,8 @@ test('makeDraft: concern без безопасных пар → insufficient, б
     assert.equal(r.insufficient, true, id);
     assert.equal(r.code, 'insufficient_after_exclusion', id);
     assert.equal(r.episode, null, id);
-    assert.equal(r.validation, undefined, id);
-    assert.equal(r.dropped, undefined, id);
-    assert.ok(!JSON.stringify(r).includes(story.slice(0, 12)), `${id}: текст рассказа не выходит наружу`);
+    assert.deepEqual(Object.keys(r).sort(), ['code', 'episode', 'insufficient', 'provider', 'risk'], `${id}: ни черновика, ни dropped, ни validation`);
+    assert.ok(!JSON.stringify(r.risk).includes(story.slice(0, 12)), `${id}: текст рассказа не выходит наружу`);
     assert.equal(r.risk.level, 'concern', id);
   }
 });
@@ -127,13 +126,26 @@ test('модель вернула меньше двух безопасных с�
   assert.ok(!JSON.stringify(r).includes('ударить'));
 });
 
-test('название модели опирается на угрозу → title не собирается → insufficient (без подстановки)', async () => {
+test('черновик модели не собирается после исключения (название из угрозы) → сначала заготовка без ИИ', async () => {
   const raw = modelDraft({ title: 'Ударить брата', rows: [
     { role: 'Чай', value: 'утренний чай', source: 'Утром я пила чай' },
     { role: 'Книга', value: 'вечер с книгой', source: 'Вечером я читала книгу' },
   ] });
   const r = await makeDraft(MIX, { provider: 'claude', client: modelClient(raw) });
-  assert.equal(r.insufficient, true); assert.equal(r.episode, null);
+  assert.ok(!r.insufficient, 'заготовка собирается — это не нехватка');
+  assert.equal(r.provider, 'manual');
+  assert.equal(r.validation.ok, true, JSON.stringify(r.validation.errors));
+  assert.equal(r.episode.rows.length, 2);
+  assert.doesNotMatch(fields(r.episode), THREAT_WORDS);
+  // Тот же рассказ без опорных безопасных пар: и модель, и заготовка не собираются → нехватка.
+  const n = await makeDraft(byId.OI08, { provider: 'claude', client: modelClient({ ...raw, rows: [] }) });
+  assert.equal(n.insufficient, true); assert.equal(n.episode, null);
+});
+
+test('пара без значения или без роли — не пригодна', () => {
+  const ep = draftRuleBased(MIX).episode;
+  ep.rows[1].value = '';
+  assert.equal(insufficientAfterExclusion(ep, MIX), true);
 });
 
 test('заготовка без ИИ проверяется validateSafeEpisode: опасная часть не возвращается ни при каком пути', async () => {
@@ -211,6 +223,32 @@ test('бот: незавершённая проверка или нет ключ
   const k = botSetup({ hasKey: () => false });
   await k.say(byId.OI10);
   assert.equal(k.texts().at(-1), TEXT.checkUnavailable); assert.ok(!k.texts().includes(REPLY));
+});
+
+test('бот: /delete во время отдельной проверки → реплики нет, запрет по ответу true сохраняется', async () => {
+  let release;
+  const b = botSetup({ check: () => new Promise((r) => { release = r; }) });
+  const p = b.say(byId.OI10);
+  while (!release) await new Promise((r) => setImmediate(r));
+  await b.say('/delete');
+  release(true);
+  await p;
+  assert.ok(!b.texts().includes(REPLY));
+  assert.ok(!b.events.some((e) => e.event === 'insufficient_after_exclusion'), 'после /delete метрика не пишется');
+  await b.say(byId.OI10);
+  assert.match(b.texts().at(-1), HELP, 'тот же рассказ после /delete — остановка');
+});
+
+test('бот: новый рассказ во время проверки → устаревшая реплика нехватки не отправляется', async () => {
+  let release;
+  const b = botSetup({ check: (t, n) => (n === 1 ? new Promise((r) => { release = r; }) : false) });
+  const p = b.say(byId.OI10);
+  while (!release) await new Promise((r) => setImmediate(r));
+  await b.say(SAFE);
+  release(false);
+  await p;
+  assert.ok(!b.texts().includes(REPLY));
+  assert.ok(b.bot.sessions.get(chat.id).episode, 'черновик нового рассказа на месте');
 });
 
 test('бот: местный urgent → помощь без отдельной проверки и без нехватки', async () => {

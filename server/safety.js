@@ -458,13 +458,15 @@ export const INSUFFICIENT_AFTER_EXCLUSION = 'insufficient_after_exclusion';
 export function insufficientAfterExclusion(ep, story, validation = validateSafeEpisode(ep, story)) {
   if (!ep || typeof ep !== 'object') return false;
   const clean = String(story || '').replace(/[^\S\n]+/g, ' ').replace(/\n\s*/g, '\n');
-  if (!threatSentences(clean).length) return false; // ничего не исключалось
   const errs = (validation && validation.errors) || [];
   const threatMsg = 'Угроза другому человеку не берётся в титры.';
+  // Исключение было: в рассказе есть опасные части или правило уже отклонило какое-то поле эпизода.
+  if (!threatSentences(clean).length && !errs.some((e) => e.msg === threatMsg)) return false;
   const blocked = (p) => errs.some((e) => e.path === p && e.msg === threatMsg);
   const missing = (p) => !String(ep[p] || '').trim() || blocked(p);
   const rows = Array.isArray(ep.rows) ? ep.rows : [];
-  const usable = rows.filter((r, i) => (String(r.role || '').trim() || String(r.value || '').trim())
+  // Пригодная пара: есть и роль, и значение, строка не опирается на опасную часть, цитата найдена в рассказе.
+  const usable = rows.filter((r, i) => String(r.role || '').trim() && String(r.value || '').trim()
     && !errs.some((e) => e.path === `rows.${i}` || e.path === `rows.${i}.source`)).length;
   return missing('title') || missing('genre') || usable < LIMITS.rowsMin;
 }

@@ -193,8 +193,16 @@ function stopText(e, safetyNote) {
   }
   if (d.unavailable) return `${d.error}. ${d.message} ${d.next}`;
   // Нехватка материала после исключения опасных частей: только реплика, без помощи и без повтора.
-  if (d.kind === 'insufficient') return d.error;
+  if (d.kind === 'insufficient') { clearDraft(); return d.error; }
   return e.message;
+}
+
+// Нехватка материала: прежний черновик не остаётся на экране и не уходит в рендер.
+function clearDraft() {
+  state.episode = blankEpisode({ date: $('date').value || undefined, period: $('period').value || 'day' });
+  state.draft = structuredClone(state.episode);
+  fillForm(state.episode); changed();
+  $('renderBtn').disabled = true;
 }
 
 function showHelp(text) { $('helpText').textContent = text; $('help').hidden = false; $('helpClose').focus(); }
