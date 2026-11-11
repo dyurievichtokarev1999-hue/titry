@@ -265,8 +265,11 @@ function capitalizedInside(word, story) {
 export function pairFromSentence(sentence, usedRoles = new Set(), story = sentence) {
   const source = trimEdge(String(sentence || '').replace(/[.!?…]+$/, ''));
   const raw = source.split(/\s+/).filter((t) => wordsOf(t).length);
-  const one = (j) => (j >= 0 && j < raw.length && wordsOf(raw[j]).length === 1 ? wordsOf(raw[j])[0] : null);
-  const edge = (t) => t && wordsOf(t).length === 1 && EDGE_WORDS.has(wordsOf(t)[0]);
+  // слова каждого токена считаются один раз: длинная фраза без точек разбирается линейно
+  const memo = new Map();
+  const wordsOfTok = (t) => { if (!memo.has(t)) memo.set(t, wordsOf(t)); return memo.get(t); };
+  const one = (j) => (j >= 0 && j < raw.length && wordsOfTok(raw[j]).length === 1 ? wordsOfTok(raw[j])[0] : null);
+  const edge = (t) => t && wordsOfTok(t).length === 1 && EDGE_WORDS.has(wordsOfTok(t)[0]);
   const ends = (t) => /[,;:—–]$/.test(t);
   const clean = (part) => {
     const xs = [...part];
@@ -291,14 +294,17 @@ export function pairFromSentence(sentence, usedRoles = new Set(), story = senten
       let ce = i; while (ce < raw.length - 1 && !ends(raw[ce])) ce++;
       const variants = [];
       // после роли — только если это продолжение, а не новый член через союз («лампу и плед» — не «Лампу — плед»)
-      const conj = (t) => t && wordsOf(t).length === 1 && ['и', 'а', 'но', 'или', 'да'].includes(wordsOf(t)[0]);
+      const conj = (t) => t && wordsOfTok(t).length === 1 && ['и', 'а', 'но', 'или', 'да'].includes(wordsOfTok(t)[0]);
       if (!ends(raw[i]) && i + 1 < raw.length && !conj(raw[i + 1])) {
         variants.push(raw.slice(i + 1)); // до конца фразы
         variants.push(raw.slice(i + 1, ce + 1)); // до конца части
       }
       // значение — только после роли: порядок слов как в цитате («Утром — пила чай», а не «Чай — пила»)
       // сначала кусок с глаголом: «Вещи — собирала», а не «Вещи — два часа»
-      const hasVerb = (v) => v.some((t) => VERB_LIKE.test(wordsOf(t)[0] || ''));
+      // значение длиннее лимита не годится — отбрасываем до разбора
+      const fits = (v) => v.reduce((n, t) => n + t.length + 1, 0) <= LIMITS.value + 20;
+      for (let k = variants.length - 1; k >= 0; k--) if (!fits(variants[k])) variants.splice(k, 1);
+      const hasVerb = (v) => v.some((t) => VERB_LIKE.test(wordsOfTok(t)[0] || ''));
       variants.sort((x, y) => Number(hasVerb(clean(y))) - Number(hasVerb(clean(x))));
       for (const v of variants) {
         const part = clean(v);

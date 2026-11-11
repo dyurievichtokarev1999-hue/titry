@@ -164,7 +164,8 @@ function splitPhrases(text) {
     else if (c === '"' && !lockedPlain) { plainQuote = !plainQuote; if (oddPlain && plainQuote) lockedPlain = true; }
     const inQuote = stack.length > 0 || plainQuote;
     // перевод строки — граница, кроме случаев, когда строка обрывается на знаке или признаке («сказала —», «Во сне», «не»)
-    const lastWord = c === '\n' ? (wordsOf(cur).at(-1) || '') : '';
+    // последнее слово — только из хвоста строки: разбор остаётся линейным
+    const lastWord = c === '\n' ? (wordsOf(cur.slice(-40)).at(-1) || '') : '';
     const softBreak = c === '\n' && (/[:—–,\-]\s*$/.test(cur) || isMarker(lastWord) || REPORT_STEM.test(lastWord));
     const boundary = !inQuote && (/[.!?;]/.test(c) || (c === '\n' && !softBreak));
     if (boundary) { out.push(cur); cur = ''; } else cur += c === '\n' ? ' ' : c;
@@ -253,13 +254,30 @@ function scopeWord(toks, j) {
  * «не я / не он» в той же части — под «не». Возвращает отсортированный список таких слов.
  */
 function scopeOf(toks, cl, i) {
-  const out = new Set();
-  for (let j = 0; j < toks.length; j++) {
-    if (cl[j] !== cl[i] || j === i || !scopeWord(toks, j)) continue;
-    if (j < i) out.add(toks[j]);
-    else if (NEG.has(toks[j]) && PRONOUNS.includes(toks[j + 1]) && cl[j + 1] === cl[i]) out.add(toks[j]); // «Ужин готовила не я»
+  return scopesAll(toks, cl)[i];
+}
+
+/** То же для всех слов сразу, за один проход по частям фразы (линейно по длине). */
+function scopesAll(toks, cl) {
+  const res = new Array(toks.length);
+  let start = 0;
+  while (start < toks.length) {
+    let end = start;
+    while (end < toks.length && cl[end] === cl[start]) end++;
+    // «не я / не он» в части — действует на всю часть
+    const whole = new Set();
+    for (let j = start; j < end; j++) if (NEG.has(toks[j]) && PRONOUNS.includes(toks[j + 1]) && cl[j + 1] === cl[j]) whole.add(toks[j]);
+    const seen = new Set(whole);
+    let cache = null;
+    for (let j = start; j < end; j++) {
+      // слово не действует само на себя: берём признаки, накопленные до него
+      if (!cache) cache = [...seen].sort();
+      res[j] = cache;
+      if (scopeWord(toks, j) && !seen.has(toks[j])) { seen.add(toks[j]); cache = null; }
+    }
+    start = end;
   }
-  return [...out].sort();
+  return res;
 }
 
 /** Подпись слова: признаки «не/ни/буду…» перед ним (через прозрачные слова). Без признака — ''. */
@@ -271,12 +289,21 @@ function preSig(tokens, i) {
 }
 
 /** Все вхождения цитаты в рассказ по границам слов: [{ cut, marks }] — cut: цитата начинается сразу после признака. */
-function quoteContext(source, story) {
-  const src = wordsOf(source);
+/** Разбор рассказа для quoteContext; последний разбор запоминается — заготовка проверяет много строк одного рассказа. */
+let storyCache = { story: null, data: null };
+function storyAnalysis(story) {
+  if (storyCache.story === story) return storyCache.data;
   const sents = sentencesOf(story);
   const toks = [], sid = [];
   sents.forEach((s, k) => s.words.forEach((w) => { toks.push(w); sid.push(k); }));
   const { cl } = tokensWithClauses(story); // те же слова, с номерами частей фразы
+  storyCache = { story, data: { sents, toks, sid, cl } };
+  return storyCache.data;
+}
+
+function quoteContext(source, story) {
+  const src = wordsOf(source);
+  const { sents, toks, sid, cl } = storyAnalysis(String(story || ''));
   const out = [];
   for (let s = 0; s + src.length <= toks.length; s++) {
     if (!src.every((w, k) => toks[s + k] === w)) continue;
@@ -336,7 +363,8 @@ export function rowWordProblems(row, story) {
   // подпись проверяется у всех слов, кроме служебных («не», «бы», «если»…): «Написал» из «не написал» — тоже без «не» нельзя
   const plain = (w) => !isNext(w) && !FUNCTION_MARKERS.has(w);
   const { toks: srcT, cl: srcC } = tokensWithClauses(row.source);
-  src.forEach((w, i) => { if (plain(w)) (sigs.get(w) || sigs.set(w, new Set()).get(w)).add(`${preSig(src, i)}|${scopeOf(srcT, srcC, i).join(' ')}`); });
+  const srcScopes = scopesAll(srcT, srcC);
+  src.forEach((w, i) => { if (plain(w)) (sigs.get(w) || sigs.set(w, new Set()).get(w)).add(`${preSig(src, i)}|${srcScopes[i].join(' ')}`); });
   // слова строки, которые в цитате стоят под отрицанием: строка должна содержать «не»/«ни»/«нельзя»
   const rowWords = wordsOf(`${String((row && row.role) || '')} ${String((row && row.value) || '')}`, false);
   const rowSet = new Set(rowWords);
@@ -351,7 +379,7 @@ export function rowWordProblems(row, story) {
   // «без» и намерение в строке должны относиться к слову, которое и в цитате стоит под ними:
   // «Задачу — решила» из «Решила задачу» — да; «Чай — хотела» из «пила чай и хотела спать» — нет
   const scopedBy = new Set();
-  src.forEach((w, i) => { if (plain(w) && rowSet.has(w)) scopeOf(srcT, srcC, i).forEach((x) => scopedBy.add(x)); });
+  src.forEach((w, i) => { if (plain(w) && rowSet.has(w)) srcScopes[i].forEach((x) => scopedBy.add(x)); });
   const orphan = rowWords.find((w) => (w === 'без' || INTENT.test(w)) && !scopedBy.has(w));
   if (orphan) problems.push({ field: wordsOf(String(row.role || ''), false).includes(orphan) ? 'role' : 'value', kind: 'bound', words: [orphan] });
   for (const fieldName of ['role', 'value']) {
@@ -372,6 +400,7 @@ export function rowWordProblems(row, story) {
     const dangling = words.findIndex((w, i) => isNext(w) && !(NEG.has(w) && PRONOUNS.includes(words[i + 1])) && !words.slice(i + 1).some((x) => !isNext(x) && !TRANSPARENT.has(x) && !FUNCTION_MARKERS.has(x)));
     if (dangling >= 0) { problems.push({ field: fieldName, kind: 'bound', words: [words[dangling]] }); continue; }
     const { toks: fieldT, cl: fieldC } = tokensWithClauses(rawText, false);
+    const fieldScopes = scopesAll(fieldT, fieldC);
     for (let i = 0; i < words.length; i++) {
       const w = words[i];
       if (!plain(w)) continue;
@@ -379,7 +408,7 @@ export function rowWordProblems(row, story) {
       if (own.size > 1) { problems.push({ field: fieldName, kind: 'ambiguous', words: [w] }); break; }
       const [pre, neg] = [...own][0].split('|');
       // признак нельзя приставить к чужому слову: «Хотела чай», «Пила без — чай»
-      const fieldScope = scopeOf(fieldT, fieldC, i).join(' ');
+      const fieldScope = (fieldScopes[i] || []).join(' ');
       if (pre !== preSig(words, i) || (neg && !neg.split(' ').every((x) => rowSet.has(x))) || (!neg && fieldScope)) { problems.push({ field: fieldName, kind: 'bound', words: [w] }); break; }
     }
   }

@@ -394,7 +394,11 @@ test('«без» и намерение не приставляются, двое
 test('время проверки линейно: рассказ ~6000 знаков с повторами глагола речи — меньше 3 секунд', () => {
   const ep = sanitizeEpisode({ date: '2026-11-11', title: 'Т', genre: 'камерное кино',
     rows: Array.from({ length: 6 }, () => ({ role: 'Я', value: 'думала', source: 'думала думала' })) });
-  for (const big of ['думала '.repeat(850), 'сказала '.repeat(750), 'я сказала что '.repeat(430)]) {
+  const bigs = ['думала '.repeat(850), 'сказала '.repeat(750), 'я сказала что '.repeat(430),
+    // разбор 88066e51: переводы строк внутри кавычек и длинная фраза без точек в кавычках
+    '"' + 'а\n'.repeat(3000), '«' + 'а,\n'.repeat(2000), 'а не\n'.repeat(1500), '«' + 'утром пила чай\n'.repeat(400),
+    '«' + 'утром пила чай '.repeat(400), 'хотела пить чай без сахара '.repeat(230)];
+  for (const big of bigs) {
     const t0 = Date.now();
     validateEpisode(ep, big);
     draftRuleBased(big, { date: '2026-11-11' });
