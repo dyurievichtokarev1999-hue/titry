@@ -10,6 +10,7 @@ import { makeDraft, draftRuleBased, groundDraft } from '../server/draft.js';
 import { assessRisk, threatErrors, threatPhrase, threatSentences, threatPronounFilter, helpMessage, validateSafeEpisode,
   INSUFFICIENT_TEXT, INSUFFICIENT_MATERIAL, INSUFFICIENT_AFTER_EXCLUSION, EDIT_NOT_IN_TITLES_TEXT, EDIT_NOT_IN_TITLES, editNotInTitlesText } from '../server/safety.js';
 import { createBot, TEXT, editExcludedMessages } from '../server/bot.js';
+import { EDIT_SEP } from '../engine/episode.js';
 import { createApp } from '../server/app.js';
 import { rowWordsGrounded, wordsOf } from '../engine/episode.js';
 
@@ -609,4 +610,31 @@ test('пятый разбор: «кому достанется» с местои
 test('пятый разбор: реплика «не берём» — неизвестный путь даёт текст строки', () => {
   assert.equal(editNotInTitlesText('constructor'), EDIT_NOT_IN_TITLES.row);
   assert.equal(editNotInTitlesText('title'), EDIT_NOT_IN_TITLES.title);
+});
+
+// ── Шестой разбор: местоимение в части через запятую, контекст правки через EDIT_SEP, «переломаю ноги» ──
+
+test('шестой разбор: «человек сделал что-то, ему конец» — concern в любой пунктуации; про вещи — none', () => {
+  for (const t of ['Начальник наорал, ему не жить.', 'Сосед опять залил нас, ему конец.', 'Сосед опять шумел, он не жилец.', 'Брат, тебе конец.',
+    'Мама, ты покойник.', 'Сосед опять шумел, ему конец.', 'Сосед опять шумел. Ему конец.']) assert.equal(assessRisk(t).level, 'concern', t);
+  for (const t of ['Телефон совсем старый, он скоро сдохнет.', 'Свитер порвался, ему хана.', 'Последний кусок торта ему достанется.', 'Торт вкусный, прикончу его завтра.'])
+    assert.equal(assessRisk(t).level, 'none', t);
+});
+
+test('шестой разбор: «переломаю ноги» в любом порядке при человеке; себе и вещам — нет', () => {
+  for (const t of ['Переломаю соседу ноги.', 'Переломаю ноги брату.', 'Ноги брату переломаю.', 'Сосед опять залил нас. Переломаю ему ноги.',
+    'Ноги тебе переломаю.', 'Сосед опять залил нас. Ноги ему переломаю.']) assert.equal(assessRisk(t).level, 'concern', t);
+  for (const t of ['Переломаю себе ноги на этом льду.', 'Сломаю ногу, если пойду на каток.', 'Я сломаю маме кофемолку.', 'Мы с братом чуть не переломали ноги на горке.'])
+    assert.equal(assessRisk(t).level, 'none', t);
+});
+
+test('шестой разбор: правка через EDIT_SEP не теряет контекст рассказа — «после: Ему конец.» даёт блок помощи', async () => {
+  const st = 'Утром я пила чай. Вечером я пекла пирог. Сосед опять шумел всю ночь.';
+  assert.equal(assessRisk(`${st}${EDIT_SEP}Ему конец.`).level, 'concern');
+  const b = botSetup();
+  await b.say(st);
+  assert.ok(b.s().episode);
+  await b.say('после: Ему конец.');
+  assert.equal(b.texts().at(-1), `${EDIT_NOT_IN_TITLES.post}\n\n${helpMessage('concern')}`);
+  assert.deepEqual(b.events.at(-1), { event: 'edit_excluded', level: 'concern' });
 });
