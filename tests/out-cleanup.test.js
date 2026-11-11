@@ -88,7 +88,9 @@ test('B09.6 монтажная: стартовая очистка удаляет
     await fs.writeFile(path.join(out, 'a.mp4'), 'x'); await fs.writeFile(path.join(out, 'a.jpg'), 'x');
     await fs.symlink(path.join(foreign, 'precious.mp4'), path.join(out, 'link.mp4'));
     await fs.mkdir(path.join(out, 'sub')); await fs.writeFile(path.join(out, 'sub', 'keep'), 'x');
-    assert.equal(await purgeOut(out, 0, Date.now(), { strict: true }), 3);
+    // «Сейчас» с запасом: Date.now() отбрасывает доли миллисекунды, а mtimeMs их хранит — файл, созданный в ту же
+    // миллисекунду, иначе выглядит «из будущего» и не удаляется (нестабильность B09.6 от 10.11).
+    assert.equal(await purgeOut(out, 0, Date.now() + 1000, { strict: true }), 3);
     assert.deepEqual(await fs.readdir(out), ['sub'], 'подкаталоги не трогаются');
     assert.equal(await fs.readFile(path.join(foreign, 'precious.mp4'), 'utf8'), 'чужое', 'цель ссылки цела');
     // data/out сам — ссылка на чужой каталог: строгая очистка отказывает, ничего не удаляя.
