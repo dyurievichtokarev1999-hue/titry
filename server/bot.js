@@ -406,7 +406,7 @@ export function createBot({
       s.stage = 'idle';
       return tg.send(chatId, TEXT.checkUnavailable);
     }
-    if (r.insufficient) return replyInsufficient(chatId, s, story, gen, current);
+    if (r.insufficient) return replyInsufficient(chatId, s, story, gen, current, r.risk && r.risk.level === 'concern');
     if (!r.episode) {
       // Остановка важнее всего, даже если ответ устарел: рассказ запоминается как запрещённый.
       if (s.draftId === gen) return stopForSafety(chatId, s, r.risk.level, { byModel: r.risk.byModel });
@@ -438,7 +438,9 @@ export function createBot({
   // Поэтому перед репликой рассказ проходит ту же отдельную проверку, что и перед рендером: опасность даёт остановку,
   // незавершённая проверка — технический ответ, и только полное разрешение — реплику нехватки.
   // В метрики — только код события, без текста рассказа и номеров предложений.
-  async function replyInsufficient(chatId, s, story, gen, current) {
+  // Решение владельца 1 (PR 11): если исключался фрагмент уровня concern, сразу за репликой — тот же блок помощи,
+  // что у прежней карточки concern (helpMessage('concern')), без переходной фразы, черновика и кнопок.
+  async function replyInsufficient(chatId, s, story, gen, current, concern) {
     if (!current()) return;
     const g = await track(chatId, gate.verify(s.scope, story, null, story));
     if (!alive(chatId, s) || s.draftId !== gen) return;
@@ -452,7 +454,8 @@ export function createBot({
     s.stage = 'idle'; // черновика нет: правки и кнопки не к чему применять
     await metrics.log(chatId, 'insufficient_after_exclusion');
     if (!current()) return;
-    return tg.send(chatId, TEXT.insufficient);
+    await tg.send(chatId, TEXT.insufficient);
+    if (concern) await tg.send(chatId, helpMessage('concern'));
   }
 
   async function doRender(chatId, s) {

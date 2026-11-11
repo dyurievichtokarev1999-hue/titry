@@ -8,6 +8,8 @@ const state = {
   provider: null,
   feedback: null,
   t: 0, playing: false, last: 0,
+  screen: 0,            // поколение экрана результата: ответ рендера/перепроверки, начатых до нехватки, не показывается
+  insufficient: false,  // нехватка материала после исключения: рендер выключен до нового проверенного черновика
 };
 const T = timeline(DEFAULT_DURATION);
 const audio = new Audio();
@@ -99,7 +101,7 @@ function showChecks() {
     const m = /^rows\.(\d+)\.(\w+)$/.exec(item[0].path);
     if (m) $('rows').children[m[1]]?.querySelector(`[data-k=${m[2]}]`)?.classList.add(item[1]);
   }
-  $('renderBtn').disabled = !v.ok;
+  $('renderBtn').disabled = !v.ok || state.insufficient;
   return v;
 }
 
@@ -169,6 +171,7 @@ async function requestDraft() {
   try {
     const r = await api('/api/draft', { story, date: $('date').value, period: $('period').value, tone: $('tone').value });
     if (!r.episode) { if (r.help) showHelp(r.help); $('draftNote').textContent = 'Черновик остановлен фильтром безопасности.'; return; }
+    state.insufficient = false; // новый проверенный черновик — обычный маршрут
     state.episode = r.episode; state.draft = structuredClone(r.episode); state.provider = r.provider;
     fillForm(state.episode); changed();
     const dropped = r.dropped && r.dropped.length ? ` Отброшено строк без опоры на рассказ: ${r.dropped.length}.` : '';
@@ -192,13 +195,26 @@ function stopText(e, safetyNote) {
     return `${d.error}. ${d.message} ${d.next}${when}`;
   }
   if (d.unavailable) return `${d.error}. ${d.message} ${d.next}`;
-  // Нехватка материала после исключения опасных частей: только реплика, без помощи и без повтора.
-  if (d.kind === 'insufficient') { clearDraft(); return d.error; }
+  // Нехватка материала после исключения опасных частей: реплика дословно; при concern сразу за ней — блок помощи.
+  if (d.kind === 'insufficient') { enterInsufficient(); if (d.help) showHelp(d.help); return d.error; }
   return e.message;
 }
 
-// Нехватка материала: прежний черновик не остаётся на экране и не уходит в рендер.
-function clearDraft() {
+// Нехватка материала (решение владельца по PR 11): прежний ролик не играет, блок результата, ссылка скачивания
+// и кнопки повтора (в том числе перепроверки после технической паузы) скрыты, черновик очищен, рендер выключен
+// до нового проверенного черновика. Файлы на сервере не трогаются: их сохраняет и удаляет действующий маршрут.
+function enterInsufficient() {
+  state.insufficient = true;
+  state.screen++;
+  stop(); // предпросмотр и звук
+  const video = $('video');
+  video.pause();
+  video.removeAttribute('src'); video.load();
+  $('download').removeAttribute('href'); $('download').removeAttribute('download');
+  $('result').hidden = true;
+  $('recheckBtn').hidden = true;
+  $('renderNote').textContent = '';
+  state.t = 0;
   state.episode = blankEpisode({ date: $('date').value || undefined, period: $('period').value || 'day' });
   state.draft = structuredClone(state.episode);
   fillForm(state.episode); changed();
@@ -213,6 +229,7 @@ $('example').addEventListener('change', async () => {
   if (!id) return;
   const data = await (await fetch(`/examples/${id}.json`)).json();
   $('story').value = data.story;
+  state.insufficient = false; // вымышленный пример со своим рассказом — обычный маршрут
   state.episode = sanitizeEpisode(data.episode); state.draft = structuredClone(state.episode); state.provider = 'example';
   state.t = T.titleHold - 0.5;
   fillForm(state.episode); changed();
@@ -220,25 +237,33 @@ $('example').addEventListener('change', async () => {
 });
 
 $('renderBtn').addEventListener('click', async () => {
+  if (state.insufficient) return;
+  const screen = state.screen;
   $('renderBtn').disabled = true; $('renderNote').textContent = 'Рендер… обычно 15–40 секунд.';
   try {
     const r = await api('/api/render', { episode: state.episode, story: $('story').value.trim() || undefined, participant: $('participant').value, preset: $('preset').value, watermark: $('watermark').checked, still: $('still').checked });
+    if (screen !== state.screen) return; // пока шёл рендер, экран перешёл в нехватку
     $('video').src = r.video; $('download').href = r.video; $('download').download = r.video.split('/').pop();
     $('result').hidden = false;
     $('renderNote').textContent = `Готово за ${r.seconds.toFixed(0)} с. Отправьте файл участнику.`;
   } catch (e) {
+    if (screen !== state.screen) return;
     $('renderNote').textContent = stopText(e, 'Ролик не собирается: сработал фильтр безопасности.');
   } finally { showChecks(); }
 });
 
 // Явное действие организатора после технической приостановки: полная проверка заново, не раньше срока.
 $('recheckBtn').addEventListener('click', async () => {
+  if (state.insufficient) return;
+  const screen = state.screen;
   $('recheckBtn').disabled = true;
   try {
     await api('/api/recheck', { episode: state.episode, story: $('story').value.trim() || undefined });
+    if (screen !== state.screen) return;
     $('recheckBtn').hidden = true;
     $('renderNote').textContent = 'Проверка пройдена заново. Можно собрать ролик.';
   } catch (e) {
+    if (screen !== state.screen) return;
     $('renderNote').textContent = stopText(e, 'Ролик не собирается: сработал фильтр безопасности.');
     if (e.data && e.data.kind === 'safety') $('recheckBtn').hidden = true;
   } finally { $('recheckBtn').disabled = false; }

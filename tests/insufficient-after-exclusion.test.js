@@ -7,7 +7,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { makeDraft, draftRuleBased } from '../server/draft.js';
-import { insufficientAfterExclusion, INSUFFICIENT_AFTER_EXCLUSION, validateSafeEpisode, assessRisk } from '../server/safety.js';
+import { insufficientAfterExclusion, INSUFFICIENT_AFTER_EXCLUSION, validateSafeEpisode, assessRisk, helpMessage } from '../server/safety.js';
 import { createBot, TEXT } from '../server/bot.js';
 import { createApp, INSUFFICIENT_TEXT } from '../server/app.js';
 import { LIMITS } from '../engine/episode.js';
@@ -159,7 +159,7 @@ test('заготовка без ИИ проверяется validateSafeEpisode:
 // ── Бот: подставные safetyCheck и render ───────────────────────────────────
 
 const chat = { id: 88001, type: 'private' };
-function botSetup({ check = () => false, hasKey } = {}) {
+function botSetup({ check = () => false, hasKey, draft = manual } = {}) {
   const sent = []; const events = []; const counters = { render: 0, video: 0, check: 0 };
   const tg = {
     send: async (c, text, extra = {}) => { sent.push({ text, extra }); }, action: async () => {}, answer: async () => {},
@@ -167,7 +167,7 @@ function botSetup({ check = () => false, hasKey } = {}) {
   };
   const metrics = { hash: () => 'fictional', log: async (id, event, extra = {}) => { events.push({ event, ...extra }); }, forget: async () => {} };
   const bot = createBot({
-    tg, metrics, draft: manual,
+    tg, metrics, draft,
     safetyCheck: async (t) => { counters.check++; return check(t, counters.check); },
     ...(hasKey ? { hasKey } : {}),
     render: async (e, o) => { counters.render++; return { seconds: 1, duration: 24, outPath: o.outPath }; },
@@ -177,21 +177,33 @@ function botSetup({ check = () => false, hasKey } = {}) {
   return { bot, sent, events, counters, say, press, texts: () => sent.map((m) => m.text) };
 }
 
-test('бот: нехватка → ровно одна реплика, без кнопок, черновика и помощи; метрика — только код', async () => {
+// Решение владельца 1 (PR 11): после исключения фрагмента уровня concern — реплика и сразу за ней тот же блок помощи,
+// что у прежней карточки concern; если исключались только фрагменты без concern — одна реплика.
+test('бот: нехватка после concern → реплика, сразу за ней блок помощи concern; без кнопок и черновика; метрика — только код', async () => {
   assert.equal(TEXT.insufficient, REPLY);
   for (const id of CONCERN) {
     const b = botSetup();
     await b.say(byId[id]);
     const after = b.sent.slice(b.texts().indexOf(TEXT.working) + 1);
-    assert.deepEqual(after.map((m) => m.text), [REPLY], id);
-    assert.equal(after[0].extra.reply_markup, undefined, `${id}: без кнопок`);
-    assert.doesNotMatch(b.texts().join('\n'), HELP);
+    assert.deepEqual(after.map((m) => m.text), [REPLY, helpMessage('concern')], id);
+    for (const m of after) assert.equal(m.extra.reply_markup, undefined, `${id}: без кнопок`);
+    assert.doesNotMatch(b.texts().join('\n'), /Сейчас важнее не титры/, `${id}: не карточка urgent`);
     assert.deepEqual(b.events, [{ event: 'insufficient_after_exclusion' }], `${id}: метрика без текста и номеров`);
     // Кнопки прежних черновиков ничего не запускают, ролика нет.
     for (let n = 0; n <= 3; n++) await b.press(`play:${n}`);
     assert.equal(b.counters.render, 0); assert.equal(b.counters.video, 0);
     assert.equal(b.bot.sessions.get(chat.id).episode, null);
   }
+});
+
+test('бот: нехватка без concern → ровно одна реплика, без блока помощи', async () => {
+  const draft = async () => ({ risk: { level: 'none', byModel: false, matches: [] }, episode: null, provider: 'manual', insufficient: true, code: 'insufficient_after_exclusion' });
+  const b = botSetup({ draft });
+  await b.say(SAFE);
+  const after = b.sent.slice(b.texts().indexOf(TEXT.working) + 1);
+  assert.deepEqual(after.map((m) => m.text), [REPLY]);
+  assert.doesNotMatch(b.texts().join('\n'), HELP);
+  assert.equal(b.counters.check, 1, 'отдельная проверка до реплики');
 });
 
 test('бот: две пары — обычный черновик, реплики нехватки нет', async () => {
@@ -279,11 +291,11 @@ test('бот: правка не возвращает исключённый фр
 
 // ── Монтажная ───────────────────────────────────────────────────────────────
 
-async function withApp({ check = () => false, hasKey } = {}, fn) {
+async function withApp({ check = () => false, hasKey, draft = manual } = {}, fn) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-ins-'));
   const counters = { render: 0, check: 0 };
   const server = createApp({
-    dataDir, draft: manual,
+    dataDir, draft,
     safetyCheck: async (t) => { counters.check++; return check(t, counters.check); },
     hasKey: hasKey || (() => true),
     render: async (e, o) => { counters.render++; return { seconds: 1, outPath: o.outPath }; },
@@ -296,17 +308,27 @@ async function withApp({ check = () => false, hasKey } = {}, fn) {
   try { await fn({ post, counters }); } finally { server.close(); await fs.rm(dataDir, { recursive: true, force: true }); }
 }
 
-test('монтажная: нехватка → 422 { kind: insufficient, error: реплика } и ничего больше', async () => {
+test('монтажная: нехватка после concern → 422 { kind: insufficient, error: реплика, help: блок concern } и ничего больше', async () => {
   assert.equal(INSUFFICIENT_TEXT, REPLY);
   await withApp({}, async ({ post, counters }) => {
     for (const id of CONCERN) {
       const r = await post('/api/draft', { story: byId[id] });
       assert.equal(r.status, 422, id);
-      assert.deepEqual(r.body, { kind: 'insufficient', error: REPLY }, id);
+      assert.deepEqual(r.body, { kind: 'insufficient', error: REPLY, help: helpMessage('concern') }, id);
     }
     assert.equal(counters.render, 0);
     const ok = await post('/api/draft', { story: SAFE });
     assert.equal(ok.status, 200); assert.equal(ok.body.episode.rows.length, 2);
+  });
+});
+
+test('монтажная: нехватка без concern → 422 { kind: insufficient, error: реплика } без help', async () => {
+  const draft = async () => ({ risk: { level: 'none', byModel: false, matches: [] }, episode: null, provider: 'manual', insufficient: true, code: 'insufficient_after_exclusion' });
+  await withApp({ draft }, async ({ post, counters }) => {
+    const r = await post('/api/draft', { story: SAFE });
+    assert.equal(r.status, 422);
+    assert.deepEqual(r.body, { kind: 'insufficient', error: REPLY });
+    assert.equal(counters.check, 1, 'отдельная проверка до реплики');
   });
 });
 

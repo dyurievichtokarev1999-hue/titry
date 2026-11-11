@@ -142,8 +142,10 @@ const TECHNICAL = {
   next: 'Повторную полную проверку можно запустить только явным действием организатора, не раньше чем через 15 минут после второго сбоя. Ожидание и перезапуск сами по себе не снимают приостановку. Если остановка по безопасности уже подтверждена, она сохраняется.',
 };
 // Нехватка материала после исключения опасных частей (внутренняя причина insufficient_after_exclusion):
-// 422 с kind 'insufficient' и одной репликой редактора повествования, дословно. Без черновика, validation, risk,
-// help и подсказок организатору: ни просьбы дописать, ни повтора. Имя причины в ответ не выдаётся.
+// 422 с kind 'insufficient' и одной репликой редактора повествования, дословно. Без черновика, validation, risk
+// и подсказок организатору: ни просьбы дописать, ни повтора. Имя причины в ответ не выдаётся.
+// Решение владельца 1 (PR 11): если исключался фрагмент уровня concern, в ответе ещё help — тот же блок помощи,
+// что у прежней карточки concern (helpMessage('concern')); экран показывает его сразу за репликой.
 export const INSUFFICIENT_TEXT = 'Не получилось собрать титры только из твоих слов. Сегодня можно без ролика.';
 const INSUFFICIENT = { kind: 'insufficient', error: INSUFFICIENT_TEXT };
 const SCOPE = 'studio'; // монтажная — одна общая область запретов
@@ -209,7 +211,7 @@ export function createApp({
         // (как перед рендером) идёт до реплики: опасность даёт 422/safety, неполная проверка — 503/technical.
         const g = await gate.verify(SCOPE, story, null, String(story ?? ''));
         if (!g.ok) return g.kind === 'safety' ? draftStop({ level: 'urgent', byModel: true, matches: [] }) : fromGate(g, 'draft');
-        return { status: 422, body: { ...INSUFFICIENT } };
+        return { status: 422, body: result.risk && result.risk.level === 'concern' ? { ...INSUFFICIENT, help: helpMessage('concern') } : { ...INSUFFICIENT } };
       }
       if (!result.episode) {
         // S01 (локальный слой) и S03 (генератор): рассказ остановлен в этой области.
