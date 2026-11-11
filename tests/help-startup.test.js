@@ -19,6 +19,9 @@ const BAD = {
   'нет проверенных контактов': { region: 'RU', emergency: { label: 'Экстренные', phone: '112', verified: false }, contacts: [] },
   'проверенный контакт без номера': { region: 'RU', emergency: { label: 'Экстренные', phone: '', verified: true }, contacts: [] },
   'пустая подпись контакта': { region: 'RU', emergency: { label: ' ', phone: '112', verified: true }, contacts: [] },
+  'verified строкой "false"': { region: 'RU', emergency: { label: 'Экстренные', phone: '112', verified: 'false' }, contacts: [] },
+  'номер из пробелов': { region: 'RU', emergency: { label: 'Экстренные', phone: '   ', verified: true }, contacts: [] },
+  'часы не строкой': { region: 'RU', emergency: { label: 'Экстренные', phone: '112', hours: { a: 1 }, verified: true }, contacts: [] },
   'блок помощи длиннее одного сообщения': { region: 'RU', emergency: { label: 'Ж'.repeat(TELEGRAM_TEXT_LIMIT), phone: '112', verified: true }, contacts: [] },
 };
 
@@ -75,7 +78,7 @@ function run(dir, entry, env, preload) {
   });
 }
 
-for (const name of ['нет файла', 'не JSON', 'нет проверенных контактов']) {
+for (const name of Object.keys(BAD)) {
   test(`запуск бота: help.json «${name}» → код 3, Telegram не опрашивается, в журнале только этап и код`, { timeout: 30000 }, async () => {
     const dir = await tree(BAD[name]);
     try {
@@ -83,7 +86,8 @@ for (const name of ['нет файла', 'не JSON', 'нет проверенн
       const preload = path.join(dir, 'preload.mjs');
       await fs.writeFile(preload, `import fs from 'node:fs';
 globalThis.fetch = async () => { fs.writeFileSync(${JSON.stringify(flag)}, '1'); process.exit(0); };`);
-      const r = await run(dir, 'server/bot.js', { TELEGRAM_BOT_TOKEN: 'test-only' }, preload);
+      const rt = path.join(dir, 'runtime'); await fs.mkdir(rt, { mode: 0o700 }); // изоляция, даже если проверка сломается
+      const r = await run(dir, 'server/bot.js', { TELEGRAM_BOT_TOKEN: 'test-only', TITRY_RUNTIME_DIR: rt }, preload);
       assert.equal(r.code, 3, r.err);
       assert.match(r.err, /"stage":"help\.load","code":"help_config"/);
       assert.ok(!r.err.includes(dir), 'путей в журнале нет');
@@ -115,5 +119,33 @@ globalThis.fetch = async () => { fs.writeFileSync(${JSON.stringify(flag)}, '1');
     assert.doesNotMatch(r.err, /help\.load/);
     assert.equal(r.code, 0, r.err);
     await fs.stat(flag);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('контроль: с рабочим help.json тот же запуск монтажной проходит проверку помощи и слушает порт', { timeout: 30000 }, async () => {
+  const dir = await tree(GOOD);
+  try {
+    const p = spawn(process.execPath, [path.join(dir, 'server/app.js')], { env: { ...process.env, PORT: '0', TITRY_BLOCKED_HMAC_KEY: 'test-only-key-not-a-secret', TITRY_BLOCKED_KEY_VERSION: 'v-help-test' }, cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '', err = '';
+    p.stderr.on('data', (d) => { err += d; });
+    const started = await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), 20000);
+      p.stdout.on('data', (d) => { out += d; if (/Монтажная: http/.test(out)) { clearTimeout(timer); resolve(true); } });
+      p.on('exit', () => { clearTimeout(timer); resolve(false); });
+    });
+    p.kill();
+    assert.ok(started, err);
+    assert.doesNotMatch(err, /help\.load/);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('prepareHelp: неудачная повторная проверка не оставляет прежние контакты; рабочий файл восстанавливает', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-help-'));
+  try {
+    prepareHelp();
+    const f = await helpFile(dir, BAD['нет проверенных контактов']);
+    assert.throws(() => prepareHelp(f), { code: 'help_config' });
+    // Ленивое обращение после неудачи перечитывает рабочий файл репозитория один раз.
+    assert.match(helpMessage('concern'), /112/);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });

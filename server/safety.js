@@ -478,13 +478,15 @@ export const TELEGRAM_TEXT_LIMIT = 4096; // лимит одного тексто
 
 export function loadHelp(file = HELP_FILE) {
   const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
-  const contacts = [cfg.emergency, ...(cfg.contacts || [])].filter((c) => c && c.verified && c.phone);
+  // Только явно подтверждённые контакты: verified строго true («"false"», «"no"» не проходят).
+  const contacts = [cfg.emergency, ...(Array.isArray(cfg.contacts) ? cfg.contacts : [])].filter((c) => c && c.verified === true && c.phone);
   return { region: cfg.region, contacts };
 }
 
 // Контакты помощи в памяти процесса (решение владельца по PR 11, 11.11 11:05): файл читается и проверяется
 // один раз — при старте бота и монтажной (prepareHelp) — и во время работы не перечитывается.
 let preparedHelp = null;
+let helpFailure = null; // ленивая проверка без старта (тесты, скрипты) не повторяется при каждом вызове
 
 /**
  * Прочитать и проверить help.json один раз. Ошибка — исключение с кодом help_config (вызывающий не стартует):
@@ -493,21 +495,24 @@ let preparedHelp = null;
  */
 export function prepareHelp(file = HELP_FILE) {
   const fail = () => Object.assign(new Error('help'), { code: 'help_config' });
+  preparedHelp = null; // неудачная проверка не оставляет прежние контакты
   let help;
   try { help = loadHelp(file); } catch { throw fail(); }
   if (!Array.isArray(help.contacts) || !help.contacts.length) throw fail();
-  if (help.contacts.some((c) => typeof c.label !== 'string' || !c.label.trim() || typeof c.phone !== 'string' || !c.phone.trim())) throw fail();
-  for (const level of ['concern', 'urgent']) {
-    const text = helpMessage(level, help);
-    if (!text.trim() || text.length > TELEGRAM_TEXT_LIMIT) throw fail();
-  }
+  const text = (v) => typeof v === 'string' && v.trim().length > 0;
+  if (help.contacts.some((c) => !text(c.label) || !text(c.phone) || (c.hours !== undefined && typeof c.hours !== 'string'))) throw fail();
+  // Тексты не пусты по построению (постоянные фразы + непустой список); проверяется лимит одного сообщения.
+  for (const level of ['concern', 'urgent']) if (helpMessage(level, help).length > TELEGRAM_TEXT_LIMIT) throw fail();
   preparedHelp = help;
+  helpFailure = null;
   return help;
 }
 
 /** Проверенные при старте контакты. Без старта (тесты, скрипты) — один раз при первом обращении, с той же проверкой. */
 export function currentHelp() {
-  return preparedHelp || prepareHelp();
+  if (preparedHelp) return preparedHelp;
+  if (helpFailure) throw helpFailure;
+  try { return prepareHelp(); } catch (e) { helpFailure = e; throw e; }
 }
 
 /** Текст экрана помощи. Без обещаний «мы всегда заметим» и без давления. */
