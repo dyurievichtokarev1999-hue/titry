@@ -461,3 +461,32 @@ test('сон через переводы строк и «проснулась» 
     assert.deepEqual(rowWordProblems(row, story), [], `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
   }
 });
+
+// ── Разбор 9a7a206b ──────────────────────────────────────────────────────────
+
+test('сон до явного «я проснулась», видения и кошмар, -сть/-зть, источник без глагола, признак в конце фразы, предел фразы', () => {
+  for (const { story, row } of fx.review10.reject) {
+    assert.equal(rowWordsGrounded(row, story), false, `${row.role} — ${row.value} ← ${JSON.stringify(story).slice(0, 90)}`);
+  }
+  for (const { story, row } of fx.review10.accept) {
+    assert.deepEqual(rowWordProblems(row, story), [], `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+  // заготовка не делает служебные слова ролью и не берёт строки из сна и источника
+  const r = draftRuleBased('Мне снилось море. Бабушка проснулась. Мама пекла пироги. Рейс, согласно табло, отменён. Уже поздно.', { date: '2026-11-11' });
+  assert.ok(!r.episode.rows.some((x) => /^(Уже|Согласно|Мама)/.test(x.role)), JSON.stringify(r.episode.rows));
+});
+
+test('монтажная: рассказ длиннее 6000 знаков — 413 до проверки строк, рендер не вызывается', async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-vr-long-'));
+  let renders = 0;
+  const server = createApp({ dataDir, safetyCheck: async () => false, render: async (e, o) => { renders++; return { seconds: 1, outPath: o.outPath }; } });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const post = async (p, body) => (await fetch(`http://127.0.0.1:${server.address().port}${p}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })).status;
+  try {
+    const story = 'Утром я пила чай. '.repeat(400);
+    const ep = episodeWith({ role: 'Утром', value: 'чай', source: 'Утром я пила чай' });
+    assert.equal(await post('/api/validate', { episode: ep, story }), 413);
+    assert.equal(await post('/api/render', { episode: ep, story }), 413);
+    assert.equal(renders, 0);
+  } finally { server.closeAllConnections(); server.close(); await fs.rm(dataDir, { recursive: true, force: true }); }
+});
