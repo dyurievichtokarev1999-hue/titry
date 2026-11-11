@@ -92,6 +92,8 @@ function showChecks() {
   const v = validateEpisode(state.episode, story);
   const ul = $('checks');
   ul.textContent = '';
+  // Нехватка: пустая форма не превращается в список «допишите» — проверять нечего, рендер выключен.
+  if (state.insufficient) { $('renderBtn').disabled = true; return v; }
   const add = (cls, msg) => { const li = document.createElement('li'); li.className = cls; li.textContent = msg; ul.append(li); };
   v.errors.forEach((e) => add('error', e.msg));
   v.warnings.forEach((w) => add('warning', w.msg));
@@ -170,6 +172,7 @@ async function requestDraft() {
   $('draftBtn').disabled = true; $('draftNote').textContent = 'Собираю черновик…';
   try {
     const r = await api('/api/draft', { story, date: $('date').value, period: $('period').value, tone: $('tone').value });
+    state.insufficient = false; // любой исход нового рассказа, кроме нехватки, возвращает обычный маршрут
     if (!r.episode) { if (r.help) showHelp(r.help); $('draftNote').textContent = 'Черновик остановлен фильтром безопасности.'; return; }
     state.insufficient = false; // новый проверенный черновик — обычный маршрут
     state.episode = r.episode; state.draft = structuredClone(r.episode); state.provider = r.provider;
@@ -178,6 +181,8 @@ async function requestDraft() {
     $('draftNote').textContent = (r.provider === 'claude' ? 'Черновик от Claude.' : 'Заготовка без ИИ: сократите значения до коротких фраз.') + dropped + (r.note ? ' ' + r.note : '');
     if (r.help) showHelp(r.help);
   } catch (e) {
+    // Не нехватка (stop, технический ответ, ошибка) — флаг снимается, иначе кнопка перепроверки была бы мёртвой.
+    if (!(e.data && e.data.kind === 'insufficient')) state.insufficient = false;
     // ИР-02: «проверка недоступна» — экран организатора целиком (тексты редактора повествования, PM-01).
     $('draftNote').textContent = stopText(e, 'Черновик остановлен фильтром безопасности.');
   } finally { $('draftBtn').disabled = false; }
@@ -196,7 +201,8 @@ function stopText(e, safetyNote) {
   }
   if (d.unavailable) return `${d.error}. ${d.message} ${d.next}`;
   // Нехватка материала после исключения опасных частей: реплика дословно; при concern сразу за ней — блок помощи.
-  if (d.kind === 'insufficient') { enterInsufficient(); if (d.help) showHelp(d.help); return d.error; }
+  // Окно помощи модальное и закрывает экран, поэтому реплика стоит и в окне — сразу над тем же блоком помощи.
+  if (d.kind === 'insufficient') { enterInsufficient(); if (d.help) showHelp(`${d.error}\n\n${d.help}`); return d.error; }
   return e.message;
 }
 
@@ -206,6 +212,8 @@ function stopText(e, safetyNote) {
 function enterInsufficient() {
   state.insufficient = true;
   state.screen++;
+  $('help').hidden = true; // помощь прежнего черновика не остаётся на экране
+  state.provider = null; state.feedback = null;
   stop(); // предпросмотр и звук
   const video = $('video');
   video.pause();

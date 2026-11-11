@@ -7,10 +7,11 @@ import fs from 'node:fs/promises';
 import vm from 'node:vm';
 import * as episode from '../engine/episode.js';
 import { timeline, DEFAULT_DURATION } from '../engine/draw.js';
+import { helpMessage } from '../server/safety.js';
 
 const ex = JSON.parse(await fs.readFile(new URL('../examples/day-quiet.json', import.meta.url), 'utf8'));
 const REPLY = 'Не получилось собрать титры только из твоих слов. Сегодня можно без ролика.';
-const HELP = 'Похоже, в этом дне было что-то опасное или очень тяжёлое.\n\nКОНТАКТЫ';
+const HELP = helpMessage('concern'); // тот же блок, что отдаёт сервер
 const SRC = (await fs.readFile(new URL('../studio/studio.js', import.meta.url), 'utf8')).replace(/^import .*$/gm, '');
 
 class El {
@@ -119,7 +120,7 @@ test('монтажная: открытая техническая пауза, з
   await u.draft(B);
   assertCleared(u);
   assert.equal(u.el('help').hidden, false, 'блок помощи показан');
-  assert.equal(u.el('helpText').textContent, HELP, 'тот же текст помощи, без переходной фразы');
+  assert.equal(u.el('helpText').textContent, `${REPLY}\n\n${HELP}`, 'сначала реплика, сразу за ней тот же блок помощи, без переходной фразы');
   await u.click('recheckBtn');
   assert.ok(!u.calls.includes('/api/recheck'));
 });
@@ -157,4 +158,61 @@ test('монтажная: после нехватки новый провере�
   assert.equal(u.el('result').hidden, false);
   assert.equal(u.el('video').getAttribute('src'), '/out/c.mp4');
   assert.equal(u.el('download').getAttribute('href'), '/out/c.mp4');
+});
+
+test('id элементов из studio.js есть в index.html (подставной DOM не скрывает опечатки)', async () => {
+  const html = await fs.readFile(new URL('../studio/index.html', import.meta.url), 'utf8');
+  const ids = new Set([...html.matchAll(/id="([^"]+)"/g)].map((m) => m[1]));
+  const used = [...new Set([...SRC.matchAll(/\$\('([^']+)'\)/g)].map((m) => m[1]))];
+  assert.deepEqual(used.filter((id) => !ids.has(id)), []);
+});
+
+test('монтажная: нехватка, затем технический ответ для нового рассказа → кнопка перепроверки видна и работает', async () => {
+  let n = 0;
+  const u = studio(async (p) => {
+    if (p === '/api/config') return { provider: 'claude', model: 'm' };
+    if (p === '/api/draft') return ++n === 1 ? insufficient() : { status: 422, body: { kind: 'technical', reason: 'check_incomplete_twice', error: 'Проверка приостановлена', message: 'm', next: 'n' } };
+    if (p === '/api/recheck') return { rechecked: true };
+    return {};
+  });
+  await u.draft(B);
+  await u.draft('Вымышленный рассказ C: утром я пила чай. Вечером я читала книгу.');
+  assert.equal(u.el('recheckBtn').hidden, false);
+  await u.click('recheckBtn');
+  assert.ok(u.calls.includes('/api/recheck'), 'кнопка не мёртвая');
+});
+
+test('монтажная: перепроверка, завершившаяся после нехватки, не меняет экран', async () => {
+  let finish; let n = 0;
+  const u = studio(async (p) => {
+    if (p === '/api/config') return { provider: 'claude', model: 'm' };
+    if (p === '/api/draft') return ++n === 1 ? okDraft() : insufficient();
+    if (p === '/api/render') return { status: 422, body: { kind: 'technical', reason: 'check_incomplete_twice', error: 'e', message: 'm', next: 'n' } };
+    if (p === '/api/recheck') return new Promise((r) => { finish = () => r({ rechecked: true }); });
+    return {};
+  });
+  await u.draft(ex.story);
+  await u.click('renderBtn');
+  const rechecking = u.el('recheckBtn').listeners.click();
+  await u.tick();
+  await u.draft(B);
+  finish(); await rechecking; await u.tick();
+  assertCleared(u);
+});
+
+test('монтажная: открытая помощь прежнего черновика закрывается при нехватке без concern; журнал без прежнего provider', async () => {
+  let n = 0; let logged;
+  const u = studio(async (p, body) => {
+    if (p === '/api/config') return { provider: 'claude', model: 'm' };
+    if (p === '/api/draft') return ++n === 1 ? { ...okDraft(), risk: { level: 'concern' }, help: HELP } : insufficient();
+    if (p === '/api/log') { logged = body; return { saved: 'x' }; }
+    return {};
+  });
+  await u.draft(ex.story);
+  assert.equal(u.el('help').hidden, false);
+  await u.draft(B);
+  assert.equal(u.el('help').hidden, true, 'на экране одна реплика');
+  assertCleared(u);
+  await u.click('logBtn');
+  assert.equal(logged.provider, null);
 });

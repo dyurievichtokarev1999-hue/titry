@@ -440,6 +440,8 @@ export function createBot({
   // В метрики — только код события, без текста рассказа и номеров предложений.
   // Решение владельца 1 (PR 11): если исключался фрагмент уровня concern, сразу за репликой — тот же блок помощи,
   // что у прежней карточки concern (helpMessage('concern')), без переходной фразы, черновика и кнопок.
+  // Признак concern — уровень всего рассказа, как у прежней карточки. Между двумя сообщениями нет проверки current():
+  // блок помощи после реплики уходит всегда, даже если /delete пришёл между ними (помощь не скрывается).
   async function replyInsufficient(chatId, s, story, gen, current, concern) {
     if (!current()) return;
     const g = await track(chatId, gate.verify(s.scope, story, null, story));
