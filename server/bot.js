@@ -693,7 +693,7 @@ export function createBot({
           // п. 3 для правок: местоимение в строке правки, указывающее на человека из исключённой угрозы.
           const path = editedPath(cmd, s.episode);
           if (!excluded && path && (threatErrors(ctx, s.episode).some((e) => e.path === path)
-            || (/^rows\./.test(path) && threatPronounFilter(ctx)(own)))) excluded = true;
+            || (/^(?:rows\.|post$)/.test(path) && threatPronounFilter(ctx)(own)))) excluded = true;
           if (excluded) s.episode = before;
           // Один вердикт на правку: та же проверка, что перед рендером (рассказ + поля эпизода). Если она даёт urgent,
           // остановка сейчас, а не обещание «черновик на месте» и остановка на «Смотреть».

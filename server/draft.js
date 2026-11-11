@@ -130,9 +130,11 @@ export function groundDraft(raw, story, { date = todayIso(), period = 'day' } = 
   // Угроза другому человеку не становится титром: строки с опорой на такое предложение отбрасываются.
   const threats = threatSentences(story);
   const threat = (...xs) => xs.some((x) => touchesThreat(x, threats, story));
+  // Как у заготовки (разбор 08ead472, согласованность): строка с местоимением на человека из исключённой угрозы.
+  const pronounToThreat = threatPronounFilter(story);
   for (const r of raw.rows || []) {
     // Слова роли и значения — только из цитаты этой строки, признаки («не», «бы», «если»…) не оторваны.
-    if (sourceFound(r.source, story) && rowWordsGrounded(r, story) && !threat(r.role, r.value, r.source) && !threatPhrase(`${r.role || ''} ${r.value || ''}`)) rows.push({ role: r.role, value: r.value, source: r.source });
+    if (sourceFound(r.source, story) && rowWordsGrounded(r, story) && !threat(r.role, r.value, r.source) && !threatPhrase(`${r.role || ''} ${r.value || ''}`) && !pronounToThreat(r.source)) rows.push({ role: r.role, value: r.value, source: r.source });
     else dropped.push(r);
   }
   const post = raw.post && raw.post.text && sourceFound(raw.post.source, story) && !threat(raw.post.text, raw.post.source)
