@@ -52,7 +52,8 @@ export function makeGate({ check, hasKey = () => true, monoNow = monotonic, wall
     let a = scopes.get(scope);
     // failures: storyDigest → { vd, n } — подряд идущие неполные ответы одной версии; epoch — номер «эпохи» рассказа:
     // меняется при новой паузе и при ручном повторе; ответы, начатые в прежней эпохе, не учитываются в счётчике.
-    if (!a) { a = { safety: new Set(), technical: new Map(), failures: new Map(), epochs: new Map() }; scopes.set(scope, a); }
+    // decisions: storyDigest → Set незавершённых решений отдельной проверки этого рассказа (см. runCheck).
+    if (!a) { a = { safety: new Set(), technical: new Map(), failures: new Map(), epochs: new Map(), decisions: new Map() }; scopes.set(scope, a); }
     return a;
   };
 
@@ -99,9 +100,31 @@ export function makeGate({ check, hasKey = () => true, monoNow = monotonic, wall
 
   // Одна полная отдельная проверка версии. Возвращает { ok } | { kind: 'safety' } | { unavailable, code } |
   // { kind: 'technical', code: 'check_incomplete_twice' }.
+  // Параллельные проверки одного рассказа в одной области (сверка 5cffcd11, требование владельца: остановленный
+  // текст НИКОГДА не получает «можно»). Модельная проверка недетерминирована: одна может сказать «опасно», другая —
+  // «безопасно». Поэтому «безопасно» выдаётся, только когда решены ВСЕ проверки этого рассказа, начатые к этому
+  // моменту, и ни одна не поставила safety. Ждём «решения» (ответ модели + markSafety), а не ожидание чужих
+  // соседей: решение никого не ждёт, поэтому взаимной блокировки нет.
   async function runCheck(scope, story, ep, text) {
     const a = area(scope);
     const sd = storyDigest(story);
+    let set = a.decisions.get(sd);
+    if (!set) { set = new Set(); a.decisions.set(sd, set); }
+    const decision = decide(scope, story, ep, text, a, sd);
+    set.add(decision);
+    let r;
+    try { r = await decision; } finally { set.delete(decision); if (!set.size && a.decisions.get(sd) === set) a.decisions.delete(sd); }
+    if (!r.ok) return r;
+    for (;;) {
+      const others = [...(a.decisions.get(sd) || [])];
+      if (!others.length) break;
+      await Promise.allSettled(others);
+    }
+    if (a.safety.has(sd)) return { kind: 'safety' };
+    return r;
+  }
+
+  async function decide(scope, story, ep, text, a, sd) {
     const vd = versionDigest(story, ep);
     if (!hasKey()) return { unavailable: true, code: 'no_key' };
     const epoch = epochOf(a, sd);

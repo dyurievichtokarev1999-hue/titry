@@ -444,9 +444,9 @@ for (const order of ['check-first', 'draft-first']) {
     const b = await twiceSameStory(order);
     const urgent = b.texts().filter((t) => /Сейчас важнее не титры/.test(t));
     assert.equal(urgent.length, 1, `карточек помощи: ${urgent.length}; сообщения: ${JSON.stringify(b.texts())}`);
-    if (order === 'check-first') assert.ok(!b.texts().some((t) => t.startsWith(REPLY)), 'реплика нехватки не подменяет остановку');
-    // draft-first: вторая отправка получила полное «безопасно» раньше, чем первая — «опасно»; реплика уже ушла,
-    // но поздняя остановка всё равно приходит, и последним человек видит карточку помощи (как в ветке !r.episode).
+    // Оба порядка (сверка 5cffcd11): остановленный текст НИКОГДА не получает реплику нехватки. Во втором порядке
+    // вторая проверка сказала «безопасно» раньше, но gate ждёт решения первой проверки того же рассказа.
+    assert.ok(!b.texts().some((t) => t.startsWith(REPLY)), 'реплики нехватки нет');
     assert.match(b.texts().at(-1), /Сейчас важнее не титры/, 'последним — карточка помощи');
     assert.equal(b.bot.sessions.get(chat.id).verdict, 'blocked');
     assert.equal(b.counters.render, 0);
@@ -513,3 +513,22 @@ for (const kind of ['insufficient', 'episode']) {
     assert.equal(b.bot.sessions.get(chat.id).episode, null, 'черновика нет');
   });
 }
+
+test('монтажная: две вкладки одновременно, тот же рассказ; первая проверка «опасно», вторая «безопасно» раньше → обе safety, реплики нехватки нет', async () => {
+  let release;
+  await withApp({ check: (t, n) => (n === 1 ? new Promise((r) => { release = () => r(true); }) : false) }, async ({ post, counters }) => {
+    const first = post('/api/draft', { story: byId.OI10 });
+    while (!release) await new Promise((r) => setTimeout(r, 5));
+    const second = post('/api/draft', { story: byId.OI10 });
+    while (counters.check < 2) await new Promise((r) => setTimeout(r, 5));
+    await new Promise((r) => setTimeout(r, 20)); // вторая проверка уже ответила «безопасно» и ждёт первую
+    release();
+    const [a, b] = await Promise.all([first, second]);
+    for (const r of [a, b]) {
+      assert.equal(r.body.kind, 'safety', JSON.stringify(r.body));
+      assert.notEqual(r.body.error, REPLY);
+    }
+    const again = await post('/api/draft', { story: byId.OI10 });
+    assert.equal(again.body.kind, 'safety');
+  });
+});

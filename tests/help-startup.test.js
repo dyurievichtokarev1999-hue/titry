@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { prepareHelp, helpMessage, TELEGRAM_TEXT_LIMIT } from '../server/safety.js';
+import { prepareHelp, helpMessage, TELEGRAM_TEXT_LIMIT, INSUFFICIENT_TEXT, INSUFFICIENT_WITH_HELP_LIMIT } from '../server/safety.js';
 import { prepareBot } from '../server/bot.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -22,6 +22,10 @@ const BAD = {
   'verified строкой "false"': { region: 'RU', emergency: { label: 'Экстренные', phone: '112', verified: 'false' }, contacts: [] },
   'номер из пробелов': { region: 'RU', emergency: { label: 'Экстренные', phone: '   ', verified: true }, contacts: [] },
   'часы не строкой': { region: 'RU', emergency: { label: 'Экстренные', phone: '112', hours: { a: 1 }, verified: true }, contacts: [] },
+  'номер без цифр': { region: 'RU', emergency: { label: 'Экстренные', phone: 'звоните', verified: true }, contacts: [] },
+  'перевод строки в подписи': { region: 'RU', emergency: { label: 'Экстренные\nслужбы', phone: '112', verified: true }, contacts: [] },
+  'нет кода региона': { emergency: { label: 'Экстренные', phone: '112', verified: true }, contacts: [] },
+  'реплика с блоком concern длиннее 3500': { region: 'RU', emergency: { label: 'Ж'.repeat(3400), phone: '112', verified: true }, contacts: [] },
   'блок помощи длиннее одного сообщения': { region: 'RU', emergency: { label: 'Ж'.repeat(TELEGRAM_TEXT_LIMIT), phone: '112', verified: true }, contacts: [] },
 };
 
@@ -148,4 +152,13 @@ test('prepareHelp: неудачная повторная проверка не �
     // Ленивое обращение после неудачи перечитывает рабочий файл репозитория один раз.
     assert.match(helpMessage('concern'), /112/);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('ограничитель 3500 проверяется при старте: вариант «длиннее 3500» укладывается в 4096 по отдельности, но не проходит вместе с репликой', () => {
+  const help = { region: 'RU', contacts: [{ label: 'Ж'.repeat(3400), phone: '112' }] };
+  for (const level of ['concern', 'urgent']) assert.ok(helpMessage(level, help).length <= TELEGRAM_TEXT_LIMIT, level);
+  assert.ok(INSUFFICIENT_TEXT.length + 2 + helpMessage('concern', help).length > INSUFFICIENT_WITH_HELP_LIMIT);
+  assert.equal(INSUFFICIENT_WITH_HELP_LIMIT, 3500);
+  prepareHelp();
+  assert.ok(INSUFFICIENT_TEXT.length + 2 + helpMessage('concern').length <= INSUFFICIENT_WITH_HELP_LIMIT, 'рабочий файл проходит');
 });

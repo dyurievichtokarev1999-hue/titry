@@ -475,6 +475,7 @@ export function insufficientAfterExclusion(ep, story, validation = validateSafeE
 
 export const HELP_FILE = path.join(here, '..', 'config', 'help.json');
 export const TELEGRAM_TEXT_LIMIT = 4096; // лимит одного текстового сообщения Telegram, в символах
+export const INSUFFICIENT_WITH_HELP_LIMIT = 3500; // «реплика нехватки + пустая строка + блок concern», с запасом до 4096
 
 export function loadHelp(file = HELP_FILE) {
   const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -498,17 +499,29 @@ export function prepareHelp(file = HELP_FILE) {
   preparedHelp = null; // неудачная проверка не оставляет прежние контакты
   let help;
   try { help = loadHelp(file); } catch { throw fail(); }
+  if (typeof help.region !== 'string' || !/^[A-Z]{2}$/.test(help.region)) throw fail(); // код страны: RU, KZ…
   if (!Array.isArray(help.contacts) || !help.contacts.length) throw fail();
-  const text = (v) => typeof v === 'string' && v.trim().length > 0;
-  if (help.contacts.some((c) => !text(c.label) || !text(c.phone) || (c.hours !== undefined && typeof c.hours !== 'string'))) throw fail();
+  // Подпись и часы — одна строка без переводов строк (иначе контакт разъезжается в блоке); номер — с цифрами.
+  const line = (v) => typeof v === 'string' && v.trim().length > 0 && !/[\r\n]/.test(v);
+  if (help.contacts.some((c) => !line(c.label) || !line(c.phone) || !/\d/.test(c.phone)
+    || (c.hours !== undefined && c.hours !== '' && !line(c.hours)) || (c.hours !== undefined && typeof c.hours !== 'string'))) throw fail();
   // Тексты не пусты по построению (постоянные фразы + непустой список); проверяется лимит одного сообщения.
   for (const level of ['concern', 'urgent']) if (helpMessage(level, help).length > TELEGRAM_TEXT_LIMIT) throw fail();
+  // Реплика нехватки идёт одним сообщением с блоком concern (бот): «реплика + пустая строка + блок» ≤ 3500,
+  // с запасом до лимита Telegram (решение владельца 11.11 11:05). urgent с репликой не соединяется.
+  if (INSUFFICIENT_TEXT.length + 2 + helpMessage('concern', help).length > INSUFFICIENT_WITH_HELP_LIMIT) throw fail();
   preparedHelp = help;
   helpFailure = null;
   return help;
 }
 
-/** Проверенные при старте контакты. Без старта (тесты, скрипты) — один раз при первом обращении, с той же проверкой. */
+/**
+ * Проверенные при старте контакты. Рабочие входы (бот, монтажная) вызывают prepareHelp при старте и при ошибке не
+ * запускаются, поэтому ветка ниже в работе не встречается. Без старта (тесты, скрипты) — ленивая проверка при первом
+ * обращении. Её неудача запоминается до перезапуска процесса СОЗНАТЕЛЬНО: файл не перечитывается при каждом вызове,
+ * а каждый следующий вызов снова получает ту же ошибку help_config (тихого «без помощи» нет). Успешный явный
+ * prepareHelp снимает запомненную неудачу.
+ */
 export function currentHelp() {
   if (preparedHelp) return preparedHelp;
   if (helpFailure) throw helpFailure;
