@@ -358,3 +358,22 @@ test('заготовка: порядок слов цитаты, признак �
   }
   assert.equal(pairFromSentence('Моя дочь пошла в школу.', new Set(), 'Моя дочь пошла в школу.').row.role, 'Дочь');
 });
+
+// ── Разбор 46b47503 ──────────────────────────────────────────────────────────
+
+test('«почти» через определения, чужие слова через тире и перевод строки, сон и неуверенность, кавычки, «без» и намерение', () => {
+  for (const { story, row } of fx.review5.reject) {
+    assert.equal(rowWordsGrounded(row, story), false, `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+  for (const { story, row } of fx.review5.accept) {
+    assert.deepEqual(rowWordProblems(row, story), [], `${row.role} — ${row.value} ← ${story}`);
+  }
+});
+
+test('слово с символами регулярных выражений в рассказе не роняет проверку и заготовку', () => {
+  const story = fx.review5.crash;
+  assert.doesNotThrow(() => validateEpisode(sanitizeEpisode({ date: '2026-11-11', title: 'Т', genre: 'камерное кино',
+    rows: [{ role: 'Я', value: 'лентяйка', source: 'я лентяйка' }, { role: 'Мама', value: 'лентяйка', source: 'я лентяйка' }] }), story));
+  assert.doesNotThrow(() => draftRuleBased(story, { date: '2026-11-11' }));
+  assert.doesNotThrow(() => rowWordProblems({ role: 'Я', value: 'лентяйка', source: 'я лентяйка' }, story));
+});
