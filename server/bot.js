@@ -72,11 +72,26 @@ export const TEXT = {
   insufficient: 'Не получилось собрать титры только из твоих слов. Сегодня можно без ролика.',
 };
 
-/** Ответ при нехватке материала: реплика; при concern — одним сообщением с блоком помощи сразу после пустой строки. */
-export function insufficientMessage(concern, help = loadHelp()) {
-  return concern ? `${TEXT.insufficient}\n\n${helpMessage('concern', help)}` : TEXT.insufficient;
+export const TELEGRAM_TEXT_LIMIT = 4096; // лимит одного текстового сообщения Telegram, в символах
+
+/**
+ * Ответ при нехватке материала: реплика; при concern — одним сообщением «реплика, пустая строка, блок помощи».
+ * help.json читается только при concern. Возвращает список сообщений: обычно одно. Два — только в явно
+ * журналируемых отказах (не молча): блок помощи не помещается в лимит Telegram (message_too_long) —
+ * реплика и блок уходят подряд; help.json не читается (help_config) — уходит реплика, без блока.
+ */
+export function insufficientMessages(concern, { help, log = logError } = {}) {
+  if (!concern) return [TEXT.insufficient];
+  let block;
+  try { block = helpMessage('concern', help || loadHelp()); } catch (e) {
+    log('insufficient', { code: 'help_config' });
+    return [TEXT.insufficient];
+  }
+  const one = `${TEXT.insufficient}\n\n${block}`;
+  if (one.length <= TELEGRAM_TEXT_LIMIT) return [one];
+  log('insufficient', { code: 'message_too_long' });
+  return [TEXT.insufficient, block];
 }
-export const TELEGRAM_TEXT_LIMIT = 4096;
 
 // ── Чистые функции: разбор правок ────────────────────────────────────────────
 
@@ -448,7 +463,8 @@ export function createBot({
   // что у прежней карточки concern (helpMessage('concern')), без переходной фразы, черновика и кнопок.
   // Признак concern — уровень всего рассказа, как у прежней карточки. Решение владельца 11.11 09:05: ОДНО сообщение
   // «реплика, пустая строка, блок помощи» — между двумя сообщениями блок помощи мог бы потеряться. Длина
-  // (реплика + helpMessage('concern')) меньше лимита Telegram 4096; проверяется тестом, молча не делится.
+  // (реплика + helpMessage('concern')) проверяется при каждой отправке (insufficientMessages): сверх лимита Telegram 4096
+  // сообщение не делится молча — код message_too_long в журнале; сейчас 256 знаков.
   async function replyInsufficient(chatId, s, story, gen, current, concern) {
     if (!current()) return;
     const g = await track(chatId, gate.verify(s.scope, story, null, story));
@@ -463,7 +479,7 @@ export function createBot({
     s.stage = 'idle'; // черновика нет: правки и кнопки не к чему применять
     await metrics.log(chatId, 'insufficient_after_exclusion');
     if (!current()) return;
-    return tg.send(chatId, insufficientMessage(concern));
+    for (const text of insufficientMessages(concern)) await tg.send(chatId, text);
   }
 
   async function doRender(chatId, s) {
