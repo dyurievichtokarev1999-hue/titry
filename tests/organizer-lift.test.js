@@ -46,7 +46,6 @@ async function seed(file, records) {
   assert.equal(await l.flush(), true);
 }
 
-const outputs = []; // весь вывод команды — для проверки на утечки
 function run(root, args, extraEnv = {}) {
   return new Promise((resolve, reject) => {
     const p = spawn(process.execPath, [path.join(root, 'scripts', 'organizer.js'), ...args], {
@@ -57,7 +56,7 @@ function run(root, args, extraEnv = {}) {
     p.stderr.on('data', (d) => { err += d; });
     const t = setTimeout(() => p.kill('SIGKILL'), 20000);
     p.on('error', reject);
-    p.on('exit', (code) => { clearTimeout(t); outputs.push({ out, err, root }); resolve({ code, out, err }); });
+    p.on('exit', (code) => { clearTimeout(t); resolve({ code, out, err }); });
   });
 }
 const lift = (r, area = 'studio', extraEnv) => run(r.root, ['lift-technical', '--area', area, '--story-file', r.storyFile], extraEnv);
@@ -124,10 +123,13 @@ test('lift-technical: сервис запущен (отметка живого �
       assert.deepEqual(await fs.readFile(r.ledgerFile), before, 'файл не изменён');
       release();
     }
+    // pid переиспользован другим процессом (время старта не совпадает) — отметка устарела.
+    await fs.writeFile(path.join(stateDir, 'run', `bot.${sleeper.pid}.pid`), `${sleeper.pid} 1\n`);
     // Отметка процесса, которого уже нет (kill -9), не считается запущенным сервисом.
     await fs.writeFile(path.join(stateDir, 'run', 'studio.999999999.pid'), '999999999\n');
     const res = await lift(r);
     assert.equal(res.code, 0, res.err);
+    assert.deepEqual(await fs.readdir(path.join(stateDir, 'run')), [], 'устаревшие отметки убраны');
   } finally { sleeper.kill('SIGKILL'); await fs.rm(r.root, { recursive: true, force: true }); }
 });
 
@@ -165,7 +167,18 @@ test('lift-technical: настоящая монтажная запущена —
     const exited = new Promise((resolve) => child.once('exit', resolve));
     child.kill('SIGTERM');
     await exited;
+    assert.equal(child.signalCode, 'SIGTERM', 'процесс завершён самим сигналом, а не кодом выхода');
     assert.deepEqual(await fs.readdir(path.join(r.root, 'data', 'state', 'run')), [], 'отметка снята при выходе');
+    // То же для SIGINT (Ctrl+C).
+    const s2 = startStudio(r.root, await freePort());
+    child = s2.child;
+    await s2.ready;
+    assert.equal((await fs.readdir(path.join(r.root, 'data', 'state', 'run'))).length, 1);
+    child.removeAllListeners('exit');
+    const exited2 = new Promise((resolve) => child.once('exit', resolve));
+    child.kill('SIGINT');
+    await exited2;
+    assert.deepEqual(await fs.readdir(path.join(r.root, 'data', 'state', 'run')), [], 'отметка снята по SIGINT');
     const res2 = await lift(r);
     assert.equal(res2.code, 0, res2.err);
   } finally {
@@ -242,7 +255,16 @@ test('lift-technical: повреждённый файл или недописа�
       assert.equal(res.out, 'lift_technical: ledger_error\n');
       assert.equal(await fs.readFile(r.ledgerFile, 'utf8'), bad);
     }
+    // Полный tmp (сбой между записью tmp и rename): команда не восстанавливает его сама — это делает сервис.
     await fs.writeFile(r.ledgerFile, good);
+    const full = path.join(r.root, 'data', 'state', 'blocked-v1.json.tmp-2-full');
+    await fs.writeFile(full, good);
+    const resFull = await lift(r);
+    assert.equal(resFull.code, 4);
+    assert.equal(resFull.out, 'lift_technical: ledger_error\n');
+    assert.equal(await fs.readFile(r.ledgerFile, 'utf8'), good);
+    assert.equal(await fs.readFile(full, 'utf8'), good, 'tmp не тронут');
+    await fs.rm(full);
     const tmp = path.join(r.root, 'data', 'state', 'blocked-v1.json.tmp-1-abcd');
     await fs.writeFile(tmp, '{"schema_version":1,');
     const res = await lift(r);
@@ -310,18 +332,40 @@ test('lift-technical: неверные аргументы и нечитаемы�
     await fs.writeFile(txt, STORY);
     const ok = await run(r.root, ['lift-technical', '--area', 'studio', '--story-file', txt]);
     assert.equal(ok.code, 0, ok.err);
+    // Текст, начинающийся с «{», в файле не .json — это текст, а не JSON.
+    await fs.writeFile(txt, '{скобка} вымышленный рассказ');
+    assert.equal((await run(r.root, ['lift-technical', '--area', 'studio', '--story-file', txt])).code, 1);
   } finally { await fs.rm(r.root, { recursive: true, force: true }); }
 });
 
-test('в выводе команды нет отпечатков, области, текста рассказа и путей', async () => {
-  assert.ok(outputs.length >= 10, 'вывод собран из предыдущих тестов');
-  const words = STORY.split(/\s+/).filter((w) => w.length >= 6).slice(0, 8);
-  for (const { out, err, root } of outputs) {
-    const all = out + err;
-    assert.doesNotMatch(all, /[0-9a-f]{16,}/, 'нет отпечатков');
-    assert.doesNotMatch(all, /chat:\d|studio\b(?!\|)/, 'нет области');
-    assert.ok(!all.includes(root) && !all.includes(os.tmpdir()), 'нет путей');
-    for (const w of words) assert.ok(!all.includes(w), 'нет текста рассказа');
-    assert.match(out, /^lift_technical: (ok|not_found|safety_kept|service_running|ledger_error|story_file_error|usage)\n$/);
-  }
+test('в выводе команды нет отпечатков, области, текста рассказа и путей (все исходы)', { timeout: 60000 }, async () => {
+  const r = await makeRoot();
+  const sleeper = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
+  const seen = [];
+  const go = async (area = 'studio', extra) => { const res = await lift(r, area, extra); seen.push(res); return res; };
+  try {
+    await seed(r.ledgerFile, [
+      { kind: 'technical', scope: 'studio', story: STORY },
+      { kind: 'safety', scope: 'chat:42', story: STORY },
+    ]);
+    const stateDir = path.join(r.root, 'data', 'state');
+    const release = acquireLock(stateDir, 'bot', [], { pid: sleeper.pid });
+    assert.equal((await go()).code, 3);
+    release();
+    assert.equal((await go('studio', { TITRY_BLOCKED_HMAC_KEY: 'another-test-key-not-a-secret' })).code, 4);
+    assert.equal((await go('chat:42')).code, 2);
+    assert.equal((await go()).code, 0);
+    assert.equal((await go()).code, 1);
+    seen.push(await run(r.root, ['lift-technical']));
+    seen.push(await run(r.root, ['lift-technical', '--area', 'studio', '--story-file', path.join(r.root, 'нет.txt')]));
+    const words = STORY.split(/\s+/).filter((w) => w.length >= 6).slice(0, 8);
+    for (const { out, err } of seen) {
+      const all = out + err;
+      assert.doesNotMatch(all, /[0-9a-f]{16,}/, 'нет отпечатков');
+      assert.doesNotMatch(all, /chat:\d|studio\b(?!\|)/, 'нет области');
+      assert.ok(!all.includes(r.root) && !all.includes(os.tmpdir()) && !all.includes('data/'), 'нет путей');
+      for (const w of words) assert.ok(!all.includes(w), 'нет текста рассказа');
+      assert.match(out, /^lift_technical: (ok|not_found|safety_kept|service_running|ledger_error|story_file_error|usage)\n$/);
+    }
+  } finally { sleeper.kill('SIGKILL'); await fs.rm(r.root, { recursive: true, force: true }); }
 });

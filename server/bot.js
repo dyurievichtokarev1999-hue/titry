@@ -645,9 +645,14 @@ async function main() {
   }
   // Отметка «бот запущен» — до приёма задач: пока она есть, команда организатора хранилище не меняет.
   // Хранилище перечитывается уже под отметкой (организатор мог менять файл между загрузкой и отметкой).
-  try { holdServiceLock(path.join(ROOT, 'data', 'state'), 'bot'); await ledger.load(); } catch (e) {
+  try { holdServiceLock(path.join(ROOT, 'data', 'state'), 'bot'); } catch (e) {
     logError('service.lock', e);
-    console.error('Запуск остановлен: работает команда организатора или хранилище запретов недоступно. Задачи не принимаются.');
+    console.error('Запуск остановлен: работает команда организатора или каталог data/state недоступен. Задачи не принимаются.');
+    process.exit(3);
+  }
+  try { await ledger.load(); } catch (e) {
+    logError('ledger.load', e);
+    console.error(`Запуск остановлен: хранилище запретов недоступно (${KEY_ENV}, ${KEY_VERSION_ENV}). Задачи не принимаются.`);
     process.exit(3);
   }
   const tg = telegram(token);
