@@ -501,3 +501,33 @@ test('ИР10-2 (разбор 46f17f77): нечитаемый или катало
     assert.ok((await fs.readdir(run)).includes('organizer.lock'), 'чужой замок не снят');
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
+
+// Ответ Claude 07:05, п. 2.1: инвариант — команда организатора никогда не пишет safety и не понижает уровень:
+// снимает только одну запись technical; все прочие записи (safety и чужие technical) остаются побайтно теми же.
+test('Инвариант: команда снимает только одну запись technical; safety и чужие записи не меняются; в коде нет других записей', async () => {
+  const { liftTechnical } = await import('../scripts/organizer.js');
+  const src = await fs.readFile(path.join(repo, 'scripts', 'organizer.js'), 'utf8');
+  assert.deepEqual([...src.matchAll(/ledger\.(\w+)\(/g)].map((m) => m[1]).filter((f) => !['load', 'lookup', 'clearTechnical', 'flush'].includes(f)), [], 'команда не вызывает put и другие записи');
+  const r = await makeRoot();
+  try {
+    const ex = JSON.parse(await fs.readFile(r.storyFile, 'utf8'));
+    const others = [
+      { kind: 'safety', scope: 'studio', story: 'вымышленный рассказ А' }, { kind: 'safety', scope: 'chat:1', story: ex.story },
+      { kind: 'technical', scope: 'chat:2', story: ex.story }, { kind: 'technical', scope: 'studio', story: 'вымышленный рассказ Б' },
+    ];
+    await seed(r.ledgerFile, [{ kind: 'technical', scope: 'studio', story: ex.story }, ...others]);
+    const before = JSON.parse(await fs.readFile(r.ledgerFile, 'utf8')).records;
+    assert.equal(await liftTechnical({ area: 'studio', story: ex.story, root: r.root, env }), 'ok');
+    const after = JSON.parse(await fs.readFile(r.ledgerFile, 'utf8')).records;
+    assert.equal(after.length, before.length - 1);
+    const key = (x) => JSON.stringify(x);
+    const removed = before.filter((b) => !after.some((a) => key(a) === key(b)));
+    assert.equal(removed.length, 1); assert.equal(removed[0].kind, 'technical');
+    assert.ok(after.every((a) => before.some((b) => key(a) === key(b))), 'ни одна запись не изменена и не добавлена');
+    const l = ledgerAt(r.ledgerFile); await l.load();
+    for (const o of others) assert.equal(l.lookup(o.scope, o.story).kind, o.kind, `${o.kind} ${o.scope}`);
+    // safety для этой же области и рассказа команда не снимает никогда.
+    await seed(r.ledgerFile, [{ kind: 'safety', scope: 'studio', story: ex.story }]);
+    assert.equal(await liftTechnical({ area: 'studio', story: ex.story, root: r.root, env }), 'safety_kept');
+  } finally { await fs.rm(r.root, { recursive: true, force: true }); }
+});
