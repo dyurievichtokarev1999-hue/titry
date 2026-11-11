@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS, episodeToText } from '../engine/episode.js';
 import { makeDraft, modelSafetyCheck, hasClaudeCredentials, pairFromSentence } from './draft.js';
 import { makeGate } from './gate.js';
-import { helpMessage, assessEpisodeRisk, validateSafeEpisode } from './safety.js';
+import { helpMessage, prepareHelp, assessEpisodeRisk, validateSafeEpisode, INSUFFICIENT_TEXT, TELEGRAM_TEXT_LIMIT } from './safety.js';
 import { renderEpisode, ROOT } from './render.js';
 import { logError, safeCode } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS, cleanupVoiceOrphans } from './stt.js';
@@ -67,7 +67,28 @@ export const TEXT = {
   deleteFailed: 'Сессия удалена, а удаление статистики по тебе подтвердить не получилось. Попробуй /delete ещё раз чуть позже.',
   renderFail: 'Не получилось собрать ролик. Попробуй ещё раз чуть позже.',
   draftFail: 'Не получилось собрать черновик. Попробуй ещё раз чуть позже.',
+  // Внутренняя причина insufficient_after_exclusion (редактор повествования), дословно: только эта реплика —
+  // без черновика, ролика, просьбы дописать и кнопок. Показывается только после stop и технических исходов.
+  insufficient: INSUFFICIENT_TEXT, // текст — в server/safety.js
 };
+
+export { TELEGRAM_TEXT_LIMIT };
+
+/**
+ * Ответ при нехватке материала: реплика; при concern — одним сообщением «реплика, пустая строка, блок помощи».
+ * Контакты — проверенные при старте (prepareHelp в prepareBot), файл во время работы не перечитывается,
+ * ветки «реплика без помощи» нет. Защитная ветка: если вместе не помещается в лимит Telegram — СНАЧАЛА блок
+ * помощи, ЗАТЕМ реплика, в журнал — код message_too_long (без текста). Сам блок длиннее лимита в рабочем пути
+ * не бывает: это ошибка проверки при старте. Параметр help — только для тестов, он эту проверку обходит.
+ */
+export function insufficientMessages(concern, { help, log = logError } = {}) {
+  if (!concern) return [TEXT.insufficient];
+  const block = help ? helpMessage('concern', help) : helpMessage('concern');
+  const one = `${TEXT.insufficient}\n\n${block}`;
+  if (one.length <= TELEGRAM_TEXT_LIMIT) return [one];
+  log('insufficient', { code: 'message_too_long' });
+  return [block, TEXT.insufficient];
+}
 
 // ── Чистые функции: разбор правок ────────────────────────────────────────────
 
@@ -414,7 +435,8 @@ export function createBot({
     await tg.send(chatId, TEXT.working);
     let r;
     try {
-      r = await track(chatId, draft(story, { date: todayIso(now()), period: s.period, tone: 'quiet' }));
+      // Черновик — незавершённое решение по рассказу: соседняя проверка того же рассказа ждёт его (gate.holdDraft).
+      r = await track(chatId, gate.holdDraft(s.scope, story, draft(story, { date: todayIso(now()), period: s.period, tone: 'quiet' })));
     } catch (e) {
       logError('draft', e);
       if (!current()) return;
@@ -424,7 +446,7 @@ export function createBot({
     }
     // Опасный черновик, пришедший после /delete или смены сессии: запрет участника записывается всё равно
     // (область — чат, а не сессия), но в чат ничего не отправляется.
-    if (r && !r.unavailable && !r.episode) gate.markSafety(`chat:${chatId}`, story);
+    if (r && !r.unavailable && !r.insufficient && !r.episode) gate.markSafety(`chat:${chatId}`, story);
     if (!alive(chatId, s)) return; // удалённая сессия не оживает из отложенного ответа
     if (r.unavailable) {
       // ИР-02: проверка не завершена — техническое состояние, не остановка: рассказ не запоминается
@@ -434,6 +456,7 @@ export function createBot({
       s.stage = 'idle';
       return tg.send(chatId, TEXT.checkUnavailable);
     }
+    if (r.insufficient) return replyInsufficient(chatId, s, story, gen, current, r.risk && r.risk.level === 'concern');
     if (!r.episode) {
       // Остановка важнее всего, даже если ответ устарел: рассказ запоминается как запрещённый.
       if (s.draftId === gen) return stopForSafety(chatId, s, r.risk.level, { byModel: r.risk.byModel });
@@ -446,7 +469,13 @@ export function createBot({
       }
       return;
     }
-    if (!current()) return; // устаревший «можно» молча отбрасывается
+    if (!current()) {
+      // Устаревший «можно» молча отбрасывается. Но если тот же рассказ этой сессии тем временем остановлен
+      // (например, проверкой прежней сессии до /delete), человек получает карточку помощи, а не тишину.
+      if (alive(chatId, s) && s.verdict !== 'blocked' && s.originalStory && storyKey(s.originalStory) === storyKey(story)
+        && (isBlocked(s, story) || gate.status(s.scope, story).kind === 'safety')) return stopForSafety(chatId, s, 'urgent', { at: 'late' });
+      return;
+    }
     await metrics.log(chatId, 'story', { source, period: s.period, chars: Math.round(story.length / 50) * 50 });
     if (!current()) return;
     if (r.risk.level === 'concern') await tg.send(chatId, helpMessage('concern'));
@@ -458,6 +487,47 @@ export function createBot({
     await metrics.log(chatId, 'draft', { provider: r.provider, rows: r.episode.rows.length, dropped: (r.dropped || []).length });
     if (!current()) return;
     await showDraft(chatId, s);
+  }
+
+  // Нехватка материала после исключения опасных частей (insufficient_after_exclusion). Порядок исходов:
+  // stop (safety) → техническая недоступность/пауза → [явный отказ человека — такого исхода в боте нет] → нехватка.
+  // Поэтому перед репликой рассказ проходит ту же отдельную проверку, что и перед рендером: опасность даёт остановку,
+  // незавершённая проверка — технический ответ, и только полное разрешение — реплику нехватки.
+  // В метрики — только код события, без текста рассказа и номеров предложений.
+  // Решение владельца 1 (PR 11): если исключался фрагмент уровня concern, сразу за репликой — тот же блок помощи,
+  // что у прежней карточки concern (helpMessage('concern')), без переходной фразы, черновика и кнопок.
+  // Признак concern — уровень всего рассказа, как у прежней карточки. Решение владельца 11.11 09:05: ОДНО сообщение
+  // «реплика, пустая строка, блок помощи» — между двумя сообщениями блок помощи мог бы потеряться. Длина
+  // (реплика + helpMessage('concern')) ограничена тестом (≤ 3500) и проверяется при отправке (insufficientMessages):
+  // сверх 4096 — сначала блок помощи, затем реплика, код message_too_long в журнале; сейчас 256 знаков.
+  async function replyInsufficient(chatId, s, story, gen, current, concern) {
+    // Тот же рассказ сейчас в работе и ещё не остановлен: поздняя остановка (как в ветке !r.episode, at: 'late').
+    // Без этого два подряд одинаковых рассказа, у первого из которых проверка вернула true, оставляли человека
+    // без карточки помощи: первый ответ устарел, у второго current() уже false из-за safety — оба молча выходили.
+    const sameStoryInWork = () => alive(chatId, s) && s.verdict !== 'blocked' && !!s.originalStory && storyKey(s.originalStory) === storyKey(story);
+    const stoppedNow = () => isBlocked(s, story) || gate.status(s.scope, story).kind === 'safety';
+    if (!current()) {
+      if (stoppedNow() && sameStoryInWork()) return stopForSafety(chatId, s, 'urgent', { at: 'late' });
+      return;
+    }
+    const g = await track(chatId, gate.verify(s.scope, story, null, story, { includeDrafts: true }));
+    if (!alive(chatId, s)) return;
+    if (g.kind === 'safety') {
+      if (s.draftId === gen) return stopForSafety(chatId, s, 'urgent', { at: 'check', byModel: true });
+      if (sameStoryInWork()) return stopForSafety(chatId, s, 'urgent', { at: 'late', byModel: true });
+      return;
+    }
+    if (s.draftId !== gen) return;
+    if (!g.ok) {
+      logError('check', { code: g.code });
+      s.stage = 'idle';
+      return tg.send(chatId, g.kind === 'technical' ? TEXT.checkPaused : TEXT.checkUnavailable);
+    }
+    if (!current()) return;
+    s.stage = 'idle'; // черновика нет: правки и кнопки не к чему применять
+    await metrics.log(chatId, 'insufficient_after_exclusion');
+    if (!current()) return;
+    for (const text of insufficientMessages(concern)) await tg.send(chatId, text);
   }
 
   async function doRender(chatId, s) {
@@ -658,7 +728,9 @@ export function telegram(token) {
  * хранилища запретов. Любая ошибка — исключение: вызывающий не начинает опрос Telegram (fail closed).
  * Нет ключа хранилища — тоже отказ запуска, а не тихий режим.
  */
-export async function prepareBot({ cleanup = cleanupVoiceOrphans, ledger } = {}) {
+export async function prepareBot({ cleanup = cleanupVoiceOrphans, ledger, helpFile } = {}) {
+  // Контакты помощи — до всего остального: без проверенного блока помощи бот не стартует (решение владельца 11:05).
+  try { prepareHelp(helpFile); } catch (e) { logError('help.load', e); throw Object.assign(new Error('startup'), { code: 'help_config', stage: 'help.load' }); }
   try { await cleanup(); } catch (e) { logError('voice.cleanup', e); throw Object.assign(new Error('startup'), { code: safeCode(e), stage: 'voice.cleanup' }); }
   const l = ledger || makeLedger({ file: path.join(ROOT, 'data', 'state', 'blocked-v1.json'), key: process.env[KEY_ENV], keyVersion: process.env[KEY_VERSION_ENV] || 'v1' });
   try { await l.load(); } catch (e) { logError('ledger.load', e); throw Object.assign(new Error('startup'), { code: 'ledger', stage: 'ledger.load' }); }
@@ -670,7 +742,7 @@ async function main() {
   if (!token) { console.error('Задайте TELEGRAM_BOT_TOKEN (выдаёт @BotFather).'); process.exit(2); }
   let ledger;
   try { ledger = await prepareBot(); } catch {
-    console.error(`Запуск остановлен: не подтверждена очистка временных файлов или хранилище запретов (${KEY_ENV}, ${KEY_VERSION_ENV}). Задачи не принимаются. Остатки tmp и файл хранилища не удаляйте вручную без владельца кода.`);
+    console.error(`Запуск остановлен: не проверены контакты помощи (config/help.json), не подтверждена очистка временных файлов или хранилище запретов (${KEY_ENV}, ${KEY_VERSION_ENV}). Задачи не принимаются. Остатки tmp и файл хранилища не удаляйте вручную без владельца кода.`);
     process.exit(3);
   }
   const tg = telegram(token);
