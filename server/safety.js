@@ -621,8 +621,11 @@ export function prepareHelp(file = HELP_FILE) {
   if (typeof help.region !== 'string' || !/^[a-z]{2}$/i.test(help.region.trim())) throw fail(); // код страны: RU, KZ…
   if (!Array.isArray(help.contacts) || !help.contacts.length) throw fail();
   // Подпись и часы — одна строка без переводов строк (иначе контакт разъезжается в блоке); номер — с цифрами.
-  const line = (v) => typeof v === 'string' && v.trim().length > 0 && !/[\r\n]/.test(v);
-  if (help.contacts.some((c) => !line(c.label) || !line(c.phone) || !/\d/.test(c.phone)
+  // Перевод строки — любой: \r, \n, U+0085, U+2028, U+2029 (Telegram может показать их как разрыв строки).
+  const line = (v) => typeof v === 'string' && v.trim().length > 0 && !/[\r\n\u0085\u2028\u2029]/.test(v);
+  // Номер — только цифры, «+», пробелы, скобки и дефисы, не меньше трёх цифр (короткие: 112).
+  const phoneOk = (v) => /^\+?[\d\s()-]+$/.test(v.trim()) && (v.match(/\d/g) || []).length >= 3;
+  if (help.contacts.some((c) => !line(c.label) || !line(c.phone) || !phoneOk(c.phone)
     || (c.hours !== undefined && c.hours !== '' && !line(c.hours)))) throw fail(); // часы: нет, '' или одна строка
   // Тексты не пусты по построению (постоянные фразы + непустой список); проверяется лимит одного сообщения.
   for (const level of ['concern', 'urgent']) if (helpMessage(level, help).length > TELEGRAM_TEXT_LIMIT) throw fail();
