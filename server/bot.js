@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS, episodeToText } from '../engine/episode.js';
 import { makeDraft, modelSafetyCheck, hasClaudeCredentials, pairFromSentence } from './draft.js';
 import { makeGate } from './gate.js';
-import { helpMessage, prepareHelp, assessRisk, assessEpisodeRisk, validateSafeEpisode, threatErrors, threatPronounFilter, INSUFFICIENT_TEXT, INSUFFICIENT_AFTER_EXCLUSION, INSUFFICIENT_MATERIAL, EDIT_NOT_IN_TITLES_TEXT, TELEGRAM_TEXT_LIMIT } from './safety.js';
+import { helpMessage, prepareHelp, assessRisk, assessEpisodeRisk, validateSafeEpisode, threatErrors, threatPronounFilter, INSUFFICIENT_TEXT, INSUFFICIENT_AFTER_EXCLUSION, INSUFFICIENT_MATERIAL, EDIT_NOT_IN_TITLES_TEXT, editNotInTitlesText, TELEGRAM_TEXT_LIMIT } from './safety.js';
 import { renderEpisode, ROOT } from './render.js';
 import { logError, safeCode } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS, cleanupVoiceOrphans } from './stt.js';
@@ -95,13 +95,14 @@ export function insufficientMessages(concern, { help, log = logError } = {}) {
  * Ответ, когда строку из правки не берём в титры. При concern, внесённом правкой, — одним сообщением «реплика, пустая
  * строка, блок помощи concern» (как у нехватки в PR 11); если вместе не помещается — сначала блок помощи.
  */
-export function editExcludedMessages(concern, { help, log = logError } = {}) {
-  if (!concern) return [EDIT_NOT_IN_TITLES_TEXT];
+export function editExcludedMessages(concern, { help, log = logError, path = 'rows.0' } = {}) {
+  const text = editNotInTitlesText(path);
+  if (!concern) return [text];
   const block = help ? helpMessage('concern', help) : helpMessage('concern');
-  const one = `${EDIT_NOT_IN_TITLES_TEXT}\n\n${block}`;
+  const one = `${text}\n\n${block}`;
   if (one.length <= TELEGRAM_TEXT_LIMIT) return [one];
   log('edit', { code: 'message_too_long' });
-  return [block, EDIT_NOT_IN_TITLES_TEXT];
+  return [block, text];
 }
 
 // ── Чистые функции: разбор правок ────────────────────────────────────────────
@@ -702,7 +703,7 @@ export function createBot({
           if (assessEpisodeRisk(ctx, s.episode).level === 'urgent') return stopForSafety(chatId, s, 'urgent', { at: 'edit' });
           if (excluded) {
             await metrics.log(chatId, 'edit_excluded', { level: concern ? 'concern' : 'none' });
-            for (const t of editExcludedMessages(concern)) await tg.send(chatId, t);
+            for (const t of editExcludedMessages(concern, { path })) await tg.send(chatId, t);
             return;
           }
         }
