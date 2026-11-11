@@ -20,7 +20,12 @@ export const RETRY_AFTER_MS = 15 * 60 * 1000;
 export function normStory(story) {
   return String(story ?? '').toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim();
 }
-export const storyDigest = (story) => crypto.createHash('sha256').update(`story\0${normStory(story)}`).digest('hex');
+// Ключ рассказа в памяти процесса (решение владельца 11.11 13:05 п. 2): HMAC с секретной солью процесса —
+// по нему нельзя подобрать короткий рассказ словарём. Соль создаётся при запуске и нигде не хранится;
+// ключ живёт только в памяти, не пишется в журнал, метрики и тексты ошибок (даже усечённым).
+// Переживающие перезапуск записи хранилища считаются отдельно (server/ledger.js, свой HMAC).
+const PROCESS_SALT = crypto.randomBytes(32);
+export const storyDigest = (story) => crypto.createHmac('sha256', PROCESS_SALT).update(`story\0${normStory(story)}`).digest('hex');
 
 /**
  * Проверяемая версия: рассказ (как прислан) + явно перечисленные поля эпизода. Порядок строк сохраняется.

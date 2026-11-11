@@ -10,6 +10,8 @@ import { makeDraft, draftRuleBased } from '../server/draft.js';
 import { insufficientAfterExclusion, INSUFFICIENT_AFTER_EXCLUSION, validateSafeEpisode, assessRisk, helpMessage, loadHelp } from '../server/safety.js';
 import { createBot, TEXT, insufficientMessages, TELEGRAM_TEXT_LIMIT } from '../server/bot.js';
 import { createApp, INSUFFICIENT_TEXT } from '../server/app.js';
+import crypto from 'node:crypto';
+import { storyDigest, normStory } from '../server/gate.js';
 import { LIMITS } from '../engine/episode.js';
 
 const OI = JSON.parse(await fs.readFile(new URL('./fixtures/oi-intent.json', import.meta.url), 'utf8')).cases;
@@ -583,4 +585,37 @@ test('бот и монтажная: сосед завис дольше пред�
   await bot.handleUpdate({ message: other });
   assert.equal(sent.at(-1), TEXT.checkUnavailable);
   assert.ok(!sent.some((t) => t.startsWith(REPLY)));
+});
+
+// Решение владельца 11.11 13:05 п. 2: ключ объединения проверок — HMAC с секретной солью процесса, только в памяти;
+// после двух ПАРАЛЛЕЛЬНЫХ отправок одного рассказа в журнале нет ни текста, ни ключа (даже усечённого).
+test('ключ объединения проверок: соль процесса; параллельные отправки — в журнале нет ни текста, ни ключа', async () => {
+  const story = byId.OI10;
+  const plain = crypto.createHash('sha256').update(`story\0${normStory(story)}`).digest('hex');
+  assert.notEqual(storyDigest(story), plain, 'ключ не совпадает с несолёным SHA-256 (словарный подбор невозможен)');
+  assert.equal(storyDigest(story), storyDigest(story), 'в пределах процесса ключ устойчив');
+  const keys = [storyDigest(story), plain];
+  const out = [];
+  const saved = { error: console.error, log: console.log, warn: console.warn, info: console.info };
+  for (const k of Object.keys(saved)) console[k] = (...a) => out.push(a.map(String).join(' '));
+  const sent = [];
+  try {
+    const fail = () => { throw Object.assign(new Error('сбой'), { code: 'incomplete_response' }); };
+    for (const check of [() => false, () => true, fail]) {
+      const slow = (t, n) => new Promise((r) => setTimeout(r, 5)).then(() => check(t, n));
+      const b = botSetup({ check: slow });
+      await Promise.all([b.say(story), b.say(story)]);
+      sent.push(...b.texts());
+      await withApp({ check: slow }, async ({ post }) => {
+        const rs = await Promise.all([post('/api/draft', { story }), post('/api/draft', { story })]);
+        sent.push(...rs.map((r) => JSON.stringify(r.body)));
+      });
+    }
+  } finally { Object.assign(console, saved); }
+  const all = out.join('\n').toLowerCase();
+  for (const frag of ['злюсь', 'ударить', 'коллег', 'отчёт', 'соседа']) assert.ok(!all.includes(frag), `в журнале нет «${frag}»`);
+  const visible = `${all}\n${sent.join('\n')}`.toLowerCase();
+  for (const key of keys) for (let i = 0; i + 8 <= key.length; i += 4) {
+    assert.ok(!visible.includes(key.slice(i, i + 8)), 'ни ключ, ни его часть не попадают в журнал и ответы');
+  }
 });
