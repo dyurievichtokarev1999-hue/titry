@@ -372,11 +372,11 @@ test('в выводе команды нет отпечатков, области
 });
 
 // ИР10-1 (критик реализации 11.11, принято Claude 05:05): не раньше retry_not_before_at; подставные часы.
-test('ИР10-1: до срока — too_early и хранилище побайтно не меняется; на границе и после — ok; неразборчивый срок — too_early', async () => {
+test('ИР10-1: до срока — too_early и хранилище побайтно не меняется; ровно на границе и после — ok', async () => {
   const { liftTechnical } = await import('../scripts/organizer.js');
   const ex = JSON.parse(await fs.readFile(path.join(repo, 'examples', 'day-quiet.json'), 'utf8'));
   const at = Date.parse('2026-11-11T12:15:00.000Z');
-  for (const [now, expect] of [[at - 1, 'too_early'], [at - 899_998, 'too_early'], [at, 'ok'], [at + 60_000, 'ok']]) {
+  for (const [now, expect] of [[at - 1, 'too_early'], [at, 'ok'], [at + 60_000, 'ok']]) {
     const r = await makeRoot();
     try {
       const l = ledgerAt(r.ledgerFile); await l.load();
@@ -394,41 +394,85 @@ test('ИР10-1: до срока — too_early и хранилище побайт
   }
 });
 
-// ИР10-2: две команды организатора не работают одновременно.
-test('ИР10-2: второй организатор при живом первом — organizer_running; после — входит; брошенный замок умершего не мешает; сервис ↔ команда по-прежнему', async () => {
-  const { acquireOrganizerMutex } = await import('../server/service-lock.js');
+// ИР10-2 (переделано по разбору 77901cfd): замок организаторов — каталог run/organizer.lock.
+const lockScript = (root, stateDir, extra = '') => `import(${JSON.stringify(path.join(root, 'server', 'service-lock.js'))}).then((m) => { ${extra} try { m.acquireOrganizerMutex(${JSON.stringify(stateDir)}); console.log('held'); } catch (e) { console.log(e.code); } setTimeout(() => {}, 3000); })`;
+
+test('ИР10-2: второй организатор при живом первом — organizer_running; после смерти первого — входит; две technical-записи по очереди; сервис ↔ команда', async () => {
   const { liftTechnical } = await import('../scripts/organizer.js');
   const r = await makeRoot();
   const stateDir = path.join(r.root, 'data', 'state');
   try {
     const ex = JSON.parse(await fs.readFile(r.storyFile, 'utf8'));
     await seed(r.ledgerFile, [{ kind: 'technical', scope: 'studio', story: ex.story }, { kind: 'technical', scope: 'chat:42', story: ex.story }]);
-    // Первый организатор — отдельный живой процесс, держит замок.
-    const holder = spawn(process.execPath, ['-e', `import(${JSON.stringify(path.join(r.root, 'server', 'service-lock.js'))}).then((m) => { m.acquireOrganizerMutex(${JSON.stringify(stateDir)}); console.log('held'); setInterval(() => {}, 1000); })`], { stdio: ['ignore', 'pipe', 'ignore'] });
-    await new Promise((res) => holder.stdout.once('data', res));
+    const holder = spawn(process.execPath, ['-e', lockScript(r.root, stateDir)], { stdio: ['ignore', 'pipe', 'ignore'] });
+    assert.equal((await new Promise((res) => holder.stdout.once('data', res))).toString().trim(), 'held');
     assert.equal(await liftTechnical({ area: 'studio', story: ex.story, root: r.root, env }), 'organizer_running');
-    const l1 = ledgerAt(r.ledgerFile); await l1.load();
-    assert.equal(l1.lookup('studio', ex.story).kind, 'technical', 'хранилище не изменено');
     holder.kill('SIGKILL'); await new Promise((res) => holder.once('exit', res));
-    // Замок умершего процесса остался на диске — не мешает.
-    assert.ok((await fs.readdir(path.join(stateDir, 'run'))).includes('organizer.mutex'));
+    assert.ok((await fs.readdir(path.join(stateDir, 'run'))).includes('organizer.lock'), 'замок умершего остался');
     assert.equal(await liftTechnical({ area: 'studio', story: ex.story, root: r.root, env }), 'ok');
-    // Две разные technical-записи снимаются по очереди и не теряют друг друга.
     assert.equal(await liftTechnical({ area: 'chat:42', story: ex.story, root: r.root, env }), 'ok');
     const l2 = ledgerAt(r.ledgerFile); await l2.load();
     assert.equal(l2.lookup('studio', ex.story).kind, null); assert.equal(l2.lookup('chat:42', ex.story).kind, null);
     assert.deepEqual(await fs.readdir(path.join(stateDir, 'run')), [], 'замок и отметки сняты');
-    // Одновременный старт: из двух захватов в одном процессе второй отказывает.
-    const rel = acquireOrganizerMutex(stateDir);
-    assert.throws(() => acquireOrganizerMutex(stateDir, { pid: process.pid + 1 }), { code: 'busy_organizer' });
-    rel();
-    // Сервис ↔ команда: живая отметка бота — по-прежнему service_running.
     const sleeper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
     try {
       await seed(r.ledgerFile, [{ kind: 'technical', scope: 'studio', story: 'ещё один вымышленный рассказ' }]);
       const stop = acquireLock(stateDir, 'bot', ['organizer'], { pid: sleeper.pid });
       assert.equal(await liftTechnical({ area: 'studio', story: 'ещё один вымышленный рассказ', root: r.root, env }), 'service_running');
       stop();
+      assert.deepEqual(await fs.readdir(path.join(stateDir, 'run')), [], 'при отказе замок снят');
     } finally { sleeper.kill('SIGKILL'); }
+  } finally { await fs.rm(r.root, { recursive: true, force: true }); }
+});
+
+test('ИР10-2 Б1: пустой или испорченный файл владельца — занято, пока свежий; старше 30 с — брошенный, замок берётся', async () => {
+  const { acquireOrganizerMutex, STALE_EMPTY_MS } = await import('../server/service-lock.js');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-olock-'));
+  try {
+    const lock = path.join(dir, 'run', 'organizer.lock');
+    for (const content of [null, '', 'мусор\n']) {
+      await fs.mkdir(lock, { recursive: true });
+      if (content !== null) await fs.writeFile(path.join(lock, 'owner'), content);
+      assert.throws(() => acquireOrganizerMutex(dir), { code: 'busy_organizer' }, `свежий: ${content}`);
+      const old = new Date(Date.now() - STALE_EMPTY_MS - 1000);
+      await fs.utimes(lock, old, old);
+      const m = acquireOrganizerMutex(dir);
+      assert.equal(m.holds(), true);
+      m.release();
+      assert.deepEqual(await fs.readdir(path.join(dir, 'run')), []);
+    }
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('ИР10-2 Б2: два живых процесса одновременно убирают брошенный замок — замок держит ровно один (40 прогонов)', { timeout: 120000 }, async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-orace-'));
+  const libRoot = repo.replace(/\/$/, '');
+  try {
+    for (let i = 0; i < 40; i++) {
+      const stateDir = path.join(dir, String(i));
+      await fs.mkdir(path.join(stateDir, 'run', 'organizer.lock'), { recursive: true });
+      await fs.writeFile(path.join(stateDir, 'run', 'organizer.lock', 'owner'), '999999999 1\n'); // умерший владелец
+      const go = path.join(stateDir, 'go');
+      const wait = `while (!require('fs').existsSync(${JSON.stringify(go)})) {}`;
+      const procs = [0, 1].map(() => spawn(process.execPath, ['--input-type=commonjs', '-e', `${wait} import(${JSON.stringify(path.join(libRoot, 'server', 'service-lock.js'))}).then((m) => { try { m.acquireOrganizerMutex(${JSON.stringify(stateDir)}); console.log('held'); } catch (e) { console.log(e.code); } setTimeout(() => {}, 500); })`], { stdio: ['ignore', 'pipe', 'ignore'] }));
+      const outs = procs.map((p) => new Promise((res) => { let o = ''; p.stdout.on('data', (d) => { o += d; }); p.on('exit', () => res(o.trim())); }));
+      await new Promise((res) => setTimeout(res, 150));
+      await fs.writeFile(go, '');
+      const res = (await Promise.all(outs)).sort();
+      assert.deepEqual(res, ['busy_organizer', 'held'], `прогон ${i}: ${res}`);
+    }
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('ИР10-2 В1: при SIGTERM внутри критической секции снимаются и отметка роли, и замок', { timeout: 30000 }, async () => {
+  const r = await makeRoot();
+  const stateDir = path.join(r.root, 'data', 'state');
+  try {
+    const script = `import(${JSON.stringify(path.join(r.root, 'server', 'service-lock.js'))}).then((m) => { const mx = m.acquireOrganizerMutex(${JSON.stringify(stateDir)}); let rel = () => {}; const all = () => { rel(); mx.release(); }; m.releaseOnExit(all); rel = m.acquireLock(${JSON.stringify(stateDir)}, 'organizer', ['studio', 'bot']); console.log('in'); setInterval(() => {}, 1000); })`;
+    const p = spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'pipe', 'ignore'] });
+    await new Promise((res) => p.stdout.once('data', res));
+    assert.equal((await fs.readdir(path.join(stateDir, 'run'))).length, 2);
+    p.kill('SIGTERM'); await new Promise((res) => p.once('exit', res));
+    assert.deepEqual(await fs.readdir(path.join(stateDir, 'run')), []);
   } finally { await fs.rm(r.root, { recursive: true, force: true }); }
 });

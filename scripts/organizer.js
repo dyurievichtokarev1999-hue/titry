@@ -70,18 +70,18 @@ export async function liftTechnical({ area, story, root = ROOT, env = process.en
   const stateDir = path.join(root, 'data', 'state');
   // ИР10-2: сначала общий замок команд организатора (две команды одновременно не работают), затем отметка
   // против запущенных сервисов.
-  let releaseMutex;
-  try { releaseMutex = acquireOrganizerMutex(stateDir); } catch (e) {
+  let mutex;
+  try { mutex = acquireOrganizerMutex(stateDir); } catch (e) {
     return e?.code === 'busy_organizer' ? 'organizer_running' : 'lock_error';
   }
-  releaseOnExit(releaseMutex);
-  let release;
-  try { release = acquireLock(stateDir, ORGANIZER_ROLE, SERVICE_ROLES); } catch (e) {
-    releaseMutex();
+  let releaseMark = () => {};
+  // Одна функция снятия для выхода и сигналов: отметка роли, затем замок (разбор 77901cfd, В1).
+  const releaseAll = () => { releaseMark(); mutex.release(); };
+  releaseOnExit(releaseAll);
+  try { releaseMark = acquireLock(stateDir, ORGANIZER_ROLE, SERVICE_ROLES); } catch (e) {
+    releaseAll();
     return e?.code === 'busy' ? 'service_running' : 'lock_error';
   }
-  // Снять отметку и при аварийном выходе или сигнале (обработчик exit срабатывает и при process.exit).
-  releaseOnExit(release);
   try {
     // Остаток незавершённой записи (blocked-v1.json.tmp-*) восстанавливает сервис при запуске. Команда его не
     // трогает: ledger.load() переписал бы основной файл, а команда обещает «не изменено» при любом отказе.
@@ -98,11 +98,13 @@ export async function liftTechnical({ area, story, root = ROOT, env = process.en
     // время — тоже «ещё рано»: лучше отказать, чем снять паузу досрочно. Хранилище при этом не меняется.
     const notBefore = Date.parse(found.retryNotBeforeAt);
     if (!Number.isFinite(notBefore) || wallNow() < notBefore) return 'too_early';
+    // Замок всё ещё наш — иначе не пишем (другая команда могла его перехватить после аварии).
+    if (!mutex.holds()) return 'organizer_running';
     // Сбой записи после начала изменения — состояние файла не подтверждено (не «не изменено»).
     try { await ledger.clearTechnical(area, story); } catch { return 'write_unconfirmed'; }
     if (!(await ledger.flush())) return 'write_unconfirmed';
     return 'ok';
-  } finally { release(); releaseMutex(); }
+  } finally { releaseAll(); }
 }
 
 export async function main(argv = process.argv.slice(2), { out = console.log, err = console.error, root = ROOT, env = process.env } = {}) {

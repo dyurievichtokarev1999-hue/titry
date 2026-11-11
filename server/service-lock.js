@@ -116,34 +116,60 @@ export function holdServiceLock(stateDir, role) {
 }
 
 /**
- * ИР10-2: взаимоисключение команд организатора между собой. Один общий файл-замок run/organizer.mutex,
- * создаётся атомарно (wx). Если он есть и его владелец жив — отказ (code 'busy_organizer'). Отметка умершего
- * владельца (pid и время старта не совпадают с живым процессом) удаляется, попытка повторяется один раз.
- * Возвращает release().
+ * ИР10-2: взаимоисключение команд организатора между собой (переделано по разбору 77901cfd: Б1, Б2).
+ * Замок — каталог run/organizer.lock: mkdir атомарен, создать его может ровно один процесс. Внутри — файл owner
+ * («pid время_старта»), пишется сразу после создания каталога.
+ * Брошенный замок: владелец умер (pid + время старта), или файл owner пуст/испорчен и каталогу больше
+ * STALE_EMPTY_MS (процесс упал между mkdir и записью). Убирается атомарно: rename каталога в уникальное имя
+ * (переименовать может только один), затем сверка — в переименованном каталоге тот же брошенный владелец;
+ * если нет (успели переименовать свежий замок другой команды) — переименование обратно и отказ.
+ * Нечитаемый файл владельца (права) — code 'lock_unreadable' (подсказка про права), а не «занято».
+ * Возвращает { release, holds }: holds() — замок всё ещё наш (проверяется перед записью хранилища).
  */
-export function acquireOrganizerMutex(stateDir, { pid = process.pid } = {}) {
+export const STALE_EMPTY_MS = 30_000;
+export function acquireOrganizerMutex(stateDir, { pid = process.pid, now = Date.now } = {}) {
   fs.mkdirSync(runDir(stateDir), { recursive: true, mode: 0o700 });
-  const file = path.join(runDir(stateDir), 'organizer.mutex');
+  const dir = path.join(runDir(stateDir), 'organizer.lock');
+  const ownerOf = (d) => {
+    try { return fs.readFileSync(path.join(d, 'owner'), 'utf8'); } catch (e) {
+      if (e?.code === 'ENOENT') return '';
+      if (e?.code === 'EACCES' || e?.code === 'EPERM') throw lockError('lock_unreadable');
+      throw e;
+    }
+  };
+  const parse = (text) => { const m = /^(\d+)(?: (\d+))?\n$/.exec(text); return m ? { pid: Number.parseInt(m[1], 10), start: m[2] ?? null } : null; };
   const start = startTime(pid);
-  for (let attempt = 0; attempt < 2; attempt++) {
-    let fd;
-    try { fd = fs.openSync(file, 'wx', 0o600); } catch (e) {
+  const mine = start === null ? `${pid}\n` : `${pid} ${start}\n`;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try { fs.mkdirSync(dir, { mode: 0o700 }); } catch (e) {
       if (e?.code !== 'EEXIST') throw e;
-      const mark = readMark(file);
-      if (mark === null) continue; // владелец только что снял замок
-      if (Number.isNaN(mark) || pidAlive(mark.pid, mark.start)) throw lockError('busy_organizer');
-      try { fs.rmSync(file, { force: true }); } catch { throw lockError('busy_organizer'); }
+      const seen = ownerOf(dir);
+      const mark = parse(seen);
+      let age = 0;
+      try { age = now() - fs.statSync(dir).mtimeMs; } catch (e2) { if (e2?.code === 'ENOENT') continue; throw e2; }
+      const stale = mark ? !pidAlive(mark.pid, mark.start) : age > STALE_EMPTY_MS;
+      if (!stale) throw lockError('busy_organizer');
+      const aside = `${dir}.stale-${pid}-${Math.random().toString(36).slice(2)}`;
+      try { fs.renameSync(dir, aside); } catch (e3) { if (e3?.code === 'ENOENT') continue; throw lockError('busy_organizer'); }
+      if (ownerOf(aside) !== seen) {
+        // Переименовали чужой свежий замок — вернуть на место и отказать.
+        try { fs.renameSync(aside, dir); } catch { /* место уже занято третьим: его замок действует, наш отказ */ }
+        throw lockError('busy_organizer');
+      }
+      fs.rmSync(aside, { recursive: true, force: true });
       continue;
     }
-    try { fs.writeSync(fd, start === null ? `${pid}\n` : `${pid} ${start}\n`); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    const fd = fs.openSync(path.join(dir, 'owner'), 'wx', 0o600);
+    try { fs.writeSync(fd, mine); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     let held = true;
-    return () => {
+    const holds = () => { try { return held && ownerOf(dir) === mine; } catch { return false; } };
+    const release = () => {
       if (!held) return;
+      const ours = holds();
       held = false;
-      // Снимаем только свой замок (после аварии и повторного захвата другим процессом файл уже чужой).
-      const mark = readMark(file);
-      if (mark && !Number.isNaN(mark) && mark.pid === pid) { try { fs.rmSync(file, { force: true }); } catch { /* распознается по pid */ } }
+      if (ours) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* распознается по pid */ } }
     };
+    return { release, holds };
   }
   throw lockError('busy_organizer');
 }
