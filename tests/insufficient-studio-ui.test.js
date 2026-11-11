@@ -238,3 +238,21 @@ test('монтажная: поздний ответ «нехватка» не о
   assert.equal(u.el('renderBtn').disabled, false, 'рендер примера доступен');
   assert.equal(u.el('draftBtn').disabled, false);
 });
+
+test('монтажная: поздняя остановка по безопасности после выбора примера — пример остаётся, помощь показана', async () => {
+  let finish;
+  const u = studio(async (p) => {
+    if (p === '/api/config') return { provider: 'claude', model: 'm' };
+    if (p === '/api/draft') return new Promise((r) => { finish = () => r({ status: 422, body: { kind: 'safety', error: 'e', help: 'ПОМОЩЬ' } }); });
+    if (p.startsWith('/examples/')) return { story: ex.story, episode: ex.episode };
+    return {};
+  });
+  u.el('story').value = B;
+  const drafting = u.el('draftBtn').listeners.click();
+  await u.tick();
+  u.el('example').value = 'day-quiet';
+  await u.el('example').listeners.change(); await u.tick();
+  finish(); await drafting; await u.tick();
+  assert.equal(u.el('title').value, ex.episode.title);
+  assert.equal(u.el('help').hidden, false); assert.equal(u.el('helpText').textContent, 'ПОМОЩЬ');
+});

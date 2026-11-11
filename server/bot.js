@@ -440,7 +440,13 @@ export function createBot({
       }
       return;
     }
-    if (!current()) return; // устаревший «можно» молча отбрасывается
+    if (!current()) {
+      // Устаревший «можно» молча отбрасывается. Но если тот же рассказ этой сессии тем временем остановлен
+      // (например, проверкой прежней сессии до /delete), человек получает карточку помощи, а не тишину.
+      if (alive(chatId, s) && s.verdict !== 'blocked' && s.originalStory && storyKey(s.originalStory) === storyKey(story)
+        && (isBlocked(s, story) || gate.status(s.scope, story).kind === 'safety')) return stopForSafety(chatId, s, 'urgent', { at: 'late' });
+      return;
+    }
     await metrics.log(chatId, 'story', { source, period: s.period, chars: Math.round(story.length / 50) * 50 });
     if (!current()) return;
     if (r.risk.level === 'concern') await tg.send(chatId, helpMessage('concern'));

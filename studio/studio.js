@@ -183,7 +183,9 @@ async function requestDraft() {
     $('draftNote').textContent = (r.provider === 'claude' ? 'Черновик от Claude.' : 'Заготовка без ИИ: сократите значения до коротких фраз.') + dropped + (r.note ? ' ' + r.note : '');
     if (r.help) showHelp(r.help);
   } catch (e) {
-    if (my !== state.drafting) return; // поздний ответ (в том числе «нехватка») не очищает уже выбранный пример
+    // Поздний ответ (в том числе «нехватка») не очищает уже выбранный пример. Но поздняя остановка по безопасности
+    // всё равно показывает помощь: организатор должен знать, что прежний рассказ остановлен.
+    if (my !== state.drafting) { if (e.data && e.data.kind === 'safety' && e.data.help) showHelp(e.data.help); return; }
     // Не нехватка (stop, технический ответ, ошибка) — флаг снимается, иначе кнопка перепроверки была бы мёртвой.
     if (!(e.data && e.data.kind === 'insufficient')) state.insufficient = false;
     // ИР-02: «проверка недоступна» — экран организатора целиком (тексты редактора повествования, PM-01).

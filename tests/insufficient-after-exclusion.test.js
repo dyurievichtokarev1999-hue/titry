@@ -477,3 +477,28 @@ test('заметка организатору при переходе на за�
   assert.match(b.note, /не хватило строк/);
   for (const r of [a, b]) assert.ok(!/злюсь|ударить|чай|книг/i.test(r.note), 'в заметке нет текста рассказа');
 });
+
+// Ветка «остановка на входе»: проверка прежней сессии (до /delete) вернула true уже после того, как тот же
+// рассказ отправлен снова. Прежняя сессия молчит (она удалена), новая останавливается при своём ответе.
+for (const kind of ['insufficient', 'episode']) {
+  test(`бот: /delete, тот же рассказ снова, проверка прежней сессии true → новая сессия получает карточку помощи (${kind})`, async () => {
+    let checkTrue, draft2;
+    let drafts = 0;
+    const story = kind === 'insufficient' ? byId.OI10 : MIX;
+    const draft = (st, o) => (++drafts === 1 ? manual(byId.OI10, o) : new Promise((r) => { draft2 = () => r(manual(st, o)); }));
+    const b = botSetup({ draft, check: (t, n) => (n === 1 ? new Promise((r) => { checkTrue = () => r(true); }) : false) });
+    const tick = () => new Promise((r) => setImmediate(r));
+    const p1 = b.say(story);
+    while (!checkTrue) await tick();
+    await b.say('/delete');
+    const p2 = b.say(story);
+    while (!draft2) await tick();
+    checkTrue(); await p1; await tick();
+    draft2(); await p2; await tick();
+    const urgent = b.texts().filter((t) => /Сейчас важнее не титры/.test(t));
+    assert.equal(urgent.length, 1, JSON.stringify(b.texts()));
+    assert.match(b.texts().at(-1), /Сейчас важнее не титры/);
+    assert.ok(!b.texts().some((t) => t.startsWith(REPLY)));
+    assert.equal(b.bot.sessions.get(chat.id).episode, null, 'черновика нет');
+  });
+}
