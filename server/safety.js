@@ -10,7 +10,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { validateEpisode } from '../engine/episode.js';
+import { validateEpisode, LIMITS } from '../engine/episode.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -445,14 +445,94 @@ export function validateSafeEpisode(ep, story) {
   return extra.length ? { ...v, ok: false, errors: [...(v.errors || []), ...extra] } : v;
 }
 
-export function loadHelp(file = path.join(here, '..', 'config', 'help.json')) {
+/** Внутренняя причина: после исключения опасных частей рассказа не собирается обязательный элемент эпизода. */
+export const INSUFFICIENT_AFTER_EXCLUSION = 'insufficient_after_exclusion';
+/** Реплика при этой причине (редактор повествования), дословно. Единственное место текста: бот и монтажная берут отсюда. */
+export const INSUFFICIENT_TEXT = 'Не получилось собрать титры только из твоих слов. Сегодня можно без ролика.';
+
+/**
+ * Не хватает ли материала ПОСЛЕ исключения опасных частей (threatSentences/threatErrors).
+ * true — только если в рассказе есть исключённые части и при этом нельзя собрать хотя бы один обязательный
+ * элемент: title, genre или LIMITS.rowsMin пригодных строк (строка заполнена, не опирается на опасную часть
+ * и её цитата найдена в рассказе). Пустой post — не нехватка. Рассказ без исключений — всегда false:
+ * там обычная проверка validateEpisode, а не эта причина. validation — результат validateSafeEpisode(ep, story).
+ */
+export function insufficientAfterExclusion(ep, story, validation = validateSafeEpisode(ep, story)) {
+  if (!ep || typeof ep !== 'object') return false;
+  const clean = String(story || '').replace(/[^\S\n]+/g, ' ').replace(/\n\s*/g, '\n');
+  const errs = (validation && validation.errors) || [];
+  const threatMsg = 'Угроза другому человеку не берётся в титры.';
+  // Исключение было: в рассказе есть опасные части или правило уже отклонило какое-то поле эпизода.
+  if (!threatSentences(clean).length && !errs.some((e) => e.msg === threatMsg)) return false;
+  const blocked = (p) => errs.some((e) => e.path === p && e.msg === threatMsg);
+  const missing = (p) => !String(ep[p] || '').trim() || blocked(p);
+  const rows = Array.isArray(ep.rows) ? ep.rows : [];
+  // Пригодная пара: есть и роль, и значение, строка не опирается на опасную часть, цитата найдена в рассказе.
+  const usable = rows.filter((r, i) => String(r.role || '').trim() && String(r.value || '').trim()
+    && !errs.some((e) => e.path === `rows.${i}` || e.path === `rows.${i}.source`)).length;
+  return missing('title') || missing('genre') || usable < LIMITS.rowsMin;
+}
+
+export const HELP_FILE = path.join(here, '..', 'config', 'help.json');
+export const TELEGRAM_TEXT_LIMIT = 4096; // лимит одного текстового сообщения Telegram, в символах
+export const INSUFFICIENT_WITH_HELP_LIMIT = 3500; // «реплика нехватки + пустая строка + блок concern», с запасом до 4096
+
+export function loadHelp(file = HELP_FILE) {
   const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
-  const contacts = [cfg.emergency, ...(cfg.contacts || [])].filter((c) => c && c.verified && c.phone);
-  return { region: cfg.region, contacts };
+  // Только явно подтверждённые контакты: verified строго true («"false"», «"no"» не проходят).
+  const contacts = [cfg.emergency, ...(Array.isArray(cfg.contacts) ? cfg.contacts : [])].filter((c) => c && c.verified === true && c.phone);
+  return { region: typeof cfg.region === 'string' ? cfg.region.trim().toUpperCase() : cfg.region, contacts };
+}
+
+// Контакты помощи в памяти процесса (решение владельца по PR 11, 11.11 11:05): файл читается и проверяется
+// один раз — при старте бота и монтажной (prepareHelp) — и во время работы не перечитывается.
+let preparedHelp = null;
+let helpFailure = null; // ленивая проверка без старта (тесты, скрипты) не повторяется при каждом вызове
+
+/**
+ * Прочитать и проверить help.json один раз. Ошибка — исключение с кодом help_config (вызывающий не стартует):
+ * файл не читается, нет ни одного проверенного контакта с номером, текст блока помощи пуст или длиннее
+ * одного сообщения Telegram (делить блок посреди контакта нельзя).
+ */
+export function prepareHelp(file = HELP_FILE) {
+  const fail = () => Object.assign(new Error('help'), { code: 'help_config' });
+  preparedHelp = null; // неудачная проверка не оставляет прежние контакты
+  let help;
+  try { help = loadHelp(file); } catch { throw fail(); }
+  if (typeof help.region !== 'string' || !/^[a-z]{2}$/i.test(help.region.trim())) throw fail(); // код страны: RU, KZ…
+  if (!Array.isArray(help.contacts) || !help.contacts.length) throw fail();
+  // Подпись и часы — одна строка без переводов строк (иначе контакт разъезжается в блоке); номер — с цифрами.
+  // Перевод строки — любой: \r, \n, U+0085, U+2028, U+2029 (Telegram может показать их как разрыв строки).
+  const line = (v) => typeof v === 'string' && v.trim().length > 0 && !/[\r\n\u0085\u2028\u2029]/.test(v);
+  // Номер — только цифры, «+», пробелы, скобки и дефисы, не меньше трёх цифр (короткие: 112).
+  const phoneOk = (v) => /^\+?[\d\s()-]+$/.test(v.trim()) && (v.match(/\d/g) || []).length >= 3;
+  if (help.contacts.some((c) => !line(c.label) || !line(c.phone) || !phoneOk(c.phone)
+    || (c.hours !== undefined && c.hours !== '' && !line(c.hours)))) throw fail(); // часы: нет, '' или одна строка
+  // Тексты не пусты по построению (постоянные фразы + непустой список); проверяется лимит одного сообщения.
+  for (const level of ['concern', 'urgent']) if (helpMessage(level, help).length > TELEGRAM_TEXT_LIMIT) throw fail();
+  // Реплика нехватки идёт одним сообщением с блоком concern (бот): «реплика + пустая строка + блок» ≤ 3500,
+  // с запасом до лимита Telegram (решение владельца 11.11 11:05). urgent с репликой не соединяется.
+  if (INSUFFICIENT_TEXT.length + 2 + helpMessage('concern', help).length > INSUFFICIENT_WITH_HELP_LIMIT) throw fail();
+  preparedHelp = help;
+  helpFailure = null;
+  return help;
+}
+
+/**
+ * Проверенные при старте контакты. Рабочие входы (бот, монтажная) вызывают prepareHelp при старте и при ошибке не
+ * запускаются, поэтому ветка ниже в работе не встречается. Без старта (тесты, скрипты) — ленивая проверка при первом
+ * обращении. Её неудача запоминается до перезапуска процесса СОЗНАТЕЛЬНО: файл не перечитывается при каждом вызове,
+ * а каждый следующий вызов снова получает ту же ошибку help_config (тихого «без помощи» нет). Успешный явный
+ * prepareHelp снимает запомненную неудачу.
+ */
+export function currentHelp() {
+  if (preparedHelp) return preparedHelp;
+  if (helpFailure) throw helpFailure;
+  try { return prepareHelp(); } catch (e) { helpFailure = e; throw e; }
 }
 
 /** Текст экрана помощи. Без обещаний «мы всегда заметим» и без давления. */
-export function helpMessage(level, help = loadHelp()) {
+export function helpMessage(level, help = currentHelp()) {
   const list = help.contacts.map((c) => `• ${c.label}: ${c.phone}${c.hours ? ` (${c.hours})` : ''}`).join('\n');
   if (level === 'urgent') {
     return [
