@@ -10,7 +10,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { validateEpisode } from '../engine/episode.js';
+import { validateEpisode, LIMITS } from '../engine/episode.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -443,6 +443,30 @@ export function validateSafeEpisode(ep, story) {
   const v = validateEpisode(ep, story);
   const extra = threatErrors(story, ep);
   return extra.length ? { ...v, ok: false, errors: [...(v.errors || []), ...extra] } : v;
+}
+
+/** Внутренняя причина: после исключения опасных частей рассказа не собирается обязательный элемент эпизода. */
+export const INSUFFICIENT_AFTER_EXCLUSION = 'insufficient_after_exclusion';
+
+/**
+ * Не хватает ли материала ПОСЛЕ исключения опасных частей (threatSentences/threatErrors).
+ * true — только если в рассказе есть исключённые части и при этом нельзя собрать хотя бы один обязательный
+ * элемент: title, genre или LIMITS.rowsMin пригодных строк (строка заполнена, не опирается на опасную часть
+ * и её цитата найдена в рассказе). Пустой post — не нехватка. Рассказ без исключений — всегда false:
+ * там обычная проверка validateEpisode, а не эта причина. validation — результат validateSafeEpisode(ep, story).
+ */
+export function insufficientAfterExclusion(ep, story, validation = validateSafeEpisode(ep, story)) {
+  if (!ep || typeof ep !== 'object') return false;
+  const clean = String(story || '').replace(/[^\S\n]+/g, ' ').replace(/\n\s*/g, '\n');
+  if (!threatSentences(clean).length) return false; // ничего не исключалось
+  const errs = (validation && validation.errors) || [];
+  const threatMsg = 'Угроза другому человеку не берётся в титры.';
+  const blocked = (p) => errs.some((e) => e.path === p && e.msg === threatMsg);
+  const missing = (p) => !String(ep[p] || '').trim() || blocked(p);
+  const rows = Array.isArray(ep.rows) ? ep.rows : [];
+  const usable = rows.filter((r, i) => (String(r.role || '').trim() || String(r.value || '').trim())
+    && !errs.some((e) => e.path === `rows.${i}` || e.path === `rows.${i}.source`)).length;
+  return missing('title') || missing('genre') || usable < LIMITS.rowsMin;
 }
 
 export function loadHelp(file = path.join(here, '..', 'config', 'help.json')) {

@@ -192,6 +192,8 @@ function stopText(e, safetyNote) {
     return `${d.error}. ${d.message} ${d.next}${when}`;
   }
   if (d.unavailable) return `${d.error}. ${d.message} ${d.next}`;
+  // Нехватка материала после исключения опасных частей: только реплика, без помощи и без повтора.
+  if (d.kind === 'insufficient') return d.error;
   return e.message;
 }
 

@@ -67,6 +67,9 @@ export const TEXT = {
   deleteFailed: 'Сессия удалена, а удаление статистики по тебе подтвердить не получилось. Попробуй /delete ещё раз чуть позже.',
   renderFail: 'Не получилось собрать ролик. Попробуй ещё раз чуть позже.',
   draftFail: 'Не получилось собрать черновик. Попробуй ещё раз чуть позже.',
+  // Внутренняя причина insufficient_after_exclusion (редактор повествования), дословно: только эта реплика —
+  // без черновика, ролика, просьбы дописать и кнопок. Показывается только после stop и технических исходов.
+  insufficient: 'Не получилось собрать титры только из твоих слов. Сегодня можно без ролика.',
 };
 
 // ── Чистые функции: разбор правок ────────────────────────────────────────────
@@ -393,7 +396,7 @@ export function createBot({
     }
     // Опасный черновик, пришедший после /delete или смены сессии: запрет участника записывается всё равно
     // (область — чат, а не сессия), но в чат ничего не отправляется.
-    if (r && !r.unavailable && !r.episode) gate.markSafety(`chat:${chatId}`, story);
+    if (r && !r.unavailable && !r.insufficient && !r.episode) gate.markSafety(`chat:${chatId}`, story);
     if (!alive(chatId, s)) return; // удалённая сессия не оживает из отложенного ответа
     if (r.unavailable) {
       // ИР-02: проверка не завершена — техническое состояние, не остановка: рассказ не запоминается
@@ -403,6 +406,7 @@ export function createBot({
       s.stage = 'idle';
       return tg.send(chatId, TEXT.checkUnavailable);
     }
+    if (r.insufficient) return replyInsufficient(chatId, s, story, gen, current);
     if (!r.episode) {
       // Остановка важнее всего, даже если ответ устарел: рассказ запоминается как запрещённый.
       if (s.draftId === gen) return stopForSafety(chatId, s, r.risk.level, { byModel: r.risk.byModel });
@@ -427,6 +431,28 @@ export function createBot({
     await metrics.log(chatId, 'draft', { provider: r.provider, rows: r.episode.rows.length, dropped: (r.dropped || []).length });
     if (!current()) return;
     await showDraft(chatId, s);
+  }
+
+  // Нехватка материала после исключения опасных частей (insufficient_after_exclusion). Порядок исходов:
+  // stop (safety) → техническая недоступность/пауза → [явный отказ человека — такого исхода в боте нет] → нехватка.
+  // Поэтому перед репликой рассказ проходит ту же отдельную проверку, что и перед рендером: опасность даёт остановку,
+  // незавершённая проверка — технический ответ, и только полное разрешение — реплику нехватки.
+  // В метрики — только код события, без текста рассказа и номеров предложений.
+  async function replyInsufficient(chatId, s, story, gen, current) {
+    if (!current()) return;
+    const g = await track(chatId, gate.verify(s.scope, story, null, story));
+    if (!alive(chatId, s) || s.draftId !== gen) return;
+    if (g.kind === 'safety') return stopForSafety(chatId, s, 'urgent', { at: 'check', byModel: true });
+    if (!g.ok) {
+      logError('check', { code: g.code });
+      s.stage = 'idle';
+      return tg.send(chatId, g.kind === 'technical' ? TEXT.checkPaused : TEXT.checkUnavailable);
+    }
+    if (!current()) return;
+    s.stage = 'idle'; // черновика нет: правки и кнопки не к чему применять
+    await metrics.log(chatId, 'insufficient_after_exclusion');
+    if (!current()) return;
+    return tg.send(chatId, TEXT.insufficient);
   }
 
   async function doRender(chatId, s) {

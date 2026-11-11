@@ -5,7 +5,7 @@
 import { safeCode } from './errlog.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { MOODS, blankEpisode, detectGender, sanitizeEpisode, sourceFound, todayIso, validateEpisode } from '../engine/episode.js';
-import { assessRisk, threatSentences, touchesThreat, validateSafeEpisode } from './safety.js';
+import { assessRisk, threatSentences, touchesThreat, validateSafeEpisode, insufficientAfterExclusion, INSUFFICIENT_AFTER_EXCLUSION } from './safety.js';
 
 export const DEFAULT_MODEL = process.env.TITRY_MODEL || 'claude-opus-5-5';
 
@@ -269,7 +269,9 @@ export function draftRuleBased(story, { date = todayIso(), period = 'day' } = {}
 
 /**
  * Главная точка входа: безопасность → черновик (Claude или заготовка) → проверка.
- * Возвращает { episode, validation, risk, provider, dropped, note }.
+ * Возвращает { episode, validation, risk, provider, dropped, note }. Исходы без черновика (episode: null), по старшинству:
+ * остановка { risk: urgent } → недоступность { unavailable, code } → нехватка { insufficient: true,
+ * code: 'insufficient_after_exclusion', risk } (risk тут none/concern; это не остановка).
  */
 export async function makeDraft(story, opts = {}) {
   const text = String(story || '').trim();
@@ -305,7 +307,14 @@ export async function makeDraft(story, opts = {}) {
     result = draftRuleBased(text, opts);
     provider = 'manual';
   }
+  // Черновик модели и заготовка без ИИ проходят один и тот же валидатор. Если после исключения опасных частей
+  // не собирается обязательный элемент (title, genre, LIMITS.rowsMin строк) — внутренняя причина
+  // insufficient_after_exclusion: без черновика, без исключённых строк (dropped) и без дописанных событий.
+  // Сюда доходят только рассказы без stop (urgent/safety_flag) и без технической недоступности: они вернулись выше.
   const validation = validateSafeEpisode(result.episode, text);
+  if (insufficientAfterExclusion(result.episode, text, validation)) {
+    return { risk, episode: null, provider, insufficient: true, code: INSUFFICIENT_AFTER_EXCLUSION };
+  }
   return { ...result, validation, risk, provider, note };
 }
 
