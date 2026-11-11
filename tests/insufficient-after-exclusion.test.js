@@ -128,8 +128,8 @@ test('модель вернула меньше двух безопасных с�
 
 test('черновик модели не собирается после исключения (название из угрозы) → сначала заготовка без ИИ', async () => {
   const raw = modelDraft({ title: 'Ударить брата', rows: [
-    { role: 'Чай', value: 'утренний чай', source: 'Утром я пила чай' },
-    { role: 'Книга', value: 'вечер с книгой', source: 'Вечером я читала книгу' },
+    { role: 'Утром', value: 'пила чай', source: 'Утром я пила чай' },
+    { role: 'Вечером', value: 'читала книгу', source: 'Вечером я читала книгу' },
   ] });
   const r = await makeDraft(MIX, { provider: 'claude', client: modelClient(raw) });
   assert.ok(!r.insufficient, 'заготовка собирается — это не нехватка');
@@ -411,7 +411,10 @@ test('монтажная: ручная правка организатора н�
       const v = await post('/api/validate', { story: MIX, episode: ep });
       assert.equal(v.body.validation.ok, false);
       const r = await post('/api/render', { story: MIX, episode: ep });
-      assert.equal(r.status, 422); assert.ok(r.body.validation && !r.body.validation.ok);
+      // Слияние с PR 13: дословные роли («Утром», «Вечером») стоят в общем тексте эпизода рядом с угрозой, и фильтр
+      // всего эпизода может дать остановку раньше проверки строк. Оба исхода закрыты: ролика нет.
+      assert.equal(r.status, 422);
+      assert.ok((r.body.validation && !r.body.validation.ok) || r.body.kind === 'safety', JSON.stringify(r.body.kind));
     }
     const urgent = { ...base, rows: [...base.rows, { role: 'Мысль', value: 'не хочу больше жить', source: 'не хочу больше жить' }] };
     const u = await post('/api/render', { story: MIX, episode: urgent });
@@ -478,12 +481,12 @@ test('нехватка: журнал ошибок и консоль не сод�
 
 test('заметка организатору при переходе на заготовку — по фактической причине', async () => {
   const titleFromThreat = modelDraft({ title: 'Ударить брата', rows: [
-    { role: 'Чай', value: 'утренний чай', source: 'Утром я пила чай' },
-    { role: 'Книга', value: 'вечер с книгой', source: 'Вечером я читала книгу' },
+    { role: 'Утром', value: 'пила чай', source: 'Утром я пила чай' },
+    { role: 'Вечером', value: 'читала книгу', source: 'Вечером я читала книгу' },
   ] });
   const a = await makeDraft(MIX, { provider: 'claude', client: modelClient(titleFromThreat) });
   assert.match(a.note, /Название или жанр/);
-  const fewRows = modelDraft({ rows: [{ role: 'Чай', value: 'утренний чай', source: 'Утром я пила чай' }] });
+  const fewRows = modelDraft({ rows: [{ role: 'Утром', value: 'пила чай', source: 'Утром я пила чай' }] });
   const b = await makeDraft(MIX, { provider: 'claude', client: modelClient(fewRows) });
   assert.match(b.note, /не хватило строк/);
   for (const r of [a, b]) assert.ok(!/злюсь|ударить|чай|книг/i.test(r.note), 'в заметке нет текста рассказа');
