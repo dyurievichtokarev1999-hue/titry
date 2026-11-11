@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { LIMITS, rowWordProblems, rowWordsGrounded, sanitizeEpisode, validateEpisode } from '../engine/episode.js';
+import { LIMITS, plainPhrase, rowWordProblems, rowWordsGrounded, sanitizeEpisode, validateEpisode } from '../engine/episode.js';
 import { pairFromSentence } from '../server/draft.js';
 import { validateSafeEpisode } from '../server/safety.js';
 import { draftRuleBased, draftWithClaude, groundDraft, makeDraft, SYSTEM_PROMPT } from '../server/draft.js';
@@ -153,9 +153,9 @@ test('заготовка без ИИ: все строки проходят пр�
 });
 
 test('заготовка без ИИ: «не» остаётся при слове, порядок слов цитаты', () => {
-  const r = draftRuleBased('Я не пила чай. Утром работа.', { date: '2026-11-11' });
-  // порядок слов как в цитате: «не» уходит в роль вместе со словом (разбор dfee587e)
-  assert.deepEqual(r.episode.rows.map((x) => `${x.role} — ${x.value}`), ['Не пила — чай', 'Утром — работа']);
+  // белый список формы фразы (11.11 15:05): фраза с «не» строку не даёт; простое утверждение от первого лица — даёт
+  const r = draftRuleBased('Я не пила чай. Утром я пила кофе.', { date: '2026-11-11' });
+  assert.deepEqual(r.episode.rows.map((x) => `${x.role} — ${x.value}`), ['Утром — пила кофе']);
 });
 
 test('примеры examples/*.json проходят новое правило', async () => {
@@ -185,7 +185,7 @@ const playId = (tg) => [...tg.sent].reverse().find((m) => m.extra && m.extra.rep
 
 test('бот: правка строки — цитата из того, что человек написал; роль без опоры не уходит в ролик', async () => {
   // чистая функция: роль и текст из правки становятся цитатой строки
-  const { episode } = draftRuleBased('Утром работа. Днём встреча с другом. Вечером ужин.', { date: '2026-11-11' });
+  const { episode } = draftRuleBased('Утром я работала. Днём я встретилась с другом. Вечером мы ужинали.', { date: '2026-11-11' });
   assert.equal(applyEdit(episode, { op: 'add', role: 'Окно', value: 'долгий вечер' }), null);
   assert.deepEqual(episode.rows.at(-1), { role: 'Окно', value: 'долгий вечер', source: 'Окно долгий вечер' });
 
@@ -196,7 +196,7 @@ test('бот: правка строки — цитата из того, что �
   const bot = createBot({ safetyCheck: async () => false, tg, metrics: makeMetrics(path.join(dir, 'm.jsonl')), render, draft: (s, o) => makeDraft(s, { ...o, provider: 'manual' }) });
   const chat = { id: 77, type: 'private' };
   try {
-    await bot.handleUpdate({ message: { chat, text: 'Утром работа. Днём встреча с другом. Вечером ужин.' } });
+    await bot.handleUpdate({ message: { chat, text: 'Утром я работала. Днём я встретилась с другом. Вечером мы ужинали.' } });
     // только новый текст из одного слова: пару не собрать, прежняя роль «Утром» без опоры → ошибка, ролик не собирается
     await bot.handleUpdate({ message: { chat, text: '1: работала' } });
     assert.match(tg.sent.at(-1).text, /Строка 1: .*«1: роль — текст»/);
@@ -285,13 +285,18 @@ test('заготовка: значение — непрерывный кусок
 });
 
 test('бот: «N: текст» — роль из слов этого текста; подсказка и ошибки без слова «цитата»', () => {
-  const { episode } = draftRuleBased('Утром работа. Днём встреча с другом. Вечером ужин.', { date: '2026-11-11' });
-  assert.equal(applyEdit(episode, parseEdit('1: друг позвонил поговорить')), null);
-  assert.deepEqual(episode.rows[0], { role: 'Друг', value: 'позвонил поговорить', source: 'друг позвонил поговорить' });
-  assert.ok(rowWordsGrounded(episode.rows[0], 'друг позвонил поговорить'));
+  const { episode } = draftRuleBased('Утром я работала. Днём я встретилась с другом. Вечером мы ужинали.', { date: '2026-11-11' });
+  // «N: текст» — простое утверждение от первого лица: роль и значение из его слов
+  assert.equal(applyEdit(episode, parseEdit('1: вечером я позвонила другу')), null);
+  assert.deepEqual(episode.rows[0], { role: 'Вечером', value: 'позвонила другу', source: 'вечером я позвонила другу' });
+  assert.ok(rowWordsGrounded(episode.rows[0], 'вечером я позвонила другу'));
+  // не первое лицо или придаточное — пары нет, прежняя роль без опоры, ролик не соберётся
+  const ep2 = draftRuleBased('Утром я работала. Днём я встретилась с другом.', { date: '2026-11-11' }).episode;
+  assert.equal(applyEdit(ep2, parseEdit('1: друг позвонил поговорить')), null);
+  assert.notEqual(ep2.rows[0].role, 'Друг');
   // текст из одного слова — пары нет: прежняя роль остаётся, человек видит понятную ошибку
   assert.equal(applyEdit(episode, parseEdit('2: ужинали')), null);
-  const v = validateEpisode(episode, 'Утром работа. Днём встреча с другом. Вечером ужин.\nдруг позвонил поговорить\nужинали');
+  const v = validateEpisode(episode, 'Утром я работала. Днём я встретилась с другом. Вечером мы ужинали.\nвечером я позвонила другу\nужинали');
   assert.equal(v.ok, false);
   const msg = draftMessage(episode, v);
   assert.match(msg, /Строка 2: .*«2: роль — текст»/);
@@ -320,7 +325,7 @@ test('заготовка: не обрывает значение на предл
 });
 
 test('бот: правка «N: пила чай» при «Я не пила чай» в рассказе — это слова человека, строка проходит; ошибки по причине', () => {
-  const story = 'Я не пила чай. Утром работа. Вечером ужин.';
+  const story = 'Я не пила чай. Утром я работала. Вечером мы ужинали.';
   const { episode } = draftRuleBased(story, { date: '2026-11-11' });
   assert.equal(applyEdit(episode, parseEdit('1: пила чай')), null);
   const v = validateEpisode(episode, `${story}\nпила чай`);
@@ -388,7 +393,8 @@ test('«без» и намерение не приставляются, двое
     assert.deepEqual(rowWordProblems(row, story), [], `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
   }
   // рассказ строками без точек: строки остаются отдельными фразами, заготовка не пустая
-  assert.ok(draftRuleBased(fx.review6.lines, { date: '2026-11-11' }).episode.rows.length >= 2);
+  // белый список: из строк от первого лица («утром пила кофе») строка берётся, «потом работа до шести» — нет
+  assert.ok(draftRuleBased(fx.review6.lines, { date: '2026-11-11' }).episode.rows.some((x) => /кофе/.test(x.value)));
 });
 
 test('время проверки линейно: рассказ ~6000 знаков с повторами глагола речи — меньше 3 секунд', () => {
@@ -533,5 +539,44 @@ test('пробуждение без сомнений, перенос сказа�
   }
   for (const { story, row } of fx.review13.accept) {
     assert.deepEqual(rowWordProblems(row, story), [], `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+});
+
+// ── Белый список формы фразы (решение Claude 11.11 15:05) ─────────────────────
+
+test('белый список: только простое утверждение от первого лица даёт строку заготовки', () => {
+  const ok = ['Утром я пила чай.', 'Днём работала в офисе.', 'Вечером мы гуляли в парке.', 'Купила хлеб и молоко.'];
+  const no = [
+    'Мама пекла пироги.', 'Анализы хорошие.', 'Бабушка проснулась.', 'Утром работа.', // не первое лицо
+    'Я думала, что он злится.', 'Я ушла, когда стемнело.', 'Я не пила чай.', 'Я пила чай без сахара.', // придаточное, отрицание
+    'Я пила «Эрл Грей».', 'Я сказала: хватит.', 'Я пила чай?', 'Я (кажется) пила чай.', // кавычки, двоеточие, вопрос, скобки
+    'Мне снилось, я летала.', 'Наверное, я устала.', 'Я хотела поехать на дачу.', 'По данным врача, я здорова.', // сон, неуверенность, намерение, источник
+    'Говорят, я ленивая.', 'Я почти упала.', 'Я пила… чай.',
+  ];
+  for (const s of ok) assert.equal(plainPhrase(s), true, s);
+  for (const s of no) assert.equal(plainPhrase(s), false, s);
+  // признаки соседних фраз: сон до явного «Я проснулась.», перенос сказанного
+  assert.equal(plainPhrase('Я пила чай.', 'Мне снилось море. Я пила чай.'), false);
+  assert.equal(plainPhrase('Я пила чай.', 'Мне снилось море. Я проснулась. Я пила чай.'), true);
+  assert.equal(plainPhrase('Я пила чай.', 'Мне снилось море. Я будто проснулась. Я пила чай.'), false);
+  assert.equal(plainPhrase('Я пила чай.', 'Мне снилось море. Вдруг я проснулась. Я пила чай.'), false);
+  assert.equal(plainPhrase('Я пила чай.', 'Медсестра сказала. Я пила чай.'), false);
+});
+
+test('все случаи прошлых разборов: заготовка не даёт ни отклонённых строк, ни строк из неплоских фраз', () => {
+  const sets = Object.keys(fx).filter((k) => /^review\d+$|^cut$|^bound$/.test(k));
+  for (const k of sets) {
+    for (const c of fx[k].reject || []) {
+      const story = c.story || (fx[k].story ?? c.source);
+      if (!story) continue;
+      const r = draftRuleBased(story, { date: '2026-11-11' });
+      const row = c.row || c;
+      for (const got of r.episode.rows) {
+        assert.ok(rowWordsGrounded(got, story), `${k}: ${got.role} — ${got.value}`);
+        assert.ok(plainPhrase(got.source, story), `${k}: строка не из простого утверждения: ${got.source}`);
+        assert.ok(!(got.role.toLowerCase() === String(row.role).toLowerCase() && got.value.toLowerCase() === String(row.value).toLowerCase()),
+          `${k}: заготовка выдала отклонённую строку ${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+      }
+    }
   }
 });

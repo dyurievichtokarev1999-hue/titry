@@ -4,7 +4,7 @@
 // В обоих случаях каждая строка проверяется по рассказу: без цитаты в рассказе строка в титры не попадает.
 import { safeCode } from './errlog.js';
 import Anthropic from '@anthropic-ai/sdk';
-import { LIMITS, MOODS, blankEpisode, detectGender, isMarkerWord, rowWordsGrounded, sanitizeEpisode, sourceFound, todayIso, validateEpisode, wordsOf } from '../engine/episode.js';
+import { LIMITS, MOODS, blankEpisode, detectGender, isMarkerWord, plainPhrase, rowWordsGrounded, sanitizeEpisode, sourceFound, todayIso, validateEpisode, wordsOf } from '../engine/episode.js';
 import { assessRisk, threatSentences, touchesThreat, validateSafeEpisode } from './safety.js';
 
 export const DEFAULT_MODEL = process.env.TITRY_MODEL || 'claude-opus-5-5';
@@ -267,6 +267,8 @@ export function pairFromSentence(sentence, usedRoles = new Set(), story = senten
   const source = trimEdge(String(sentence || '').replace(/[.!?…]+$/, ''));
   // из очень длинной фразы пару не берём: значение всё равно не уложится, а разбор станет долгим
   if (source.length > 1000) return null;
+  // белый список формы фразы (решение Claude 11.11): только простое утверждение от первого лица
+  if (!plainPhrase(sentence, story)) return null;
   const raw = source.split(/\s+/).filter((t) => wordsOf(t).length);
   // слова каждого токена считаются один раз: длинная фраза без точек разбирается линейно
   const memo = new Map();
