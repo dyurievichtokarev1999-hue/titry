@@ -90,7 +90,7 @@ test('сценарий бота: рассказ → правка → ролик 
 test('бот: срочный риск — без ролика, с экраном помощи; групповые чаты игнорируются', async () => {
   const tg = fakeTelegram();
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-test-'));
-  const bot = createBot({ safetyCheck: async () => false, tg, metrics: makeMetrics(path.join(dir, 'm.jsonl')), render: async () => { throw new Error('не должно вызываться'); }, draft: (s, o) => import('../server/draft.js').then((m) => m.makeDraft(s, { ...o, provider: 'manual' })) });
+  const bot = createBot({ safetyCheck: async () => false, tg, metrics: makeMetrics(path.join(dir, 'm.jsonl'), 'test-salt'), render: async () => { throw new Error('не должно вызываться'); }, draft: (s, o) => import('../server/draft.js').then((m) => m.makeDraft(s, { ...o, provider: 'manual' })) });
   await bot.handleUpdate({ message: { chat: { id: 7, type: 'private' }, text: 'Сегодня понял, что не хочу больше жить.' } });
   assert.ok(tg.sent.some((m) => /Сейчас важнее не титры/.test(m.text)));
   assert.ok(!tg.sent.some((m) => /Похоже на твой день/.test(m.text)));

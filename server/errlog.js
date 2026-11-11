@@ -15,7 +15,7 @@ const KNOWN_CODES = listed([
   // свои коды приложения
   'safety', 'timeout', 'browser', 'tmp_cleanup_pending', 'empty', 'stt_off', 'too_long', 'refusal',
   'max_tokens', 'bad_json', 'bad_response', 'incomplete_response', 'ffmpeg', 'fonts', 'no_key', 'check_incomplete_twice',
-  'ledger',
+  'ledger', 'metrics_salt',
   // файловая система и сеть Node
   'ENOENT', 'ENOSPC', 'EACCES', 'EPERM', 'EIO', 'EEXIST', 'EMFILE', 'ENOTDIR', 'EISDIR', 'EBUSY', 'EROFS',
   'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE', 'ERR_STREAM_PREMATURE_CLOSE',

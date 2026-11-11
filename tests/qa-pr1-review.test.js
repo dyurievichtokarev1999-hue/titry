@@ -39,7 +39,7 @@ test('B1: корректный черновик → модельная оста�
   };
   const renders = [];
   const render = async (ep, opts) => { renders.push(opts); return { outPath: opts.outPath, duration: 24, seconds: 1 }; };
-  const bot = createBot({ safetyCheck: async () => false, tg, metrics: makeMetrics(path.join(dir, 'm.jsonl')), draft, render });
+  const bot = createBot({ safetyCheck: async () => false, tg, metrics: makeMetrics(path.join(dir, 'm.jsonl'), 'test-salt'), draft, render });
   const chat = { id: 11, type: 'private' };
 
   await bot.handleUpdate({ message: { chat, text: ex.story } });

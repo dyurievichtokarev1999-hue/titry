@@ -167,7 +167,7 @@ function fakeTelegram() {
 test('бот: «продолжить» после срабатывания фильтра не делает черновик', async () => {
   const tg = fakeTelegram();
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-bot-'));
-  const bot = createBot({ safetyCheck: async () => false, tg, metrics: makeMetrics(path.join(dir, 'm.jsonl')), render: async () => { throw new Error('не должно вызываться'); }, draft: (s, o) => makeDraft(s, { ...o, provider: 'manual' }) });
+  const bot = createBot({ safetyCheck: async () => false, tg, metrics: makeMetrics(path.join(dir, 'm.jsonl'), 'test-salt'), render: async () => { throw new Error('не должно вызываться'); }, draft: (s, o) => makeDraft(s, { ...o, provider: 'manual' }) });
   const chat = { id: 5, type: 'private' };
   await bot.handleUpdate({ message: { chat, text: URGENT_STORY } });
   await bot.handleUpdate({ message: { chat, text: 'продолжить' } });
@@ -179,7 +179,7 @@ test('бот: правка от самого человека становитс
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-bot-'));
   const rendered = [];
   const render = async (ep, opts) => { rendered.push({ ep, opts }); await fs.mkdir(path.dirname(opts.outPath), { recursive: true }); await fs.writeFile(opts.outPath, 'x'); return { outPath: opts.outPath, duration: 24, seconds: 1 }; };
-  const bot = createBot({ safetyCheck: async () => false, tg, metrics: makeMetrics(path.join(dir, 'm.jsonl')), render, draft: (s, o) => makeDraft(s, { ...o, provider: 'manual' }) });
+  const bot = createBot({ safetyCheck: async () => false, tg, metrics: makeMetrics(path.join(dir, 'm.jsonl'), 'test-salt'), render, draft: (s, o) => makeDraft(s, { ...o, provider: 'manual' }) });
   const chat = { id: 6, type: 'private' };
   await bot.handleUpdate({ message: { chat, text: SAFE_STORY } });
   await bot.handleUpdate({ message: { chat, text: '1: Работа — обсуждение жирафа' } });
