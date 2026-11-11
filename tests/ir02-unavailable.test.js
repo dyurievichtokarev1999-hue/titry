@@ -36,7 +36,7 @@ test('ИР-02: бот — сообщение о задержке, без кар�
   const sent = [];
   let down = true, renders = 0;
   const tg = { send: async (id, text, extra) => { sent.push({ text, extra }); }, action: async () => {}, answer: async () => {}, sendVideo: async () => {} };
-  const bot = createBot({
+  const bot = createBot({ safetyCheck: async () => false,
     tg, metrics: makeMetrics(path.join(dir, 'm.jsonl'), 'ir02-salt'),
     draft: (story, o) => makeDraft(story, { ...o, provider: 'claude', client: down ? failingClient : okClient }),
     render: async () => { renders++; return {}; },

@@ -10,7 +10,9 @@ import { MOODS, TRACKS, sanitizeEpisode, validateEpisode, episodeToText } from '
 import { makeDraft, hasClaudeCredentials, DEFAULT_MODEL, modelSafetyCheck } from './draft.js';
 import { renderEpisode, ROOT } from './render.js';
 import { logError, safeCode } from './errlog.js';
-import { loadHelp, helpMessage, assessEpisodeRisk } from './safety.js';
+import { loadHelp, helpMessage, assessEpisodeRisk, validateSafeEpisode } from './safety.js';
+import { makeGate } from './gate.js';
+import { makeLedger, KEY_ENV, KEY_VERSION_ENV } from './ledger.js';
 
 const STATIC = {
   '/': 'studio/index.html',
@@ -60,16 +62,25 @@ export const OUT_MAX_AGE_MS = 2 * 60 * 60 * 1000;
  * Удалить ролики и постеры старше maxAgeMs (0 — все). Ролик удаляется после отправки кнопкой
  * в монтажной; это страховка для забытых, неотправленных и недособранных файлов.
  */
-export async function purgeOut(dir, maxAgeMs = OUT_MAX_AGE_MS, now = Date.now()) {
+export async function purgeOut(dir, maxAgeMs = OUT_MAX_AGE_MS, now = Date.now(), { strict = false } = {}) {
+  // strict (стартовая очистка, B09.6): любая ошибка, кроме «каталога/файла нет», — исключение;
+  // вызывающий не начинает приём задач. Иначе — тихая фоновая страховка.
+  const gone = (e) => e?.code === 'ENOENT';
   let removed = 0;
   let names = [];
-  try { names = await fs.readdir(dir); } catch { return 0; }
+  try {
+    // Сам каталог должен быть настоящим каталогом, не ссылкой: иначе очистка ушла бы в чужой каталог.
+    const d = await fs.lstat(dir);
+    if (!d.isDirectory()) throw Object.assign(new Error('data/out — не каталог'), { code: d.isSymbolicLink() ? 'EACCES' : 'ENOTDIR' });
+    names = await fs.readdir(dir);
+  } catch (e) { if (strict && !gone(e)) throw e; return 0; }
   for (const name of names) {
     const file = path.join(dir, name);
     try {
-      const st = await fs.stat(file);
-      if (st.isFile() && now - st.mtimeMs >= maxAgeMs) { await fs.rm(file, { force: true }); removed++; }
-    } catch { /* файл уже удалён */ }
+      const st = await fs.lstat(file);
+      // Ссылка удаляется как ссылка (цель не трогается): монтажная сама ссылок не создаёт и не отдаёт.
+      if ((st.isFile() || st.isSymbolicLink()) && now - st.mtimeMs >= maxAgeMs) { await fs.rm(file, { force: true }); removed++; }
+    } catch (e) { if (strict && !gone(e)) throw e; /* иначе: файл уже удалён */ }
   }
   return removed;
 }
@@ -81,7 +92,6 @@ export function strictDate(v) {
   return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v ? v : null;
 }
 
-const storyKey = (story) => crypto.createHash('sha256').update(String(story).toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim()).digest('hex');
 const bool = (v) => v === true;
 
 /** Запись журнала: только разрешённые поля, без текстов. */
@@ -115,20 +125,60 @@ export function logRecord(body) {
  * Создать сервер монтажной. Параметры нужны для тестов:
  * render — функция рендера (по умолчанию настоящий renderEpisode), dataDir — папка данных.
  */
+// Тексты экрана организатора — редактор повествования 14:42, приняты владельцем 15:08, дословно
+// (next для 503 — прежняя подсказка организатору PM-01, 9.11).
+const UNAVAILABLE = {
+  unavailable: true,
+  error: 'Проверку завершить не удалось',
+  message: 'Сервис не смог завершить проверку рассказа. Сейчас ролик не создаётся.',
+  next: 'Повторить можно позже, только с полной проверкой заново. На заготовку без ИИ не переключаться. Если для рассказа ранее подтверждена остановка, повтор не снимает её.',
+};
+// Техническая приостановка (второй подряд неполный ответ): без слов об опасности, помощи и сроках.
+const TECHNICAL = {
+  kind: 'technical',
+  reason: 'check_incomplete_twice',
+  error: 'Проверка приостановлена',
+  message: 'Сервис дважды не смог завершить проверку рассказа. Сейчас ролик не создаётся. Ждать в чате и отвечать на это сообщение не нужно.',
+  next: 'Повторную полную проверку можно запустить только явным действием организатора, не раньше чем через 15 минут после второго сбоя. Ожидание и перезапуск сами по себе не снимают приостановку. Если остановка по безопасности уже подтверждена, она сохраняется.',
+};
+const SCOPE = 'studio'; // монтажная — одна общая область запретов
+
+/**
+ * Создать сервер монтажной. Параметры нужны для тестов:
+ * render — функция рендера (по умолчанию настоящий renderEpisode), dataDir — папка данных,
+ * safetyCheck — отдельная проверка (true — опасно, false — разрешение, исключение — проверка не завершена),
+ * hasKey — есть ли доступ к модели, monoNow/wallNow — часы.
+ */
 export function createApp({
   render = renderEpisode,
   dataDir = path.join(ROOT, 'data'),
-  // Второй слой безопасности для прямого пути рендера: true — опасно, false — нет, null — модель недоступна.
-  safetyCheck = async (story) => (hasClaudeCredentials() ? modelSafetyCheck(story) : null),
+  safetyCheck,
+  hasKey = safetyCheck ? () => true : hasClaudeCredentials,
+  draft = makeDraft,
+  monoNow, wallNow,
+  ledger = null, // хранилище запретов; загружается до приёма задач (см. запуск ниже)
+  gate = makeGate({ check: safetyCheck || ((text) => modelSafetyCheck(text)), hasKey, monoNow, wallNow, ledger }),
 } = {}) {
   const OUT = path.join(dataDir, 'out');
   const LOG = path.join(dataDir, 'concierge');
-  const blocked = new Set(); // рассказы, остановленные моделью в этой сессии монтажной
   let rendering = Promise.resolve();
   // Ролики не переживают перезапуск монтажной и не лежат дольше 2 часов.
   purgeOut(OUT, 0).catch(() => {});
   const sweeper = setInterval(() => purgeOut(OUT).catch(() => {}), 10 * 60 * 1000);
   sweeper.unref();
+
+  // S01–S04: подтверждённая опасность — 422, маршрут помощи. Только реально сработавший слой даёт byModel.
+  const safetyStop = (risk = { level: 'urgent', byModel: true, matches: [] }, error = 'Ролик не собирается: сработал фильтр безопасности.') =>
+    ({ status: 422, body: { error, kind: 'safety', risk, help: helpMessage('urgent') } });
+  // Технические состояния: без помощи, без urgent/byModel.
+  const technical = (r) => ({ status: 422, body: { ...TECHNICAL, code: 'check_incomplete_twice', retryNotBeforeAt: r.retryNotBeforeAt || null } });
+  const unavailable = (code) => ({ status: 503, body: { ...UNAVAILABLE, code } });
+  // В журнал — только этап и код (ИР-03), без текста и сообщений исключений.
+  const fromGate = (r, stage = 'check') => {
+    if (r.kind === 'unavailable') r = { unavailable: true, code: r.code };
+    if (r.kind !== 'safety') logError(stage, { code: r.kind === 'technical' ? 'check_incomplete_twice' : r.code });
+    return r.kind === 'safety' ? safetyStop() : r.kind === 'technical' ? technical(r) : unavailable(r.code);
+  };
 
   const routes = {
     'GET /api/config': async () => ({
@@ -139,28 +189,26 @@ export function createApp({
 
     'POST /api/draft': async (req) => {
       const body = await readJson(req);
-      const key = storyKey(body.story);
-      const stopped = () => ({ risk: { level: 'urgent', byModel: true, matches: [] }, help: helpMessage('urgent') });
-      if (blocked.has(key)) return stopped();
-      const result = await makeDraft(body.story, {
+      const story = body.story;
+      const draftStop = (risk) => safetyStop(risk, 'Черновик остановлен: сработал фильтр безопасности.');
+      const before = gate.status(SCOPE, story);
+      if (before.kind === 'safety') return draftStop({ level: 'urgent', byModel: true, matches: [] });
+      if (before.kind === 'technical') return technical(before);
+      if (before.kind === 'unavailable') return fromGate(before, 'draft');
+      const result = await draft(story, {
         date: body.date, period: body.period, tone: body.tone, provider: body.provider,
       });
-      if (result.unavailable) {
-        // ИР-02: тексты экрана организатора — редактор повествования (PM-01, 9.11), дословно.
-        return { status: 503, body: {
-          unavailable: true,
-          error: 'Проверку завершить не удалось',
-          message: 'Сервис не завершил проверку. Это техническое состояние, а не вывод о содержании рассказа. Ролик пока не создаётся и не отправляется.',
-          next: 'Повторить можно позже, только с полной проверкой заново. На заготовку без ИИ не переключаться. Если для рассказа ранее подтверждена остановка, повтор не снимает её.',
-          code: result.code,
-        } };
-      }
+      if (result.unavailable) return unavailable(result.code);
       if (!result.episode) {
-        if (result.risk.byModel) blocked.add(key);
+        // S01 (локальный слой) и S03 (генератор): рассказ остановлен в этой области.
+        if (result.risk.level === 'urgent') { gate.markSafety(SCOPE, story); return draftStop(result.risk); }
         return { risk: result.risk, help: helpMessage(result.risk.level) };
       }
       // Остановка, пришедшая из параллельного запроса, пока модель писала черновик, важнее черновика.
-      if (blocked.has(key)) return stopped();
+      const after = gate.status(SCOPE, story);
+      if (after.kind === 'safety') return draftStop({ level: 'urgent', byModel: true, matches: [] });
+      if (after.kind === 'technical') return technical(after);
+      if (after.kind === 'unavailable') return fromGate(after, 'draft');
       return {
         episode: result.episode, validation: result.validation, risk: result.risk,
         provider: result.provider, note: result.note, dropped: result.dropped,
@@ -168,39 +216,47 @@ export function createApp({
       };
     },
 
+    // Явное действие организатора после технической приостановки: полная отдельная проверка заново.
+    // Монтажная слушает только 127.0.0.1 и принимает POST только со своего источника — это экран организатора.
+    'POST /api/recheck': async (req) => {
+      const body = await readJson(req);
+      const ep = sanitizeEpisode(body.episode);
+      const story = String(body.story || '');
+      const r = await gate.organizerRetry(SCOPE, story, ep, `${story}\n${episodeToText(ep)}`);
+      if (r.ok) return { rechecked: true };
+      if (r.notPaused) return { status: 409, body: { error: 'Для этого рассказа нет технической приостановки.' } };
+      if (r.early) return { status: 422, body: { ...TECHNICAL, code: 'check_incomplete_twice', early: true, retryNotBeforeAt: r.retryNotBeforeAt } };
+      if (r.inProgress) return { status: 409, body: { error: 'Повторная проверка уже идёт.' } };
+      return fromGate(r, 'recheck');
+    },
+
     'POST /api/validate': async (req) => {
       const body = await readJson(req);
       const ep = sanitizeEpisode(body.episode);
-      return { episode: ep, validation: validateEpisode(ep, String(body.story || '')), text: episodeToText(ep) };
+      return { episode: ep, validation: validateSafeEpisode(ep, String(body.story || '')), text: episodeToText(ep) };
     },
 
     'POST /api/render': async (req) => {
       const body = await readJson(req);
       const ep = sanitizeEpisode(body.episode);
       const story = String(body.story || '');
-      const stop = (risk) => ({ status: 422, body: { error: 'Ролик не собирается: сработал фильтр безопасности.', risk, help: helpMessage('urgent') } });
       const risk = assessEpisodeRisk(story, ep);
-      if (risk.level === 'urgent') return stop(risk);
-      const v = validateEpisode(ep, story);
+      if (risk.level === 'urgent') { gate.markSafety(SCOPE, story); return safetyStop(risk); }
+      const v = validateSafeEpisode(ep, story);
       if (!v.ok) return { status: 422, body: { error: 'Исправьте ошибки перед рендером.', validation: v } };
-      // Вердикт модели привязан к рассказу: повторный запрос его не снимает.
-      // Инвариант: после остановки по ключу рассказа ни один запрос с этим ключом не запускает рендер и не отдаёт ролик.
+      // Инвариант: после остановки по рассказу ни один запрос с ним не запускает рендер и не отдаёт ролик.
       // Ответ «можно» никогда не снимает остановку — ни повторный, ни пришедший позже из параллельного запроса.
-      const key = storyKey(story);
-      const modelStop = () => stop({ level: 'urgent', byModel: true, matches: [] });
-      if (blocked.has(key)) return modelStop();
-      let flagged;
-      try { flagged = await safetyCheck(`${story}\n${episodeToText(ep)}`); }
-      catch { return { status: 503, body: { error: 'Не удалось проверить рассказ на безопасность. Ролик не собирается, попробуйте позже.' } }; }
-      if (flagged === true) blocked.add(key);
-      // Проверка после ожидания: остановка могла прийти из параллельного запроса, пока ждали модель.
-      if (blocked.has(key)) return modelStop();
+      // Разрешение действует только для проверенной сейчас версии (рассказ + строки + пост + название/жанр).
+      const g = await gate.verify(SCOPE, story, ep, `${story}\n${episodeToText(ep)}`);
+      if (!g.ok) return fromGate(g);
+      const stopped = () => gate.status(SCOPE, story).kind !== null;
+      const modelStop = () => fromGate(gate.status(SCOPE, story));
       const id = `${ep.date}-${safeName(body.participant, 'p')}-${crypto.randomBytes(3).toString('hex')}`;
       const files = [path.join(OUT, `${id}.mp4`), path.join(OUT, `${id}.jpg`)];
       const STOPPED = Symbol('stopped');
       const job = rendering.then(() => {
         // Проверка при запуске из очереди: остановка могла прийти, пока задача ждала.
-        if (blocked.has(key)) return STOPPED;
+        if (stopped()) return STOPPED;
         return render(ep, {
           story,
           outPath: files[0], posterPath: files[1],
@@ -212,7 +268,7 @@ export function createApp({
       const r = await job;
       if (r === STOPPED) return modelStop();
       // Остановка во время рендера: готовый файл удаляется и никому не отдаётся.
-      if (blocked.has(key)) {
+      if (stopped()) {
         await Promise.all(files.map((f) => fs.rm(f, { force: true })));
         return modelStop();
       }
@@ -299,7 +355,25 @@ export function createApp({
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT || 4173);
-  createApp().listen(port, '127.0.0.1', () => {
+  // Хранилище запретов: data/state/blocked-v1.json; пустой набор запретов не подставляется никогда.
+  // Если хранилище сломается уже во время работы — ролики не выдаются (503 ledger).
+  const ledger = makeLedger({ file: path.join(ROOT, 'data', 'state', 'blocked-v1.json'), key: process.env[KEY_ENV], keyVersion: process.env[KEY_VERSION_ENV] || 'v1' });
+  // Отказ запуска, а не тихий режим (решение владельца 17:10): без ключа или при неисправном файле монтажная
+  // не начинает принимать задачи.
+  try { await ledger.load(); } catch (e) {
+    logError('ledger.load', e);
+    console.error(`Запуск остановлен: хранилище запретов недоступно. Проверьте ${KEY_ENV} (не короче 16 символов) и ${KEY_VERSION_ENV}.`);
+    console.error('Остатки blocked-v1.json.tmp-* или повреждённый файл не удаляйте: это может снять подтверждённые остановки. Сохраните копию каталога data/state и обратитесь к владельцу кода.');
+    process.exit(3);
+  }
+  // Стартовая очистка роликов и постеров прежнего запуска — до приёма задач (B09.6, решение владельца 18:05/20:05).
+  // Ошибка — отказ запуска с кодом 3; в журнал только этап и код, без путей.
+  try { await purgeOut(path.join(ROOT, 'data', 'out'), 0, Date.now(), { strict: true }); } catch (e) {
+    logError('out.cleanup', e);
+    console.error('Запуск остановлен: не подтверждена очистка роликов прежнего запуска (data/out). Задачи не принимаются.');
+    process.exit(3);
+  }
+  createApp({ ledger }).listen(port, '127.0.0.1', () => {
     console.log(`Монтажная: http://127.0.0.1:${port}/`);
     console.log(hasClaudeCredentials() ? `Черновики: Claude (${DEFAULT_MODEL})` : 'Черновики: заготовка без ИИ (ключ ANTHROPIC_API_KEY не задан)');
   });

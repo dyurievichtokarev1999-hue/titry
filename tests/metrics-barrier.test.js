@@ -36,7 +36,7 @@ test('ИР-06: запись render, начатая до /delete, не возвр
     const metrics = makeMetrics(file, 'ir-synthetic-salt');
     const sent = [];
     const tg = { send: async (id, text, extra) => sent.push({ text, extra }), action: async () => {}, answer: async () => {}, sendVideo: async () => {} };
-    const bot = createBot({ tg, metrics,
+    const bot = createBot({ safetyCheck: async () => false, tg, metrics,
       draft: async () => ({ episode: structuredClone(example.episode), risk: { level: 'none' }, provider: 'ir-fake', dropped: [] }),
       render: async (episode, options) => ({ outPath: options.outPath, seconds: 1, duration: 24 }) });
     await bot.handleUpdate(message());

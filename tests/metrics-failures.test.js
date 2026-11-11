@@ -26,7 +26,7 @@ test('сбой rename: forget отклоняется, временный фай�
     await metrics.log(2, 'start');
     const before = await fs.readFile(file, 'utf8');
     const sent = [];
-    const bot = createBot({ tg: fakeTg(sent), metrics });
+    const bot = createBot({ safetyCheck: async () => false, tg: fakeTg(sent), metrics });
     await withPatched('rename', (orig) => async (a, b) => { if (b === file) throw Object.assign(new Error('подставной отказ'), { code: 'EIO' }); return orig.call(fs, a, b); }, async () => {
       await bot.handleUpdate({ message: { chat, text: '/delete' } });
     });
@@ -36,7 +36,7 @@ test('сбой rename: forget отклоняется, временный фай�
     assert.equal(await fs.readFile(file, 'utf8'), before, 'файл не обрезан');
     // Повторный /delete без отказа — честное «удалено», строк человека нет, чужие на месте.
     await bot.handleUpdate({ message: { chat, text: '/delete' } });
-    assert.equal(sent.at(-1), 'Готово: сессия и статистика по тебе удалены.');
+    assert.equal(sent.at(-1), 'Сессия и статистика по тебе удалены.');
     const rows = (await fs.readFile(file, 'utf8')).split('\n').filter(Boolean).map((l) => JSON.parse(l));
     assert.deepEqual(rows.map((r) => r.user), [metrics.hash(2)]);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
@@ -186,7 +186,7 @@ test('копия после перезапуска не удаляется: forg
     await fs.writeFile(`${file}.tmp-99999`, JSON.stringify({ user: metrics0.hash(chat.id), event: 'start' }) + '\n');
     const metrics = makeMetrics(file, 'mf-salt');
     const sent = [];
-    const bot = createBot({ tg: fakeTg(sent), metrics });
+    const bot = createBot({ safetyCheck: async () => false, tg: fakeTg(sent), metrics });
     const origRm = fs.rm;
     fs.rm = async (p, o) => { if (String(p).includes('.tmp-')) throw fault('EACCES'); return origRm.call(fs, p, o); };
     try {
@@ -195,7 +195,7 @@ test('копия после перезапуска не удаляется: forg
       await assert.rejects(metrics.forget(chat.id), { code: 'tmp_cleanup_pending' });
     } finally { fs.rm = origRm; }
     await bot.handleUpdate({ message: { chat, text: '/delete' } }); // отказ снят
-    assert.equal(sent.at(-1), 'Готово: сессия и статистика по тебе удалены.');
+    assert.equal(sent.at(-1), 'Сессия и статистика по тебе удалены.');
     assert.deepEqual(await tmpNames(dir), []);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });

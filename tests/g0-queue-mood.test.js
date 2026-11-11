@@ -20,7 +20,7 @@ test('ИР-04: при полной очереди пятый запрос пол
   let release;
   const gate = new Promise((r) => { release = r; });
   let renders = 0;
-  const bot = createBot({
+  const bot = createBot({ safetyCheck: async () => false,
     tg, metrics: makeMetrics(path.join(dir, 'm.jsonl'), 'ir04-salt'),
     draft: async () => ({ episode: structuredClone(example.episode), risk: { level: 'none' }, provider: 'ir04-fake', dropped: [] }),
     render: async (ep, o) => { renders++; await gate; return { outPath: o.outPath, seconds: 1, duration: 24 }; },
@@ -69,7 +69,7 @@ test('ИР-04: места в очереди освобождаются посл�
   let release;
   let gate = new Promise((r) => { release = r; });
   let calls = 0;
-  const bot = createBot({
+  const bot = createBot({ safetyCheck: async () => false,
     tg, metrics: makeMetrics(path.join(dir, 'm.jsonl'), 'ir04-salt'),
     draft: async () => ({ episode: structuredClone(example.episode), risk: { level: 'none' }, provider: 'ir04-fake', dropped: [] }),
     render: async (ep, o) => { calls++; await gate; if (calls === 1) throw new Error('подставной сбой'); return { outPath: o.outPath, seconds: 1, duration: 24 }; },

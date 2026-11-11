@@ -37,7 +37,7 @@ async function makeBot(overrides) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-ir03-'));
   const sent = [];
   const tg = { send: async (id, text, extra) => { sent.push({ text, extra }); }, action: async () => {}, answer: async () => {}, sendVideo: async () => {}, fileBuffer: async () => Buffer.from('ogg'), ...overrides.tg };
-  const bot = createBot({
+  const bot = createBot({ safetyCheck: async () => false,
     tg, metrics: makeMetrics(path.join(dir, 'm.jsonl'), 'ir03-salt'),
     draft: async () => ({ episode: structuredClone(example.episode), risk: { level: 'none' }, provider: 'ir03-fake', dropped: [] }),
     render: async (ep, o) => ({ outPath: o.outPath, seconds: 1, duration: 24 }),

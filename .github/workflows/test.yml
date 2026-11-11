@@ -23,3 +23,21 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: Тесты
         run: npm test
+      # И2: на настоящем пути рендера заголовок не попадает в командную строку ffmpeg и в журнал,
+      # но виден в кадре. Свидетельство — артефакт i2-evidence (poster.jpg, argv.txt, report.json, run.log).
+      - name: И2 — свидетельство рендера
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          mkdir -p out-i2
+          set -o pipefail
+          node scripts/i2-evidence.js out-i2 2>&1 | tee out-i2/run.log
+          if grep -qi -e 'маркер' -e 'И2' out-i2/run.log; then echo 'маркер в журнале запуска'; exit 1; fi
+      - name: И2 — артефакт
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: i2-evidence-${{ github.event.pull_request.head.sha || github.sha }}
+          path: out-i2/
+          if-no-files-found: error
+          retention-days: 14
