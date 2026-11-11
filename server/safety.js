@@ -45,6 +45,8 @@ function thingObjectAfter(s, pos) {
   return THING.test(a); // целая форма винительного; творительный («полкой», «доской») — средство, угроза остаётся
 }
 const NOMINATIVE_SUBJ = /^(?:тренер|брат|сестра|мама|папа|отец|муж|жена|сосед|соседка|соседи|коллега|коллеги|начальник|начальница|друг|друзья|подруга|подруги|сын|учитель|учительница|бабушка|дедушка|ребенок|дети|родители|братья|сестры|люди|парень|девушка|шеф|директор|отчим|мачеха|тренеры|дядя|тетя)$/;
+// «Отчим вчера избил.» — насилие без дополнения (чаще всего над рассказчиком): не none, а concern; для титров — опасная часть.
+const PAST_NO_OBJ = new RegExp(String.raw`(?<![а-я])(?:${NOMINATIVE_SUBJ.source.slice(4, -2)})(?:\s+[а-я]+){0,3}?\s+(?:из?бил|избила|избили|побил|побила|побили|ударил|ударила|ударили|душил|душила|бил|била|били|толкнул|толкнула|пнул|пнула|порезал|порезала)(?=\s*(?:[.!?…;,—–]|$))`);
 const OWN_OBJECT = new RegExp(String.raw`^${HARM_VERB}\s+(?:свой|свою|свое|свои|своих|весь|всю|все|целый|целую|целое|время|рекорд|день|вечер|вечеринку|выходные|настроение|интерес)(?:\s+([а-я]+))?[,;:—–]`);
 export function harmPerson(s) {
   const re = new RegExp(HARM_PERSON.source, 'g');
@@ -100,7 +102,7 @@ function harmToOthers(t, raw = '') {
     const m = harmPerson(s);
     // Человек перед глаголом в прошедшем времени — обычно подлежащее («Брат побил рекорд», «Коллега убил день»).
     const subjectPast = m && !/(?<![а-я])бы(?![а-я])/.test(s.slice(Math.max(0, m.index - 12), m.index + m[0].length + 4)) && !new RegExp(String.raw`^(?:причинить|слома|расправ|${HARM_VERB})`).test(m[0]) && /(?:ил|ал|ул|ел|ыл)(?:а|и|о)?(?![а-я])/.test(m[0].split(/\s+/).pop());
-    if ((!m || subjectPast) && !named && !weaponPlan(s, t)) continue;
+    if ((!m || subjectPast) && !named && !weaponPlan(s, t)) { if (PAST_NO_OBJ.test(s) && !level) level = 'concern'; continue; }
     // Признак намерения (решение, план, время) в том же предложении — в любом месте; или средство в рассказе.
     if (MARKER.test(s) || weapon) return 'urgent';
     level = 'concern';
@@ -297,7 +299,7 @@ const ROOT_ALIAS = { мать: 'мам', матер: 'мам', матушк: 'м
 function personRoot(w) { const m = PERSON_ROOT.exec(w); const r = m ? m[1] : w; return ROOT_ALIAS[r] || r; }
 const threatMemo = new Map();
 const isThreatUnit = (u) => { if (threatMemo.has(u)) return threatMemo.get(u); const v = isThreatUnitRaw(u); if (threatMemo.size < 2000) threatMemo.set(u, v); return v; };
-const isThreatUnitRaw = (u) => { const t = stripIdioms(u); return !!harmPerson(t) || CONCERN.some((re) => re.test(t)); };
+const isThreatUnitRaw = (u) => { const t = stripIdioms(u); return !!harmPerson(t) || PAST_NO_OBJ.test(t) || CONCERN.some((re) => re.test(t)); };
 // А4: для титров опасной считается любая часть рассказа, которую фильтр сам по себе не пропускает (уровень выше none),
 // а не только угроза, найденная правилом «глагол + человек».
 // Кэш на время одного вызова threatErrors: одно и то же предложение проверяется для каждого поля эпизода.
