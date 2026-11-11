@@ -17,9 +17,9 @@ import { LIMITS } from '../engine/episode.js';
 const OI = JSON.parse(await fs.readFile(new URL('./fixtures/oi-intent.json', import.meta.url), 'utf8')).cases;
 const byId = Object.fromEntries(OI.map((c) => [c.id, c.text]));
 const REPLY = 'Не получилось собрать титры только из твоих слов. Сегодня можно без ролика.';
-const SAFE = 'Утром я пила чай. Вечером я читала книгу.';
+const SAFE = 'Утром я пила чай. Вечером я пекла пирог.';
 // Concern-фрагмент + две безопасные пары: исключение есть, но материала хватает.
-const MIX = 'Я злюсь на брата и хочу его ударить. Утром я пила чай. Вечером я читала книгу.';
+const MIX = 'Я злюсь на брата и хочу его ударить. Утром я пила чай. Вечером я пекла пирог.';
 const URGENT = 'Сегодня опять всё валится из рук. Я не хочу больше жить. Вечером позвонила сестра.';
 const HELP = /помощ|112|телефон доверия|8-800/i;
 const THREAT_WORDS = /удар|убит|хочу\s+(?:его|её|ее)/i;
@@ -85,7 +85,7 @@ test('concern-фрагмент не попадает ни в одно поле �
     rows: [
       { role: 'Злость', value: 'хочу его ударить', source: 'хочу его ударить' },
       { role: 'Чай', value: 'утренний чай', source: 'Утром я пила чай' },
-      { role: 'Книга', value: 'вечер с книгой', source: 'Вечером я читала книгу' },
+      { role: 'Книга', value: 'вечер с книгой', source: 'Вечером я пекла пирог' },
     ],
     post: { text: 'брат', source: 'Я злюсь на брата' },
   });
@@ -131,7 +131,7 @@ test('модель вернула меньше двух безопасных с�
 test('черновик модели не собирается после исключения (название из угрозы) → сначала заготовка без ИИ', async () => {
   const raw = modelDraft({ title: 'Ударить брата', rows: [
     { role: 'Утром', value: 'пила чай', source: 'Утром я пила чай' },
-    { role: 'Вечером', value: 'читала книгу', source: 'Вечером я читала книгу' },
+    { role: 'Вечером', value: 'пекла пирог', source: 'Вечером я пекла пирог' },
   ] });
   const r = await makeDraft(MIX, { provider: 'claude', client: modelClient(raw) });
   assert.ok(!r.insufficient, 'заготовка собирается — это не нехватка');
@@ -494,14 +494,14 @@ test('нехватка: журнал ошибок и консоль не сод�
 test('заметка организатору при переходе на заготовку — по фактической причине', async () => {
   const titleFromThreat = modelDraft({ title: 'Ударить брата', rows: [
     { role: 'Утром', value: 'пила чай', source: 'Утром я пила чай' },
-    { role: 'Вечером', value: 'читала книгу', source: 'Вечером я читала книгу' },
+    { role: 'Вечером', value: 'пекла пирог', source: 'Вечером я пекла пирог' },
   ] });
   const a = await makeDraft(MIX, { provider: 'claude', client: modelClient(titleFromThreat) });
   assert.match(a.note, /Название или жанр/);
   const fewRows = modelDraft({ rows: [{ role: 'Утром', value: 'пила чай', source: 'Утром я пила чай' }] });
   const b = await makeDraft(MIX, { provider: 'claude', client: modelClient(fewRows) });
   assert.match(b.note, /не хватило строк/);
-  for (const r of [a, b]) assert.ok(!/злюсь|ударить|чай|книг/i.test(r.note), 'в заметке нет текста рассказа');
+  for (const r of [a, b]) assert.ok(!/злюсь|ударить|чай|пирог/i.test(r.note), 'в заметке нет текста рассказа');
 });
 
 // Ветка «остановка на входе»: проверка прежней сессии (до /delete) вернула true уже после того, как тот же

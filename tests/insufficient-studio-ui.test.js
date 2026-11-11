@@ -176,7 +176,7 @@ test('монтажная: нехватка, затем технический о
     return {};
   });
   await u.draft(B);
-  await u.draft('Вымышленный рассказ C: утром я пила чай. Вечером я читала книгу.');
+  await u.draft('Вымышленный рассказ C: утром я пила чай. Вечером я пекла пирог.');
   assert.equal(u.el('recheckBtn').hidden, false);
   await u.click('recheckBtn');
   assert.ok(u.calls.includes('/api/recheck'), 'кнопка не мёртвая');

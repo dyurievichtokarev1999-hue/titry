@@ -181,11 +181,15 @@ test('бот: правка от самого человека становитс
   const render = async (ep, opts) => { rendered.push({ ep, opts }); await fs.mkdir(path.dirname(opts.outPath), { recursive: true }); await fs.writeFile(opts.outPath, 'x'); return { outPath: opts.outPath, duration: 24, seconds: 1 }; };
   const bot = createBot({ safetyCheck: async () => false, tg, metrics: makeMetrics(path.join(dir, 'm.jsonl')), render, draft: (s, o) => makeDraft(s, { ...o, provider: 'manual' }) });
   const chat = { id: 6, type: 'private' };
-  await bot.handleUpdate({ message: { chat, text: SAFE_STORY } });
-  await bot.handleUpdate({ message: { chat, text: '1: Работа — обсуждение жирафа' } });
+  // Слияние с PR 14 (решение владельца 11.11 12:05, п. 4): рассказ, из которого заготовка не собирает двух строк, даёт
+  // реплику нехватки без черновика. Поэтому здесь рассказ от первого лица с двумя строками; правки добавляют свои.
+  await bot.handleUpdate({ message: { chat, text: 'Утром я пила чай. Вечером я пекла пирог.' } });
+  // человек добавляет строки сам, их слова становятся опорой
+  await bot.handleUpdate({ message: { chat, text: '+ Работа — обсуждение жирафа' } });
+  await bot.handleUpdate({ message: { chat, text: '+ Друг — вечерний звонок' } });
   await bot.handleUpdate({ callback_query: { id: 'a', data: `play:${playId(tg)}`, message: { chat } } });
   assert.equal(rendered.length, 1);
-  assert.equal(rendered[0].ep.rows[0].value, 'обсуждение жирафа');
+  assert.ok(rendered[0].ep.rows.some((r) => r.value === 'обсуждение жирафа'));
   assert.ok(rendered[0].opts.story.includes('обсуждение жирафа'), 'правка человека — часть опоры');
 
   await bot.handleUpdate({ message: { chat, text: '2: не хочу больше жить' } });
