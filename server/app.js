@@ -13,6 +13,7 @@ import { logError, safeCode } from './errlog.js';
 import { loadHelp, helpMessage, assessEpisodeRisk, validateSafeEpisode } from './safety.js';
 import { makeGate } from './gate.js';
 import { makeLedger, KEY_ENV, KEY_VERSION_ENV } from './ledger.js';
+import { holdServiceLock } from './service-lock.js';
 
 const STATIC = {
   '/': 'studio/index.html',
@@ -357,6 +358,12 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const port = Number(process.env.PORT || 4173);
   // Хранилище запретов: data/state/blocked-v1.json; пустой набор запретов не подставляется никогда.
   // Если хранилище сломается уже во время работы — ролики не выдаются (503 ledger).
+  // Отметка «монтажная запущена» — до загрузки хранилища: пока она есть, команда организатора файл не меняет.
+  try { holdServiceLock(path.join(ROOT, 'data', 'state'), 'studio'); } catch (e) {
+    logError('service.lock', e);
+    console.error('Запуск остановлен: работает команда организатора или каталог data/state недоступен. Задачи не принимаются.');
+    process.exit(3);
+  }
   const ledger = makeLedger({ file: path.join(ROOT, 'data', 'state', 'blocked-v1.json'), key: process.env[KEY_ENV], keyVersion: process.env[KEY_VERSION_ENV] || 'v1' });
   // Отказ запуска, а не тихий режим (решение владельца 17:10): без ключа или при неисправном файле монтажная
   // не начинает принимать задачи.

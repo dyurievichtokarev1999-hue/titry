@@ -13,6 +13,7 @@ import { renderEpisode, ROOT } from './render.js';
 import { logError, safeCode } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS, cleanupVoiceOrphans } from './stt.js';
 import { makeLedger, KEY_ENV, KEY_VERSION_ENV } from './ledger.js';
+import { holdServiceLock } from './service-lock.js';
 
 const MOOD_ORDER = ['warm', 'sad', 'anger', 'quiet'];
 const MUSIC_ORDER = ['warm', 'sad', 'anger', 'quiet', 'none'];
@@ -640,6 +641,13 @@ async function main() {
   let ledger;
   try { ledger = await prepareBot(); } catch {
     console.error(`Запуск остановлен: не подтверждена очистка временных файлов или хранилище запретов (${KEY_ENV}, ${KEY_VERSION_ENV}). Задачи не принимаются. Остатки tmp и файл хранилища не удаляйте вручную без владельца кода.`);
+    process.exit(3);
+  }
+  // Отметка «бот запущен» — до приёма задач: пока она есть, команда организатора хранилище не меняет.
+  // Хранилище перечитывается уже под отметкой (организатор мог менять файл между загрузкой и отметкой).
+  try { holdServiceLock(path.join(ROOT, 'data', 'state'), 'bot'); await ledger.load(); } catch (e) {
+    logError('service.lock', e);
+    console.error('Запуск остановлен: работает команда организатора или хранилище запретов недоступно. Задачи не принимаются.');
     process.exit(3);
   }
   const tg = telegram(token);
