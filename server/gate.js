@@ -44,7 +44,9 @@ const monotonic = () => performance.now();
 // монтажная 'studio', бот — участник 'chat:<id>' (на диск — только HMAC области).
 // Сначала остановка ставится в памяти и выдача запрещается, затем подтверждается запись на диск;
 // пока запись не подтверждена или хранилище неисправно, выдачи нет (503, код ledger).
-export function makeGate({ check, hasKey = () => true, monoNow = monotonic, wallNow = () => Date.now(), retryMs = RETRY_AFTER_MS, ledger = null } = {}) {
+export const NEIGHBOR_WAIT_MS = 120 * 1000; // сколько «безопасно» ждёт незавершённые решения того же рассказа
+
+export function makeGate({ check, hasKey = () => true, monoNow = monotonic, wallNow = () => Date.now(), retryMs = RETRY_AFTER_MS, ledger = null, neighborWaitMs = NEIGHBOR_WAIT_MS } = {}) {
   const durable = (scope) => ledger && typeof scope === 'string';
   const persist = (p) => { p.catch(() => { /* хранилище само переходит в failed; выдача закрыта */ }); return p; };
   const scopes = new Map();
@@ -100,28 +102,65 @@ export function makeGate({ check, hasKey = () => true, monoNow = monotonic, wall
 
   // Одна полная отдельная проверка версии. Возвращает { ok } | { kind: 'safety' } | { unavailable, code } |
   // { kind: 'technical', code: 'check_incomplete_twice' }.
-  // Параллельные проверки одного рассказа в одной области (сверка 5cffcd11, требование владельца: остановленный
-  // текст НИКОГДА не получает «можно»). Модельная проверка недетерминирована: одна может сказать «опасно», другая —
-  // «безопасно». Поэтому «безопасно» выдаётся, только когда решены ВСЕ проверки этого рассказа, начатые к этому
-  // моменту, и ни одна не поставила safety. Ждём «решения» (ответ модели + markSafety), а не ожидание чужих
-  // соседей: решение никого не ждёт, поэтому взаимной блокировки нет.
-  async function runCheck(scope, story, ep, text) {
-    const a = area(scope);
-    const sd = storyDigest(story);
+  // Незавершённые «решения» по рассказу в области (сверка 5cffcd11 и разбор afaf073; требование владельца:
+  // остановленный текст НИКОГДА не получает «можно»). Решение — то, что может поставить safety этому рассказу:
+  // отдельная проверка (с самого входа в verify, включая ожидание хранилища) и черновик (holdDraft: генератор может
+  // вернуть остановку). Слот закрывается, когда решение принято и safety (если есть) уже поставлен, — до того, как его
+  // владелец сам начнёт ждать соседей, поэтому взаимной блокировки нет.
+  function reserve(a, sd, kind = 'check') {
     let set = a.decisions.get(sd);
     if (!set) { set = new Set(); a.decisions.set(sd, set); }
-    const decision = decide(scope, story, ep, text, a, sd);
-    set.add(decision);
+    let done;
+    const slot = { kind, promise: new Promise((r) => { done = r; }), closed: false };
+    slot.close = () => {
+      if (slot.closed) return;
+      slot.closed = true; done();
+      set.delete(slot);
+      if (!set.size && a.decisions.get(sd) === set) a.decisions.delete(sd);
+    };
+    set.add(slot);
+    return slot;
+  }
+
+  // «Безопасно» выдаётся, только когда решены все решения этого рассказа, открытые к моменту собственного ответа
+  // (снимок: непрерывный поток повторов не задерживает ответ бесконечно; решения, открытые позже, перекрываются
+  // проверкой status() в verify и у вызывающего). Ожидание ограничено neighborWaitMs: по истечении — unavailable
+  // (check_pending), а не «можно».
+  // Черновики соседей (kind 'draft') ждёт только путь реплики нехватки (includeDrafts): рендер и перепроверка
+  // ведут себя как раньше, их защищает проверка состояния после рендера (R1/R2).
+  async function awaitNeighbors(a, sd, own, includeDrafts = false) {
+    const others = [...(a.decisions.get(sd) || [])].filter((x) => x !== own && !x.closed && (x.kind === 'check' || includeDrafts));
+    if (!others.length) return true;
+    let timer;
+    const timeout = new Promise((r) => { timer = setTimeout(() => r(false), neighborWaitMs); });
+    const all = Promise.all(others.map((x) => x.promise)).then(() => true);
+    try { return await Promise.race([all, timeout]); } finally { clearTimeout(timer); }
+  }
+
+  async function runCheck(scope, story, ep, text, slot, includeDrafts = false) {
+    const a = area(scope);
+    const sd = storyDigest(story);
+    const own = slot || reserve(a, sd);
     let r;
-    try { r = await decision; } finally { set.delete(decision); if (!set.size && a.decisions.get(sd) === set) a.decisions.delete(sd); }
+    try { r = await decide(scope, story, ep, text, a, sd); } finally { own.close(); }
     if (!r.ok) return r;
-    for (;;) {
-      const others = [...(a.decisions.get(sd) || [])];
-      if (!others.length) break;
-      await Promise.allSettled(others);
-    }
+    if (!(await awaitNeighbors(a, sd, own, includeDrafts))) return a.safety.has(sd) ? { kind: 'safety' } : { unavailable: true, code: 'check_pending' };
     if (a.safety.has(sd)) return { kind: 'safety' };
     return r;
+  }
+
+  /**
+   * Черновик того же рассказа — тоже незавершённое решение: генератор может вернуть остановку (S03). Возвращает
+   * тот же результат. Остановка (нет эпизода, не unavailable и не insufficient) ставится здесь, до закрытия слота,
+   * чтобы ожидающая проверка соседа её увидела.
+   */
+  function holdDraft(scope, story, promise) {
+    const a = area(scope);
+    const slot = reserve(a, storyDigest(story), 'draft');
+    return Promise.resolve(promise).then((r) => {
+      if (r && !r.unavailable && !r.insufficient && !r.episode) markSafety(scope, story);
+      return r;
+    }).finally(() => slot.close());
   }
 
   async function decide(scope, story, ep, text, a, sd) {
@@ -148,14 +187,21 @@ export function makeGate({ check, hasKey = () => true, monoNow = monotonic, wall
     return { unavailable: true, code };
   }
 
-  /** Проверка перед выдачей: состояние → отдельная проверка версии. technical без действия организатора не проверяется. */
-  async function verify(scope, story, ep, text) {
+  /**
+   * Проверка перед выдачей: состояние → отдельная проверка версии. technical без действия организатора не проверяется.
+   * includeDrafts — ждать и черновики того же рассказа (путь реплики нехватки: остановленный текст её не получает).
+   */
+  async function verify(scope, story, ep, text, { includeDrafts = false } = {}) {
     const fromStatus = (st) => (st.kind === 'safety' ? { kind: 'safety' } : st.kind === 'unavailable' ? { unavailable: true, code: st.code }
       : { kind: 'technical', code: 'check_incomplete_twice', retryNotBeforeAt: st.retryNotBeforeAt });
     const st = status(scope, story);
     if (st.kind) return fromStatus(st);
-    if (!(await ledgerOk(scope))) return { unavailable: true, code: 'ledger' };
-    const r = await runCheck(scope, story, ep, text);
+    const slot = reserve(area(scope), storyDigest(story)); // решение открыто с входа: ожидание хранилища тоже внутри
+    let r;
+    try {
+      if (!(await ledgerOk(scope))) return { unavailable: true, code: 'ledger' };
+      r = await runCheck(scope, story, ep, text, slot, includeDrafts);
+    } finally { slot.close(); }
     // Пока шла проверка, другой запрос мог поставить technical — тогда это разрешение не действует.
     // Разрешение выдаётся только при подтверждённой записи всех начатых остановок.
     if (r.ok) {
@@ -218,5 +264,5 @@ export function makeGate({ check, hasKey = () => true, monoNow = monotonic, wall
     return kinds;
   }
 
-  return { status, markSafety, verify, organizerRetry, recordsFor, versionDigest, storyDigest };
+  return { status, markSafety, verify, organizerRetry, holdDraft, recordsFor, versionDigest, storyDigest };
 }

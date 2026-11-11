@@ -532,3 +532,36 @@ test('монтажная: две вкладки одновременно, тот
     assert.equal(again.body.kind, 'safety');
   });
 });
+
+test('монтажная: вкладка A ещё пишет черновик (генератор вернёт остановку), вкладка B получила нехватку → B без реплики', async () => {
+  let finishA; let n = 0;
+  const draft = (story, o) => (++n === 1
+    ? new Promise((r) => { finishA = () => r({ risk: { level: 'urgent', byModel: true, matches: [] }, episode: null, provider: 'claude' }); })
+    : manual(story, o));
+  await withApp({ draft }, async ({ post }) => {
+    const a = post('/api/draft', { story: byId.OI10 });
+    while (!finishA) await new Promise((r) => setTimeout(r, 5));
+    const b = post('/api/draft', { story: byId.OI10 });
+    await new Promise((r) => setTimeout(r, 30)); // B уже получила «безопасно» от проверки и ждёт черновик A
+    finishA();
+    const [ra, rb] = await Promise.all([a, b]);
+    assert.equal(ra.body.kind, 'safety');
+    assert.equal(rb.body.kind, 'safety', JSON.stringify(rb.body));
+  });
+});
+
+test('бот: тот же рассказ дважды, первый черновик ещё пишется и вернёт остановку → вторая отправка без реплики, карточка одна', async () => {
+  let finish; let n = 0;
+  const draft = (story, o) => (++n === 1
+    ? new Promise((r) => { finish = () => r({ risk: { level: 'urgent', byModel: true, matches: [] }, episode: null, provider: 'claude' }); })
+    : manual(story, o));
+  const b = botSetup({ draft });
+  const tick = () => new Promise((r) => setImmediate(r));
+  const p1 = b.say(byId.OI10);
+  while (!finish) await tick();
+  const p2 = b.say(byId.OI10);
+  for (let i = 0; i < 10; i++) await tick();
+  finish(); await p1; await p2; await tick();
+  assert.ok(!b.texts().some((t) => t.startsWith(REPLY)), JSON.stringify(b.texts()));
+  assert.equal(b.texts().filter((t) => /Сейчас важнее не титры/.test(t)).length, 1, JSON.stringify(b.texts()));
+});

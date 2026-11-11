@@ -203,14 +203,15 @@ export function createApp({
       if (before.kind === 'safety') return draftStop({ level: 'urgent', byModel: true, matches: [] });
       if (before.kind === 'technical') return technical(before);
       if (before.kind === 'unavailable') return fromGate(before, 'draft');
-      const result = await draft(story, {
+      // Черновик — незавершённое решение по рассказу (gate.holdDraft): соседняя вкладка с тем же рассказом его ждёт.
+      const result = await gate.holdDraft(SCOPE, story, draft(story, {
         date: body.date, period: body.period, tone: body.tone, provider: body.provider,
-      });
+      }));
       if (result.unavailable) return unavailable(result.code);
       if (result.insufficient) {
         // Порядок исходов: stop → техническая недоступность/пауза → нехватка. Отдельная проверка рассказа
         // (как перед рендером) идёт до реплики: опасность даёт 422/safety, неполная проверка — 503/technical.
-        const g = await gate.verify(SCOPE, story, null, String(story ?? ''));
+        const g = await gate.verify(SCOPE, story, null, String(story ?? ''), { includeDrafts: true });
         if (!g.ok) return g.kind === 'safety' ? draftStop({ level: 'urgent', byModel: true, matches: [] }) : fromGate(g, 'draft');
         return { status: 422, body: result.risk && result.risk.level === 'concern' ? { ...INSUFFICIENT, help: helpMessage('concern') } : { ...INSUFFICIENT } };
       }

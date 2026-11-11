@@ -404,7 +404,8 @@ export function createBot({
     await tg.send(chatId, TEXT.working);
     let r;
     try {
-      r = await track(chatId, draft(story, { date: todayIso(now()), period: s.period, tone: 'quiet' }));
+      // Черновик — незавершённое решение по рассказу: соседняя проверка того же рассказа ждёт его (gate.holdDraft).
+      r = await track(chatId, gate.holdDraft(s.scope, story, draft(story, { date: todayIso(now()), period: s.period, tone: 'quiet' })));
     } catch (e) {
       logError('draft', e);
       if (!current()) return;
@@ -478,7 +479,7 @@ export function createBot({
       if (stoppedNow() && sameStoryInWork()) return stopForSafety(chatId, s, 'urgent', { at: 'late' });
       return;
     }
-    const g = await track(chatId, gate.verify(s.scope, story, null, story));
+    const g = await track(chatId, gate.verify(s.scope, story, null, story, { includeDrafts: true }));
     if (!alive(chatId, s)) return;
     if (g.kind === 'safety') {
       if (s.draftId === gen) return stopForSafety(chatId, s, 'urgent', { at: 'check', byModel: true });

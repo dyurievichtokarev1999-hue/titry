@@ -499,12 +499,12 @@ export function prepareHelp(file = HELP_FILE) {
   preparedHelp = null; // неудачная проверка не оставляет прежние контакты
   let help;
   try { help = loadHelp(file); } catch { throw fail(); }
-  if (typeof help.region !== 'string' || !/^[A-Z]{2}$/.test(help.region)) throw fail(); // код страны: RU, KZ…
+  if (typeof help.region !== 'string' || !/^[a-z]{2}$/i.test(help.region.trim())) throw fail(); // код страны: RU, KZ…
   if (!Array.isArray(help.contacts) || !help.contacts.length) throw fail();
   // Подпись и часы — одна строка без переводов строк (иначе контакт разъезжается в блоке); номер — с цифрами.
   const line = (v) => typeof v === 'string' && v.trim().length > 0 && !/[\r\n]/.test(v);
   if (help.contacts.some((c) => !line(c.label) || !line(c.phone) || !/\d/.test(c.phone)
-    || (c.hours !== undefined && c.hours !== '' && !line(c.hours)) || (c.hours !== undefined && typeof c.hours !== 'string'))) throw fail();
+    || (c.hours !== undefined && c.hours !== '' && !line(c.hours)))) throw fail(); // часы: нет, '' или одна строка
   // Тексты не пусты по построению (постоянные фразы + непустой список); проверяется лимит одного сообщения.
   for (const level of ['concern', 'urgent']) if (helpMessage(level, help).length > TELEGRAM_TEXT_LIMIT) throw fail();
   // Реплика нехватки идёт одним сообщением с блоком concern (бот): «реплика + пустая строка + блок» ≤ 3500,
