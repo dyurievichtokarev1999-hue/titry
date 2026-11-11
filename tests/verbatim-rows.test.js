@@ -8,7 +8,7 @@ import path from 'node:path';
 import { LIMITS, rowWordProblems, rowWordsGrounded, sanitizeEpisode, validateEpisode } from '../engine/episode.js';
 import { validateSafeEpisode } from '../server/safety.js';
 import { draftRuleBased, draftWithClaude, groundDraft, makeDraft, SYSTEM_PROMPT } from '../server/draft.js';
-import { applyEdit, createBot, makeMetrics } from '../server/bot.js';
+import { applyEdit, createBot, draftMessage, makeMetrics, parseEdit } from '../server/bot.js';
 import { createApp } from '../server/app.js';
 
 const fx = JSON.parse(await fs.readFile(new URL('./fixtures/verbatim-rows.json', import.meta.url), 'utf8'));
@@ -195,9 +195,10 @@ test('бот: правка строки — цитата из того, что �
   const chat = { id: 77, type: 'private' };
   try {
     await bot.handleUpdate({ message: { chat, text: 'Утром работа. Днём встреча с другом. Вечером ужин.' } });
-    // только новый текст: прежней роли «Утром» в нём нет → ошибка в черновике, ролик не собирается
-    await bot.handleUpdate({ message: { chat, text: '1: тихая работа' } });
-    assert.match(tg.sent.at(-1).text, /в цитате нет слова «утром»/);
+    // только новый текст из одного слова: пару не собрать, прежняя роль «Утром» без опоры → ошибка, ролик не собирается
+    await bot.handleUpdate({ message: { chat, text: '1: работала' } });
+    assert.match(tg.sent.at(-1).text, /Строка 1: .*«1: роль — текст»/);
+    assert.doesNotMatch(tg.sent.at(-1).text, /цитат/);
     await bot.handleUpdate({ callback_query: { id: 'a', data: `play:${playId(tg)}`, message: { chat } } });
     assert.equal(rendered.length, 0, 'строка без опоры не рендерится');
     // роль и текст вместе — это слова человека, строка проходит
@@ -231,4 +232,66 @@ test('монтажная: строка «Утро — чай» — 422 без р
     assert.equal(r2.status, 200, JSON.stringify(r2.body));
     assert.equal(renders, 1);
   } finally { server.closeAllConnections(); server.close(); await fs.rm(dataDir, { recursive: true, force: true }); }
+});
+
+// ── Повторный разбор b9c5a9a0 ────────────────────────────────────────────────
+
+test('«нет», чужие слова и мысли, неуверенность, сон, «почти», перенос строки после «не», «Не я»', () => {
+  for (const { story, row } of fx.review2.reject) {
+    assert.equal(rowWordsGrounded(row, story), false, `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+  for (const { story, row } of fx.review2.accept) {
+    assert.deepEqual(rowWordProblems(row, story), [], `${row.role} — ${row.value} ← ${story}`);
+  }
+});
+
+test('промпт: каждый пример строки проходит правило на своём вымышленном рассказе', () => {
+  const EXAMPLES = [
+    { quote: 'утром я пила чай', role: 'Утром', value: 'пила чай' },
+    { quote: 'я не пила кофе', role: 'Кофе', value: 'не пила' },
+    { quote: 'я отправила письмо', role: 'Письмо', value: 'отправила' },
+    { quote: 'друг позвонил', role: 'Друг', value: 'позвонил' },
+    { quote: 'думала, что он злится, но не знаю', role: 'Думала', value: 'что он злится, но не знаю' },
+    { quote: 'может, завтра ответят', role: 'Завтра', value: 'может, ответят' },
+  ];
+  for (const ex of EXAMPLES) {
+    assert.ok(SYSTEM_PROMPT.includes(`из «${ex.quote}» — «${ex.role} — ${ex.value}»`), `пример есть в промпте: ${ex.role} — ${ex.value}`);
+    assert.ok(rowWordsGrounded({ role: ex.role, value: ex.value, source: ex.quote }, `${ex.quote}.`), `${ex.role} — ${ex.value}`);
+  }
+  // в промпте не осталось прежних примеров, которые правило отбрасывает
+  for (const old of ['Письмо — отправлено', '«Человек»', 'Мысль — о возможной', 'Надежда — на ответ', 'значение — до 6 слов']) {
+    assert.ok(!SYSTEM_PROMPT.includes(old), old);
+  }
+  // каждая пара «X — Y» в кавычках в промпте — один из проверенных примеров (кроме запрещённого «Ты отправила…»)
+  const pairs = [...SYSTEM_PROMPT.matchAll(/«([А-ЯЁ][^«»—]*?) — ([^«»]+?)»/g)].map((m) => `${m[1]} — ${m[2]}`);
+  const known = new Set(EXAMPLES.map((e) => `${e.role} — ${e.value}`));
+  assert.deepEqual(pairs.filter((x) => !known.has(x)), []);
+});
+
+test('заготовка: значение — непрерывный кусок фразы рядом с ролью, порядок слов сохранён', () => {
+  const r = draftRuleBased(fx.ruleBasedOrder.story, { date: '2026-11-11' });
+  assert.deepEqual(r.episode.rows.map((x) => `${x.role} — ${x.value}`), fx.ruleBasedOrder.rows);
+  for (const row of r.episode.rows) {
+    const src = row.source.toLowerCase();
+    assert.ok(src.includes(row.value.toLowerCase()), `значение — кусок цитаты: ${row.value}`);
+    assert.ok(src.includes(row.role.toLowerCase()), `роль — кусок цитаты: ${row.role}`);
+  }
+  // имя в начале фразы остаётся с заглавной, если человек пишет его так и в середине фразы
+  const m = draftRuleBased('Маша пришла. Потом пришёл кот, и Маша ушла.', { date: '2026-11-11' });
+  assert.ok(m.episode.rows.some((x) => /Маша/.test(x.role + x.value)));
+  assert.ok(!m.episode.rows.some((x) => /(^|\s)маша/.test(x.value)));
+});
+
+test('бот: «N: текст» — роль из слов этого текста; подсказка и ошибки без слова «цитата»', () => {
+  const { episode } = draftRuleBased('Утром работа. Днём встреча с другом. Вечером ужин.', { date: '2026-11-11' });
+  assert.equal(applyEdit(episode, parseEdit('1: друг позвонил поговорить')), null);
+  assert.deepEqual(episode.rows[0], { role: 'Друг', value: 'позвонил поговорить', source: 'друг позвонил поговорить' });
+  assert.ok(rowWordsGrounded(episode.rows[0], 'друг позвонил поговорить'));
+  // текст из одного слова — пары нет: прежняя роль остаётся, человек видит понятную ошибку
+  assert.equal(applyEdit(episode, parseEdit('2: ужинали')), null);
+  const v = validateEpisode(episode, 'Утром работа. Днём встреча с другом. Вечером ужин.\nдруг позвонил поговорить\nужинали');
+  assert.equal(v.ok, false);
+  const msg = draftMessage(episode, v);
+  assert.match(msg, /Строка 2: .*«2: роль — текст»/);
+  assert.doesNotMatch(msg, /цитат/);
 });

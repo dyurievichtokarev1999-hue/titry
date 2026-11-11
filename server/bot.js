@@ -6,7 +6,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS, episodeToText } from '../engine/episode.js';
-import { makeDraft, modelSafetyCheck, hasClaudeCredentials } from './draft.js';
+import { makeDraft, modelSafetyCheck, hasClaudeCredentials, pairFromSentence } from './draft.js';
 import { makeGate } from './gate.js';
 import { helpMessage, assessEpisodeRisk, validateSafeEpisode } from './safety.js';
 import { renderEpisode, ROOT } from './render.js';
@@ -38,8 +38,8 @@ export const TEXT = {
   voiceEmpty: 'Не получилось разобрать голосовое. Можно повторить или написать текстом.',
   editHelp: [
     'Как поправить:',
-    '<code>2: вечерний звонок</code> — новый текст строки 2',
-    '<code>2: Друг — вечерний звонок</code> — роль и текст',
+    '<code>2: друг позвонил поговорить</code> — новая строка 2 из твоих слов',
+    '<code>2: Друг — позвонил поговорить</code> — роль и текст',
     '<code>-3</code> — убрать строку 3',
     '<code>+ Окно — долгий вечер</code> — добавить строку',
     '<code>название: Письмо, которое ушло</code>',
@@ -108,8 +108,13 @@ export function applyEdit(ep, cmd) {
     case 'row':
       if (idx < 0 || idx >= rows.length) return `Строки ${cmd.n} нет.`;
       if (cmd.role) { rows[idx] = ownRow(cmd.role, cmd.value); return null; }
-      // Только новый текст: цитата — этот текст. Если прежней роли в нём нет, проверка черновика покажет ошибку
-      // и ролик не соберётся; правку не отклоняем, чтобы её текст прошёл обычную проверку безопасности.
+      // Только новый текст: роль и значение берутся из слов этого же текста (правило 11.11 — без чужих слов).
+      // Если пару собрать не из чего, прежняя роль остаётся, проверка черновика покажет ошибку, ролик не соберётся;
+      // правку не отклоняем, чтобы её текст прошёл обычную проверку безопасности.
+      {
+        const pair = pairFromSentence(cmd.value, new Set(), cmd.value);
+        if (pair) { rows[idx] = { ...pair.row }; return null; }
+      }
       rows[idx].value = cmd.value;
       rows[idx].source = rows[idx].value; // слова самого человека; бот добавляет правку в опору (editCorpus)
       return null;
@@ -132,6 +137,19 @@ export function editCorpus(cmd) {
 
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
+/** Ошибка проверки словами для человека: без «цитаты» и служебных терминов. */
+export function personMessage(e) {
+  if (!e) return '';
+  if (!String(e.kind || '').startsWith('words:')) return e.msg;
+  const n = e.row + 1;
+  const redo = `Напиши её заново своими словами: «${n}: роль — текст».`;
+  switch (e.kind) {
+    case 'words:long': return `Строка ${n}: роль — одно-два слова. ${redo}`;
+    case 'words:bound': return `Строка ${n}: в рассказе слово «${e.words[0]}» стоит с другими словами («не», «бы», «если», «сказала»…), а без них смысл другой. ${redo}`;
+    default: return `Строка ${n}: в ней есть слова не из твоего рассказа или их не хватает. ${redo}`;
+  }
+}
+
 /** Черновик в виде сообщения Telegram (HTML). */
 export function draftMessage(ep, validation) {
   const lines = [];
@@ -147,7 +165,7 @@ export function draftMessage(ep, validation) {
   if (ep.post && ep.post.text) lines.push('', `После титров: ${esc(ep.post.text)}`);
   lines.push('', `Плёнка: ${MOODS[ep.mood].film} · музыка: ${TRACKS[ep.music].file ? TRACKS[ep.music].title : 'тишина'}`);
   const problems = validation ? validation.errors : [];
-  if (problems.length) lines.push('', ...problems.map((e) => `⚠ ${esc(e.msg)}`));
+  if (problems.length) lines.push('', ...[...new Set(problems.map(personMessage))].map((m) => `⚠ ${esc(m)}`));
   lines.push('', 'Похоже на твой день? Любую строку можно поправить.');
   return lines.join('\n');
 }
