@@ -623,3 +623,23 @@ test('ключ объединения проверок: соль процесс�
     assert.ok(!visible.includes(key.slice(i, i + 8)), 'ни ключ, ни его часть не попадают в журнал, метрики и ответы');
   }
 });
+
+// Решение владельца 11.11 14:02 п. 1 (б): отправка, открытая после снимка соседей, — следующая отправка, а не гонка;
+// но остановка «липкая»: после неё никакой исход того же рассказа (нехватка, черновик, ролик) больше не показывается.
+test('монтажная: A → нехватка показана; B того же рассказа → остановка; дальше только остановка, следа A нет', async () => {
+  const story = byId.OI10;
+  await withApp({ check: (t, n) => n >= 2 }, async ({ post, counters }) => {
+    const a = await post('/api/draft', { story });
+    assert.equal(a.status, 422); assert.equal(a.body.kind, 'insufficient', 'A: показана реплика нехватки');
+    const b = await post('/api/draft', { story });
+    assert.equal(b.status, 422); assert.equal(b.body.kind, 'safety', 'B: остановка');
+    for (let i = 0; i < 3; i++) {
+      const c = await post('/api/draft', { story });
+      assert.equal(c.body.kind, 'safety', 'после остановки — снова только остановка');
+      assert.ok(!JSON.stringify(c.body).includes(REPLY), 'реплики нехватки после остановки нет');
+    }
+    // Ролик после остановки рассказа не собирается — инвариант рендера, покрыт тестами S02/V02 монтажной
+    // (tests/separate-check-studio.test.js, tests/qa-races.test.js). Здесь — что ни один черновик и ни одна реплика нехватки не показаны.
+    assert.equal(counters.render, 0);
+  });
+});
