@@ -56,6 +56,106 @@ export function sourceFound(source, story) {
   return normalize(story).includes(s);
 }
 
+// ── Слова строки — только из её цитаты (владелец и редактор, 11.11 09:05) ────
+// 1) Каждое слово роли и значения есть в цитате-источнике этой строки как отдельное слово
+//    (сопоставление без учёта регистра и е/ё; пунктуация и пробелы не считаются). На экран идёт форма, набранная рассказчиком.
+// 2) Слово нельзя оторвать от признака, который меняет смысл. Если в цитате слово стоит с таким признаком,
+//    в строке оно берётся только вместе с ним — и наоборот, признак нельзя приставить к слову, у которого его не было.
+//    - отрицание и время относятся к следующему слову: «не», «ни», «буду», «будет»…
+//      (через «прозрачные» слова: «не очень любила» — «любила» только с «не очень»);
+//    - «бы» относится к соседнему глаголу;
+//    - условие и чужое авторство («если», «якобы», «будто», «мол»…) относятся ко всей части фразы
+//      до знака препинания: такие слова в строке берутся только в одном поле вместе с этим признаком.
+//    Часть речи не проверяется.
+
+/** Признаки, которые относятся к следующему слову. */
+const NEXT_MARKERS = new Set(['не', 'ни', 'буду', 'будешь', 'будет', 'будем', 'будете', 'будут']);
+/** «бы»/«б» относится к соседнему глаголу: сперва к предыдущему, иначе к следующему слову. */
+const BY = new Set(['бы', 'б']);
+/** Признаки условия и чужого авторства: действуют до конца части фразы (до знака препинания). */
+const CLAUSE_MARKERS = new Set(['если', 'якобы', 'будто', 'словно', 'мол', 'дескать', 'чтобы', 'чтоб']);
+/** Слова, через которые признак продолжает действовать: «не очень любила», «не сразу ответила». */
+const TRANSPARENT = new Set([
+  'очень', 'совсем', 'особо', 'особенно', 'слишком', 'так', 'сильно', 'вообще', 'всегда', 'сразу',
+  'еще', 'уже', 'больше', 'долго', 'часто', 'много', 'до', 'конца',
+]);
+const isMarker = (w) => NEXT_MARKERS.has(w) || BY.has(w) || CLAUSE_MARKERS.has(w);
+const VERB_LIKE = /[аеиоуыэюя]л(а|о|и|ся|ась|ось|ись)?$|[ая]?ть(ся)?$/;
+
+/** Слова текста в сравнимой форме (регистр, ё, пунктуация — как у normalize). */
+export function wordsOf(text) {
+  return normalize(text).split(' ').filter(Boolean);
+}
+
+/** Части фразы до знака препинания (дефис внутри слова — не граница), каждая — списком слов. */
+function clausesOf(text) {
+  return String(text || '').split(/[,.;:!?…()«»"“”„—–]+|\s-\s/).map(wordsOf).filter((c) => c.length);
+}
+
+/**
+ * Подписи слов одной части фразы: для каждого слова, которое не признак, — с какими признаками оно стоит.
+ * sig = признаки перед словом (с прозрачными словами между ними) | «бы» после него | признаки части фразы до слова.
+ */
+function signatures(tokens) {
+  const byTarget = new Map(); // куда относится каждое «бы»
+  tokens.forEach((t, j) => {
+    if (!BY.has(t)) return;
+    const prev = j - 1 >= 0 && !isMarker(tokens[j - 1]) ? j - 1 : -1;
+    let next = j + 1;
+    while (next < tokens.length && isMarker(tokens[next])) next++;
+    if (prev >= 0 && VERB_LIKE.test(tokens[prev])) byTarget.set(j, [prev]);
+    else if (next < tokens.length) byTarget.set(j, prev >= 0 ? [prev, next] : [next]);
+    else byTarget.set(j, prev >= 0 ? [prev] : []);
+  });
+  const out = [];
+  const clause = [];
+  tokens.forEach((w, i) => {
+    if (CLAUSE_MARKERS.has(w)) { if (!clause.includes(w)) clause.push(w); return; }
+    if (isMarker(w)) return;
+    const run = [];
+    for (let j = i - 1; j >= 0; j--) {
+      const t = tokens[j];
+      if (BY.has(t)) { if ((byTarget.get(j) || []).includes(i)) { run.unshift(t); continue; } break; }
+      if (NEXT_MARKERS.has(t) || TRANSPARENT.has(t)) { run.unshift(t); continue; }
+      break;
+    }
+    // прозрачные слова без признака перед ними ничего не меняют: срезаем их
+    while (run.length && !NEXT_MARKERS.has(run[0]) && !BY.has(run[0])) run.shift();
+    const after = [];
+    for (let j = i + 1; j < tokens.length && BY.has(tokens[j]) && (byTarget.get(j) || []).includes(i); j++) after.push(tokens[j]);
+    out.push({ word: w, sig: `${run.join(' ')}|${after.join(' ')}|${[...clause].sort().join(' ')}` });
+  });
+  return out;
+}
+
+/**
+ * Ошибки слов строки относительно её цитаты: [{ field: 'role'|'value', kind: 'missing'|'bound', words }].
+ * Пустой source здесь не проверяется — об этом своя ошибка в validateEpisode.
+ */
+export function rowWordProblems(row) {
+  const srcClauses = clausesOf(row && row.source);
+  if (!srcClauses.length) return [];
+  const srcSet = new Set(srcClauses.flat());
+  const srcSigs = new Set(srcClauses.flatMap((c) => signatures(c).map((s) => `${s.word}#${s.sig}`)));
+  const problems = [];
+  for (const fieldName of ['role', 'value']) {
+    const words = wordsOf(row && row[fieldName]);
+    const missing = words.filter((w) => !srcSet.has(w));
+    if (missing.length) {
+      problems.push({ field: fieldName, kind: 'missing', words: [...new Set(missing)] });
+      continue;
+    }
+    const bad = clausesOf(row[fieldName]).flatMap(signatures).find(({ word, sig }) => !srcSigs.has(`${word}#${sig}`));
+    if (bad) problems.push({ field: fieldName, kind: 'bound', words: [bad.word] });
+  }
+  return problems;
+}
+
+/** Строка годится для титров по словам: роль и значение — из её цитаты, признаки не оторваны. */
+export function rowWordsGrounded(row) {
+  return wordsOf(row && row.source).length > 0 && rowWordProblems(row).length === 0;
+}
+
 /**
  * Род говорящего определяем только по его собственным словам от первого лица
  * («я устала» / «я долго правил»). По имени и по чужим репликам не угадываем никогда.
@@ -177,6 +277,14 @@ export function validateEpisode(ep, story) {
     else if (value.length > LIMITS.valueSoft) warnings.push(field(`${p}.value`, `Строка ${i + 1}: длинная строка займёт три линии, лучше сократить.`));
     if (!String(r.source || '').trim()) errors.push(field(`${p}.source`, `Строка ${i + 1}: нет цитаты из рассказа. В титрах только то, что человек сказал сам.`));
     else if (hasStory && !sourceFound(r.source, story)) errors.push(field(`${p}.source`, `Строка ${i + 1}: цитата не найдена в рассказе. В титрах только то, что человек сказал сам.`));
+    if (role && wordsOf(role).length > 2) errors.push(field(`${p}.role`, `Строка ${i + 1}: роль — одно-два слова из цитаты.`));
+    for (const pr of rowWordProblems({ role, value, source: r.source })) {
+      const what = pr.field === 'role' ? 'роли' : 'значения';
+      const list = pr.words.map((w) => `«${w}»`).join(', ');
+      errors.push(field(`${p}.${pr.field}`, pr.kind === 'missing'
+        ? `Строка ${i + 1}: в цитате нет ${pr.words.length > 1 ? 'слов' : 'слова'} ${list} из ${what}. Слова строки — только из цитаты, в той форме, как человек их сказал.`
+        : `Строка ${i + 1}: слово ${list} из ${what} в цитате стоит с другим служебным словом («не», «бы», «если»…). Без него или с лишним смысл меняется.`));
+    }
     texts.push(role, value);
   });
 

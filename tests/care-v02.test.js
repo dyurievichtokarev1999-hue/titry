@@ -18,8 +18,8 @@ const SAFE_STORY = `Сегодня на работе обсуждали ${UNIQUE
 const goodEpisode = () => sanitizeEpisode({
   date: '2026-11-07', title: 'Жираф и звонок', genre: 'тёплая драма', mood: 'warm', music: 'warm',
   rows: [
-    { role: 'Работа', value: UNIQUE, source: `обсуждали ${UNIQUE}` },
-    { role: 'Друг', value: 'вечерний звонок', source: 'Вечером позвонил друг' },
+    { role: 'На работе', value: `обсуждали ${UNIQUE}`, source: `на работе обсуждали ${UNIQUE}` },
+    { role: 'Друг', value: 'вечером позвонил', source: 'Вечером позвонил друг' },
   ],
   post: { text: 'Ужин и сериал.', source: 'был ужин и сериал' },
 });
@@ -137,7 +137,7 @@ test('журнал монтажной не содержит текста рас�
       const text = await fs.readFile(path.join(dir, f), 'utf8');
       assert.ok(!text.includes('жираф'), 'нет уникальной фразы');
       assert.ok(!text.includes('позвонил друг'), 'нет цитат');
-      assert.ok(!text.includes('вечерний звонок'), 'нет текста строк');
+      assert.ok(!text.includes('вечером позвонил') && !text.includes('На работе'), 'нет текста строк');
       const rec = JSON.parse(text);
       assert.equal(rec.reaction, 'fit');
       assert.equal(rec.rows, 2);
