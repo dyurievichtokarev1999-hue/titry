@@ -26,9 +26,12 @@ test('разбор правок', () => {
 test('правки применяются и соблюдают лимиты', () => {
   const { episode } = draftRuleBased('Утром я работала. Днём я встретилась с другом. Вечером мы ужинали. Потом мы гуляли.', { date: '2026-11-05' });
   const n = episode.rows.length;
+  // Белый список формы фразы (11.11): «Утро — работа» не простое утверждение от первого лица — опоры нет
   assert.equal(applyEdit(episode, { op: 'row', n: 1, role: 'Утро', value: 'работа' }), null);
+  assert.equal(episode.rows[0].source, '', 'не простая фраза о себе — опоры нет, ролик не соберётся');
   // Цитата строки — то, что человек написал в правке целиком (роль и текст): слова роли тоже из неё (правило 11.11).
-  assert.equal(episode.rows[0].source, 'Утро работа', 'отредактированная строка опирается на слова самого человека');
+  assert.equal(applyEdit(episode, { op: 'row', n: 1, role: 'Утром', value: 'я работала' }), null);
+  assert.equal(episode.rows[0].source, 'Утром я работала', 'отредактированная строка опирается на слова самого человека');
   assert.equal(applyEdit(episode, { op: 'delete', n: 99 }), 'Строки 99 нет.');
   assert.equal(applyEdit(episode, { op: 'delete', n: 1 }), null);
   assert.equal(episode.rows.length, n - 1);
@@ -67,11 +70,12 @@ test('сценарий бота: рассказ → правка → ролик 
   await bot.handleUpdate({ message: { chat, text: '/start' } });
   await bot.handleUpdate({ message: { chat, text: story } });
   assert.ok(tg.sent.some((m) => /Похоже на твой день/.test(m.text)));
-  await bot.handleUpdate({ message: { chat, text: '1: Письмо — отправлено' } });
+  await bot.handleUpdate({ message: { chat, text: '1: Утром — я отправил письмо' } });
+  await bot.handleUpdate({ message: { chat, text: '+ Вечером — я смотрел сериал' } });
   await bot.handleUpdate({ callback_query: { id: 'q1', data: `mood:${playId(tg)}`, message: { chat } } });
   await bot.handleUpdate({ callback_query: { id: 'q2', data: `play:${playId(tg)}`, message: { chat } } });
   assert.equal(rendered.length, 1);
-  assert.equal(rendered[0].rows[0].value, 'отправлено');
+  assert.equal(rendered[0].rows[0].value, 'я отправил письмо');
   // Настроение не названо → quiet (10.11); кнопка плёнки переключает по кругу quiet → warm.
   assert.equal(rendered[0].mood, 'warm');
   assert.ok(tg.sent.some((m) => m.type === 'video'));
