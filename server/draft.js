@@ -264,6 +264,8 @@ function capitalizedInside(word, story) {
  */
 export function pairFromSentence(sentence, usedRoles = new Set(), story = sentence) {
   const source = trimEdge(String(sentence || '').replace(/[.!?…]+$/, ''));
+  // из очень длинной фразы пару не берём: значение всё равно не уложится, а разбор станет долгим
+  if (source.length > 1000) return null;
   const raw = source.split(/\s+/).filter((t) => wordsOf(t).length);
   // слова каждого токена считаются один раз: длинная фраза без точек разбирается линейно
   const memo = new Map();

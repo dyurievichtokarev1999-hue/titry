@@ -405,3 +405,26 @@ test('время проверки линейно: рассказ ~6000 знак�
     assert.ok(Date.now() - t0 < 3000, `${big.slice(0, 14)}…: ${Date.now() - t0} мс`);
   }
 });
+
+// ── Разбор 776098de ──────────────────────────────────────────────────────────
+
+test('чужие слова и мнение где угодно во фразе, намерение по общему правилу, вопрос, сон через границу фразы', () => {
+  for (const { story, row } of fx.review7.reject) {
+    assert.equal(rowWordsGrounded(row, story), false, `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+  for (const { story, row } of fx.review7.accept) {
+    assert.deepEqual(rowWordProblems(row, story), [], `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+  // заготовка не делает строку-факт из вопроса и из чужого мнения
+  const r = draftRuleBased('По её мнению я ленивая. Я поехала на дачу? Нет, осталась дома. Утром работа. Днём встреча с другом.', { date: '2026-11-11' });
+  const got = r.episode.rows.map((x) => `${x.role} — ${x.value}`);
+  assert.ok(!got.some((x) => /ленивая|мнению|на дачу/i.test(x)), JSON.stringify(got));
+});
+
+test('заготовка: фраза в 20 тысяч знаков не разбирается долго', () => {
+  const big = 'утром пила чай '.repeat(1400);
+  const t0 = Date.now();
+  pairFromSentence(big, new Set(), big);
+  draftRuleBased(big, { date: '2026-11-11' });
+  assert.ok(Date.now() - t0 < 3000, `${Date.now() - t0} мс`);
+});
