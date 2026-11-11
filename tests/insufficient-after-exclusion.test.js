@@ -605,9 +605,13 @@ test('ключ объединения проверок: соль процесс�
       const slow = (t, n) => new Promise((r) => setTimeout(r, 5)).then(() => check(t, n));
       const b = botSetup({ check: slow });
       await Promise.all([b.say(story), b.say(story)]);
-      sent.push(...b.texts());
-      await withApp({ check: slow }, async ({ post }) => {
+      // В одном чате вторая отправка вытесняет первую (поколение черновика), поэтому до проверки доходит хотя бы одна;
+      // объединение проверок соседних сессий бота — в тестах «/delete, тот же рассказ снова» выше.
+      assert.ok(b.counters.check >= 1, 'бот: отправка дошла до отдельной проверки');
+      sent.push(...b.texts(), ...b.events.map((e) => JSON.stringify(e)));
+      await withApp({ check: slow }, async ({ post, counters }) => {
         const rs = await Promise.all([post('/api/draft', { story }), post('/api/draft', { story })]);
+        assert.ok(counters.check >= 2, 'монтажная: обе вкладки дошли до отдельной проверки');
         sent.push(...rs.map((r) => JSON.stringify(r.body)));
       });
     }
@@ -616,6 +620,6 @@ test('ключ объединения проверок: соль процесс�
   for (const frag of ['злюсь', 'ударить', 'коллег', 'отчёт', 'соседа']) assert.ok(!all.includes(frag), `в журнале нет «${frag}»`);
   const visible = `${all}\n${sent.join('\n')}`.toLowerCase();
   for (const key of keys) for (let i = 0; i + 8 <= key.length; i += 4) {
-    assert.ok(!visible.includes(key.slice(i, i + 8)), 'ни ключ, ни его часть не попадают в журнал и ответы');
+    assert.ok(!visible.includes(key.slice(i, i + 8)), 'ни ключ, ни его часть не попадают в журнал, метрики и ответы');
   }
 });

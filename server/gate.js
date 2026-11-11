@@ -27,6 +27,8 @@ export function normStory(story) {
 const PROCESS_SALT = crypto.randomBytes(32);
 export const storyDigest = (story) => crypto.createHmac('sha256', PROCESS_SALT).update(`story\0${normStory(story)}`).digest('hex');
 
+// versionDigest соль процесса НЕ получает сознательно: хранилище пишет его как hmac('episode', …) и сравнивает
+// после перезапуска (server/ledger.js). Сам он живёт только в памяти и, как ключ рассказа, не пишется в журнал.
 /**
  * Проверяемая версия: рассказ (как прислан) + явно перечисленные поля эпизода. Порядок строк сохраняется.
  * Плёнка, музыка, род и дата в версию не входят: они не меняют текст; safety по рассказу они не снимают (V02).
