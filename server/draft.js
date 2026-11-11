@@ -4,7 +4,7 @@
 // В обоих случаях каждая строка проверяется по рассказу: без цитаты в рассказе строка в титры не попадает.
 import { safeCode } from './errlog.js';
 import Anthropic from '@anthropic-ai/sdk';
-import { LIMITS, MOODS, blankEpisode, detectGender, isMarkerWord, plainPhrase, rowWordsGrounded, sanitizeEpisode, sourceFound, todayIso, validateEpisode, wordsOf } from '../engine/episode.js';
+import { LIMITS, MOODS, blankEpisode, cleanInput, detectGender, isMarkerWord, plainPhrase, rowWordsGrounded, sanitizeEpisode, sourceFound, todayIso, validateEpisode, wordsOf } from '../engine/episode.js';
 import { assessRisk, threatSentences, touchesThreat, validateSafeEpisode } from './safety.js';
 
 export const DEFAULT_MODEL = process.env.TITRY_MODEL || 'claude-opus-5-5';
@@ -339,6 +339,7 @@ export function pairFromSentence(sentence, usedRoles = new Set(), story = senten
  * insufficient: true (нехватка материала), строки не дописываются.
  */
 export function draftRuleBased(story, { date = todayIso(), period = 'day' } = {}) {
+  story = cleanInput(story); // разделитель правок не может прийти из рассказа
   const t = String(story).toLowerCase();
   // Настроение не названо — quiet как нейтральное оформление (редактор повествования, 10.11), не угаданное warm.
   const mood = (MOOD_WORDS.find(([re]) => re.test(t)) || [null, 'quiet'])[1];
@@ -374,7 +375,7 @@ export function draftRuleBased(story, { date = todayIso(), period = 'day' } = {}
  * Возвращает { episode, validation, risk, provider, dropped, note }.
  */
 export async function makeDraft(story, opts = {}) {
-  const text = String(story || '').trim();
+  const text = cleanInput(story || '').trim();
   if (!text) throw Object.assign(new Error('Пустой рассказ.'), { code: 'empty' });
   // Остановка безусловная: никакой флаг запроса её не отменяет (решение базы, задача координатора 7.11).
   // Проверка безопасности — до проверки длины: длинный опасный рассказ тоже останавливается.

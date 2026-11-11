@@ -10,7 +10,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { validateEpisode } from '../engine/episode.js';
+import { validateEpisode, joinEdits } from '../engine/episode.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -441,7 +441,8 @@ export function threatErrors(story, ep) {
 /** validateEpisode + правило «угроза не становится титром». Для всех серверных проверок выдачи. */
 export function validateSafeEpisode(ep, story) {
   const v = validateEpisode(ep, story);
-  const extra = threatErrors(story, ep);
+  // правки человека для угроз читаются как продолжение рассказа (разделитель — только для сверки слов)
+  const extra = threatErrors(joinEdits(story), ep);
   return extra.length ? { ...v, ok: false, errors: [...(v.errors || []), ...extra] } : v;
 }
 
