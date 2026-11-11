@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS, episodeToText } from '../engine/episode.js';
 import { makeDraft, modelSafetyCheck, hasClaudeCredentials } from './draft.js';
 import { makeGate } from './gate.js';
-import { helpMessage, assessEpisodeRisk, validateSafeEpisode, assessRisk } from './safety.js';
+import { helpMessage, helpContacts, assessEpisodeRisk, validateSafeEpisode, assessRisk } from './safety.js';
 import { renderEpisode, ROOT } from './render.js';
 import { logError, safeCode } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS, cleanupVoiceOrphans } from './stt.js';
@@ -18,6 +18,9 @@ const MOOD_ORDER = ['warm', 'sad', 'anger', 'quiet'];
 const MUSIC_ORDER = ['warm', 'sad', 'anger', 'quiet', 'none'];
 const SESSION_TTL_MS = 3 * 60 * 60 * 1000;
 const WATERMARK = process.env.BOT_WATERMARK ?? 'сделано в титрах';
+
+// Команды бота (setMyCommands): точное совпадение обрабатывается до разбора текста.
+const KNOWN_COMMANDS = new Set(['start', 'year', 'delete', 'help']);
 
 export const TEXT = {
   start: [
@@ -60,6 +63,7 @@ export const TEXT = {
   keptTechnical: 'Служебная запись о технической приостановке сохранена по правилу теста. В ней нет текста рассказа. [срок не утверждён]',
   recordUnknown: 'Проверить состояние служебной записи не получилось. Полное удаление не подтверждено.',
   // ИР-02: проверка недоступна — текст редактора повествования (PM-01, 9.11) дословно. Без срока и без карточки помощи.
+  more: 'Расскажи чуть подробнее: что было, что запомнилось.',
   checkUnavailable: 'Ролик задерживается: сервис не завершил проверку. Сейчас отправить его не получится. Ждать в чате и отвечать на это сообщение не нужно.',
   // Техническая приостановка — редактор повествования 14:42, принято владельцем 15:08, дословно.
   checkPaused: 'Сервис дважды не смог завершить проверку рассказа. Сейчас ролик не создаётся. Ждать в чате и отвечать на это сообщение не нужно.',
@@ -547,11 +551,35 @@ export function createBot({
         return showDraft(chatId, s);
       }
     }
-    if (text.startsWith('/')) return tg.send(chatId, TEXT.start);
-    // Короткий текст с признаками опасности идёт обычным путём рассказа (остановка и помощь), а не получает
-    // «Расскажи чуть подробнее»: просить подробностей после слов об опасности нельзя (решение владельца 11.11 12:05).
-    if (text.length < 12 && assessRisk(text).level === 'none') return tg.send(chatId, 'Расскажи чуть подробнее: что было, что запомнилось.');
-    return handleStory(chatId, s, text, 'text');
+    // «/текст» (решение Claude 11.11 15:05 п. 1): известная команда без хвоста обработана выше; у известной команды
+    // с хвостом проверяется хвост, любой другой текст на «/» — путь рассказа (проверка безопасности первой).
+    let body = text;
+    if (text.startsWith('/')) {
+      const m = /^\/([A-Za-z]+)(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(text);
+      const known = m && KNOWN_COMMANDS.has(m[1].toLowerCase());
+      if (known && !(m[2] || '').trim()) return tg.send(chatId, TEXT.start);
+      body = known ? m[2].trim() : text.replace(/^\/+/, '').trim();
+      if (!body) return tg.send(chatId, TEXT.start);
+    }
+    if (body.length < 12) return shortText(chatId, s, body);
+    return handleStory(chatId, s, body, 'text');
+  }
+
+  // Короткий текст (< 12 знаков; решение Claude 11.11 15:05 п. 1). «Подробнее» — только после полной проверки:
+  //  1) локальный фильтр ≠ none → путь рассказа (остановка и помощь);
+  //  2) none → отдельная модельная проверка до любого ответа: опасно → остановка; безопасно → «подробнее»;
+  //     неизвестно (сбой, нет ключа, предел времени, пауза) → никакого «подробнее»: checkUnavailable и контакты помощи.
+  async function shortText(chatId, s, text) {
+    if (assessRisk(text).level !== 'none') return handleStory(chatId, s, text, 'text');
+    const g = await track(chatId, gate.verify(s.scope, text, null, text));
+    if (!alive(chatId, s)) return;
+    if (g.ok) return tg.send(chatId, TEXT.more);
+    if (g.kind === 'safety') {
+      s.story = text; s.originalStory = text; // запрет — на этот текст; прежний черновик уничтожается остановкой
+      return stopForSafety(chatId, s, 'urgent', { at: 'short', byModel: true });
+    }
+    logError('check', { code: g.kind === 'technical' ? 'check_incomplete_twice' : g.code });
+    return tg.send(chatId, `${g.kind === 'technical' ? TEXT.checkPaused : TEXT.checkUnavailable}\n\n${helpContacts()}`);
   }
 
   async function onCallback(q) {
