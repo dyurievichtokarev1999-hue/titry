@@ -167,7 +167,15 @@ const FEEDBACK_KB = {
 
 export const MAX_RENDER_WAITING = 3;
 
-export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), salt = process.env.METRICS_SALT || 'titry-dev-salt', { forgetTimeoutMs = 10000 } = {}) {
+// Соль хэшей обязательна (решение Claude 11.11): запасная соль в открытом репозитории позволяет подобрать
+// короткие chat id перебором. Без соли — отказ; явный режим разработки (TITRY_DEV_METRICS=1) — случайная соль
+// на процесс, не записываемая никуда (удаление после перезапуска в этом режиме строки прежнего процесса не найдёт).
+export const METRICS_SALT_MIN = 16;
+export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), salt = process.env.METRICS_SALT, { forgetTimeoutMs = 10000 } = {}) {
+  if (!salt) {
+    if (process.env.TITRY_DEV_METRICS !== '1') throw Object.assign(new Error('METRICS_SALT не задан'), { code: 'metrics_salt' });
+    salt = crypto.randomBytes(32).toString('hex');
+  }
   const hash = (id) => crypto.createHmac('sha256', salt).update(String(id)).digest('hex').slice(0, 16);
   // ИР-06 (критик реализации 9.11): завершённый forget — барьер для уже принятых записей.
   // 1) Чтение-перезапись и дозапись файла идут одной очередью — строка другого человека не теряется.
@@ -627,8 +635,35 @@ export function telegram(token) {
  * хранилища запретов. Любая ошибка — исключение: вызывающий не начинает опрос Telegram (fail closed).
  * Нет ключа хранилища — тоже отказ запуска, а не тихий режим.
  */
-export async function prepareBot({ cleanup = cleanupVoiceOrphans, ledger } = {}) {
+/**
+ * Стартовая очистка data/tmp: ролики бота (*.mp4) прежнего процесса — в их имени хэш человека, в кадре титры
+ * по рассказу. Вызывается до приёма задач, поэтому все такие файлы старше запуска. Каталог-ссылка или не каталог —
+ * ошибка (запуск останавливается); ссылки внутри удаляются как ссылки, цели не трогаются; подкаталоги не трогаются.
+ */
+export async function purgeBotTmp(dir = path.join(ROOT, 'data', 'tmp')) {
+  let st;
+  try { st = await fs.lstat(dir); } catch (e) { if (e.code === 'ENOENT') return 0; throw e; }
+  if (st.isSymbolicLink()) throw Object.assign(new Error('data/tmp — ссылка'), { code: 'EACCES' });
+  if (!st.isDirectory()) throw Object.assign(new Error('data/tmp — не каталог'), { code: 'ENOTDIR' });
+  let removed = 0;
+  for (const d of await fs.readdir(dir, { withFileTypes: true })) {
+    if (!d.name.endsWith('.mp4') || !(d.isFile() || d.isSymbolicLink())) continue;
+    await fs.rm(path.join(dir, d.name), { force: true });
+    removed++;
+  }
+  return removed;
+}
+
+export async function prepareBot({ cleanup = cleanupVoiceOrphans, cleanupTmp = purgeBotTmp, ledger, env = process.env, log = console.error } = {}) {
+  if (!env.METRICS_SALT || String(env.METRICS_SALT).length < METRICS_SALT_MIN) {
+    logError('metrics.salt', { code: 'metrics_salt' });
+    throw Object.assign(new Error('startup'), { code: 'metrics_salt', stage: 'metrics.salt' });
+  }
   try { await cleanup(); } catch (e) { logError('voice.cleanup', e); throw Object.assign(new Error('startup'), { code: safeCode(e), stage: 'voice.cleanup' }); }
+  try {
+    const removed = await cleanupTmp();
+    if (removed) log(JSON.stringify({ stage: 'tmp.cleanup', removed })); // только код этапа и число, без путей и имён
+  } catch (e) { logError('tmp.cleanup', e); throw Object.assign(new Error('startup'), { code: safeCode(e), stage: 'tmp.cleanup' }); }
   const l = ledger || makeLedger({ file: path.join(ROOT, 'data', 'state', 'blocked-v1.json'), key: process.env[KEY_ENV], keyVersion: process.env[KEY_VERSION_ENV] || 'v1' });
   try { await l.load(); } catch (e) { logError('ledger.load', e); throw Object.assign(new Error('startup'), { code: 'ledger', stage: 'ledger.load' }); }
   return l;
@@ -639,7 +674,7 @@ async function main() {
   if (!token) { console.error('Задайте TELEGRAM_BOT_TOKEN (выдаёт @BotFather).'); process.exit(2); }
   let ledger;
   try { ledger = await prepareBot(); } catch {
-    console.error(`Запуск остановлен: не подтверждена очистка временных файлов или хранилище запретов (${KEY_ENV}, ${KEY_VERSION_ENV}). Задачи не принимаются. Остатки tmp и файл хранилища не удаляйте вручную без владельца кода.`);
+    console.error(`Запуск остановлен: не задана METRICS_SALT (не короче ${METRICS_SALT_MIN} знаков), не подтверждена очистка временных файлов или хранилище запретов (${KEY_ENV}, ${KEY_VERSION_ENV}). Задачи не принимаются. Остатки tmp и файл хранилища не удаляйте вручную без владельца кода.`);
     process.exit(3);
   }
   const tg = telegram(token);

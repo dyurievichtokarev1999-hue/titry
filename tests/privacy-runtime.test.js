@@ -210,7 +210,7 @@ globalThis.fetch = async (url) => {
 };`);
     const run = (env) => new Promise((resolve) => {
       const p = spawn(process.execPath, ['--import', preload, new URL('../server/bot.js', import.meta.url).pathname], {
-        env: { ...process.env, TELEGRAM_BOT_TOKEN: 'test-only', TITRY_RUNTIME_DIR: rt, TITRY_BLOCKED_HMAC_KEY: 'test-only-key-not-a-secret', TITRY_BLOCKED_KEY_VERSION: 'v-entry-test', ...env },
+        env: { ...process.env, TELEGRAM_BOT_TOKEN: 'test-only', TITRY_RUNTIME_DIR: rt, TITRY_BLOCKED_HMAC_KEY: 'test-only-key-not-a-secret', TITRY_BLOCKED_KEY_VERSION: 'v-entry-test', METRICS_SALT: 'test-only-salt-not-a-secret', ...env },
         cwd: dir, stdio: ['ignore', 'pipe', 'pipe'],
       });
       let err = '';
@@ -236,7 +236,7 @@ globalThis.fetch = async (url) => {
 test('B09.6: prepareBot — ошибка очистки или хранилища отклоняется; успешная подготовка возвращает хранилище', async () => {
   const { prepareBot } = await import('../server/bot.js');
   const okLedger = { load: async () => {} };
-  await assert.rejects(prepareBot({ cleanup: async () => { throw Object.assign(new Error('x'), { code: 'EACCES' }); }, ledger: okLedger }), { stage: 'voice.cleanup', code: 'EACCES' });
-  await assert.rejects(prepareBot({ cleanup: async () => 0, ledger: { load: async () => { throw new Error('x'); } } }), { stage: 'ledger.load', code: 'ledger' });
-  assert.equal(await prepareBot({ cleanup: async () => 0, ledger: okLedger }), okLedger);
+  await assert.rejects(prepareBot({ env: { METRICS_SALT: 'test-only-salt-not-a-secret' }, cleanupTmp: async () => 0, cleanup: async () => { throw Object.assign(new Error('x'), { code: 'EACCES' }); }, ledger: okLedger }), { stage: 'voice.cleanup', code: 'EACCES' });
+  await assert.rejects(prepareBot({ env: { METRICS_SALT: 'test-only-salt-not-a-secret' }, cleanupTmp: async () => 0, cleanup: async () => 0, ledger: { load: async () => { throw new Error('x'); } } }), { stage: 'ledger.load', code: 'ledger' });
+  assert.equal(await prepareBot({ env: { METRICS_SALT: 'test-only-salt-not-a-secret' }, cleanupTmp: async () => 0, cleanup: async () => 0, ledger: okLedger }), okLedger);
 });
