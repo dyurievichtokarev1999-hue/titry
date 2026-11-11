@@ -146,7 +146,11 @@ export function personMessage(e) {
   switch (e.kind) {
     case 'words:long': return `Строка ${n}: роль — одно-два слова. ${redo}`;
     case 'words:bound': return `Строка ${n}: в рассказе слово «${e.words[0]}» стоит с другими словами («не», «бы», «если», «сказала»…), а без них смысл другой. ${redo}`;
-    default: return `Строка ${n}: в ней есть слова не из твоего рассказа или их не хватает. ${redo}`;
+    case 'words:cut': return `Строка ${n}: в рассказе перед этими словами стоит «не» или похожее слово, без него смысл другой. ${redo}`;
+    case 'words:ambiguous': return `Строка ${n}: слово «${e.words[0]}» в рассказе встречается и с «не», и без него. ${redo}`;
+    case 'words:empty': return `Строка ${n}: в ней не хватает слов. ${redo}`;
+    case 'words:missing': return `Строка ${n}: слово «${e.words[0]}» не из твоего рассказа. ${redo}`;
+    default: return `Строка ${n}: эти слова не складываются из твоего рассказа. ${redo}`;
   }
 }
 

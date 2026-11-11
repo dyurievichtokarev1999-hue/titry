@@ -227,6 +227,8 @@ const NOT_ROLE = new Set(`я ты он она оно мы вы они меня �
 в во на с со к ко по за у о об обо от до из изо без для про над под при через между перед около после вместо кроме среди вокруг
 был была было были быть есть буду будет стал стала стало стали`.split(/\s+/).map((w) => w.replace(/ё/g, 'е')));
 
+/** Слова, на которых значение не может кончаться. */
+const DANGLING = new Set(['не', 'ни', 'то', 'только', 'чтобы', 'чтоб', 'бы', 'б', 'ли', 'если', 'что', 'как', 'когда', 'будет', 'буду', 'был', 'была', 'было']);
 /** Слова, которые не остаются на краю значения. */
 const EDGE_WORDS = new Set(['я', 'и', 'а', 'но', 'или', 'да']);
 /** Предлоги: берутся в роль вместе со следующим словом («На работе»). */
@@ -244,6 +246,8 @@ function sentences(story) {
 }
 
 const trimEdge = (s) => s.replace(/^[\s,;:—–-]+|[\s,;:—–.!?…-]+$/g, '');
+/** Кавычки по краям значения без пары: «Ты уволен» не режется пополам. */
+const unbalancedQuotes = (s) => (s.match(/[«„“]/g) || []).length !== (s.match(/[»”]/g) || []).length || (s.match(/"/g) || []).length % 2 === 1;
 
 /** Начинается ли слово с заглавной где-то не в начале фразы (имя, название): тогда его регистр не трогаем. */
 function capitalizedInside(word, story) {
@@ -293,9 +297,15 @@ export function pairFromSentence(sentence, usedRoles = new Set(), story = senten
         variants.push(raw.slice(i + 1, ce + 1)); // до конца части
       }
       if (from > 0 && !ends(raw[from - 1])) variants.push(raw.slice(cs, from)); // сразу перед ролью
+      // сначала кусок с глаголом: «Вещи — собирала», а не «Вещи — два часа»
+      const hasVerb = (v) => v.some((t) => VERB_LIKE.test(wordsOf(t)[0] || ''));
+      variants.sort((x, y) => Number(hasVerb(clean(y))) - Number(hasVerb(clean(x))));
       for (const v of variants) {
         const part = clean(v);
         if (!part.length) continue;
+        // значение не обрывается на предлоге или служебном слове: «встала в», «он не то чтобы», «не только»
+        const lastW = wordsOf(part[part.length - 1]).at(-1);
+        if (PREPOSITIONS.has(lastW) || DANGLING.has(lastW) || /[«"„“(]$/.test(part[part.length - 1])) continue;
         let value = trimEdge(part.join(' '));
         if (!value) continue;
         // Регистр — как у человека. Заглавная только из-за начала фразы в середине строки не нужна, имена не трогаем.
@@ -303,7 +313,7 @@ export function pairFromSentence(sentence, usedRoles = new Set(), story = senten
           value = value.charAt(0).toLowerCase() + value.slice(1);
         }
         const role = roleWord.charAt(0).toUpperCase() + roleWord.slice(1);
-        if (role.length > LIMITS.role || value.length > LIMITS.value) continue;
+        if (role.length > LIMITS.role || value.length > LIMITS.value || unbalancedQuotes(value) || unbalancedQuotes(role)) continue;
         const row = { role, value, source };
         if (rowWordsGrounded(row, story)) return { row, roleKey: w };
       }

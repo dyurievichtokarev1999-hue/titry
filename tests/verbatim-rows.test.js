@@ -295,3 +295,35 @@ test('бот: «N: текст» — роль из слов этого текст
   assert.match(msg, /Строка 2: .*«2: роль — текст»/);
   assert.doesNotMatch(msg, /цитат/);
 });
+
+// ── Третий разбор c3f698e0 ───────────────────────────────────────────────────
+
+test('«не» на всю часть фразы, «не…», чужие слова без «что», «во сне», кавычки, «не я»; слова-связки не мешают', () => {
+  for (const { story, row } of fx.review3.reject) {
+    assert.equal(rowWordsGrounded(row, story), false, `${row.role} — ${row.value} ← ${row.source} / ${story}`);
+  }
+  for (const { story, row } of fx.review3.accept) {
+    assert.deepEqual(rowWordProblems(row, story), [], `${row.role} — ${row.value} ← ${story}`);
+  }
+});
+
+test('заготовка: не обрывает значение на предлоге, служебном слове или кавычке; не отрывает «не»', () => {
+  const r = draftRuleBased(fx.ruleBased3.story, { date: '2026-11-11' });
+  const got = r.episode.rows.map((x) => `${x.role} — ${x.value}`);
+  for (const bad of fx.ruleBased3.forbidden) assert.ok(!got.includes(bad), bad);
+  for (const row of r.episode.rows) {
+    assert.ok(rowWordsGrounded(row, fx.ruleBased3.story), `${row.role} — ${row.value}`);
+    assert.doesNotMatch(row.value, /\s(в|на|с|то|чтобы|не)$/);
+  }
+});
+
+test('бот: правка «N: пила чай» при «Я не пила чай» в рассказе — это слова человека, строка проходит; ошибки по причине', () => {
+  const story = 'Я не пила чай. Утром работа. Вечером ужин.';
+  const { episode } = draftRuleBased(story, { date: '2026-11-11' });
+  assert.equal(applyEdit(episode, parseEdit('1: пила чай')), null);
+  const v = validateEpisode(episode, `${story}\nпила чай`);
+  assert.ok(!v.errors.some((e) => e.path.startsWith('rows.0')), JSON.stringify(v.errors));
+  // разные причины — разные понятные тексты
+  const e1 = validateEpisode(sanitizeEpisode({ ...episode, rows: [{ role: 'Чай', value: 'пила', source: 'пила чай' }, episode.rows[1]] }), story);
+  assert.match(draftMessage(episode, e1), /перед этими словами стоит «не»/);
+});

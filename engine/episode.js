@@ -62,7 +62,9 @@ export function sourceFound(source, story) {
 //    На экран идёт форма, набранная рассказчиком.
 // 2) Слово нельзя оторвать от признака, который меняет смысл, — и нельзя приставить признак к чужому слову:
 //    - «не», «ни», «буду», «будет»… относятся к следующему слову, в том числе через предлог и «прозрачные» слова
-//      («не на работе», «не очень любила»). Цитату нельзя начать сразу после такого признака в рассказе;
+//      («не на работе», «не очень любила»); «не», «ни», «нельзя» — ещё и ко всей части фразы после них
+//      («не стала пить чай»: «чай» берётся только в строке с «не»), «не я» — ко всей части фразы.
+//      Цитату нельзя начать внутри такой части или сразу после «не» (в том числе через «…» и перевод строки);
 //    - условие, сослагательность, неуверенность и чужие слова («если», «бы», «ли», «вроде», «якобы»,
 //      «сказал: …») действуют на всю фразу рассказа, где стоит цитата: слова такой фразы берутся только
 //      в поле строки, где этот признак тоже есть;
@@ -82,8 +84,8 @@ const SENTENCE_MARKERS = new Set([
   'если', 'бы', 'б', 'ли', 'якобы', 'будто', 'словно', 'мол', 'дескать', 'чтобы', 'чтоб',
   'нет', 'нету', 'почти', 'едва', 'чуть',
   'вроде', 'вряд', 'кажется', 'казалось', 'показалось', 'наверное', 'наверно', 'возможно', 'может', 'типа',
-  'видимо', 'похоже', 'по\u2011моему', 'по\u2011видимому', 'знаю', 'уверена', 'уверен', 'помню',
-  'снилось', 'приснилось', 'снился', 'снилась', 'приснился', 'приснилась', 'говорят',
+  'видимо', 'похоже', 'по\u2011моему', 'по\u2011видимому', 'уверена', 'уверен', 'надеюсь', 'надеялась', 'надеялся',
+  'снилось', 'приснилось', 'снился', 'снилась', 'приснился', 'приснилась', 'сне', 'говорят', 'словам',
 ]);
 /**
  * Глаголы речи, мысли и восприятия: признак, когда за ними идёт чужое или предполагаемое содержание —
@@ -93,12 +95,15 @@ const REPORT_VERBS = new Set([
   'думала', 'думал', 'думаю', 'подумала', 'подумал', 'считаю', 'считала', 'считал', 'считает', 'знаю',
   'написал', 'написала', 'написали', 'пишет', 'пишут', 'сказал', 'сказала', 'сказали', 'говорит', 'говорила', 'говорил',
   'спросил', 'спросила', 'ответил', 'ответила', 'обещал', 'обещала', 'слышала', 'слышал', 'решила', 'решил', 'боюсь',
+  'помню', 'орал', 'орала', 'кричал', 'кричала', 'заявил', 'заявила', 'сообщил', 'сообщила', 'объяснил', 'объяснила',
 ]);
+/** Отрицание действует до конца части фразы (до знака препинания): «не стала пить чай» — «чай» тоже под «не». */
+const NEG = new Set(['не', 'ни', 'нельзя']);
 /** Признаки-служебные слова: строка из одних них пуста. Глаголы речи и «нет» — сами по себе слова. */
-const FUNCTION_MARKERS = new Set(['не', 'ни', 'если', 'бы', 'б', 'ли', 'якобы', 'будто', 'словно', 'мол', 'дескать', 'чтобы', 'чтоб',
+const FUNCTION_MARKERS = new Set(['не', 'ни', 'нельзя', 'если', 'бы', 'б', 'ли', 'якобы', 'будто', 'словно', 'мол', 'дескать', 'чтобы', 'чтоб',
   'вряд', 'типа', 'может', 'буду', 'будешь', 'будет', 'будем', 'будете', 'будут']);
-/** Признаки из двух слов: «по словам», «может быть». */
-const SENTENCE_BIGRAMS = [['по', 'словам']];
+/** Признаки из двух слов: «по моему» (без дефиса). */
+const SENTENCE_BIGRAMS = [['по', 'моему']];
 /** Слова, через которые признак продолжает действовать: «не очень любила», «не на работе». */
 const TRANSPARENT = new Set([
   'очень', 'совсем', 'особо', 'особенно', 'слишком', 'так', 'сильно', 'вообще', 'всегда', 'сразу',
@@ -106,7 +111,7 @@ const TRANSPARENT = new Set([
   'в', 'во', 'на', 'с', 'со', 'к', 'ко', 'по', 'за', 'у', 'о', 'об', 'от', 'из', 'без', 'для', 'про', 'над', 'под', 'при',
   ...PRONOUNS,
 ]);
-const isMarker = (w) => NEXT_MARKERS.has(w) || SENTENCE_MARKERS.has(w) || REPORT_VERBS.has(w);
+const isMarker = (w) => NEXT_MARKERS.has(w) || SENTENCE_MARKERS.has(w) || REPORT_VERBS.has(w) || NEG.has(w);
 
 /** Латинские буквы, похожие на русские, внутри русского слова («нe» с латинской e). */
 const HOMO = { a: 'а', e: 'е', o: 'о', p: 'р', c: 'с', x: 'х', y: 'у', k: 'к', m: 'м', t: 'т', h: 'н', b: 'в' };
@@ -122,12 +127,42 @@ export function wordsOf(text, homo = true) {
 function sentencesOf(text, homo = true) {
   return String(text || '').split(/[.!?…;\n]+/).map((raw) => {
     const words = wordsOf(raw, homo);
-    const marks = new Set(words.filter((w) => SENTENCE_MARKERS.has(w)));
-    const reported = /[:«»"“”„]/.test(raw);
-    words.forEach((w, i) => { if (REPORT_VERBS.has(w) && (reported || words.slice(i + 1).includes('что'))) marks.add(w); });
+    const low = raw.toLowerCase().replace(/ё/g, 'е');
+    const marks = new Set();
+    words.forEach((w, i) => {
+      if (!SENTENCE_MARKERS.has(w)) return;
+      // слова-связки разговорной речи — не признаки: «если честно», «как бы», «Нет, я не устала»
+      if (w === 'если' && words[i + 1] === 'честно') return;
+      if ((w === 'бы' || w === 'б') && words[i - 1] === 'как') return;
+      if ((w === 'нет' || w === 'нету') && i === 0 && /^\s*нету?\s*[,!—–-]/.test(low)) return;
+      marks.add(w);
+    });
+    // глагол речи или мысли с содержанием после него: «сказала, что…», «сказала: …», «сказала — …», «думаю, он…»
+    words.forEach((w) => {
+      if (REPORT_VERBS.has(w) && new RegExp(`(^|[^а-я])${w}\\s*([,:—–«"„“]|что|будто|как\\s)`).test(low)) marks.add(w);
+    });
+    // в кавычках — чужие слова или название: строка берёт их только в кавычках
+    if (/[«»"“”„]/.test(raw)) marks.add('«»');
     for (const [a, b] of SENTENCE_BIGRAMS) if (words.some((w, i) => w === a && words[i + 1] === b)) marks.add(`${a} ${b}`);
     return { words, marks };
   }).filter((x) => x.words.length);
+}
+
+/** Слова текста и номер части фразы для каждого (части — до знака препинания). */
+function tokensWithClauses(text, homo = true) {
+  const toks = [], cl = [];
+  String(text || '').split(/[,;:—–()«»"“”„.!?…\n]+|\s-\s/).forEach((part, k) => wordsOf(part, homo).forEach((w) => { toks.push(w); cl.push(k); }));
+  return { toks, cl };
+}
+
+/** Под отрицанием ли слово i: «не/ни/нельзя» раньше в той же части фразы или «не я / не он» в ней же. */
+function negScoped(toks, cl, i) {
+  for (let j = 0; j < toks.length; j++) {
+    if (cl[j] !== cl[i] || j === i || !NEG.has(toks[j])) continue;
+    if (j < i) return true;
+    if (PRONOUNS.includes(toks[j + 1]) && cl[j + 1] === cl[i]) return true; // «Ужин готовила не я»
+  }
+  return false;
 }
 
 /** Подпись слова: признаки «не/ни/буду…» перед ним (через прозрачные слова). Без признака — ''. */
@@ -144,16 +179,21 @@ function quoteContext(source, story) {
   const sents = sentencesOf(story);
   const toks = [], sid = [];
   sents.forEach((s, k) => s.words.forEach((w) => { toks.push(w); sid.push(k); }));
-  // для проверки обрезки граница — только конец предложения (. ! ? …): перевод строки и «;» её не обрывают
-  const cid = [];
-  String(story || '').split(/[.!?…]+/).forEach((part, k) => sentencesOf(part).forEach((x) => x.words.forEach(() => cid.push(k))));
+  const { cl } = tokensWithClauses(story); // те же слова, с номерами частей фразы
   const out = [];
   for (let s = 0; s + src.length <= toks.length; s++) {
     if (!src.every((w, k) => toks[s + k] === w)) continue;
     let cut = false;
-    for (let j = s - 1; j >= 0 && cid[j] === cid[s]; j--) {
-      if (NEXT_MARKERS.has(toks[j])) { cut = true; break; }
+    // 1) «буду», «не» прямо перед цитатой (через прозрачные слова) — через любую границу: «Я не… пила чай», «не\nпила»
+    for (let j = s - 1; j >= 0; j--) {
+      if (NEXT_MARKERS.has(toks[j]) || NEG.has(toks[j])) { cut = true; break; }
       if (!TRANSPARENT.has(toks[j])) break;
+    }
+    // 2) отрицание раньше в той же части фразы: «не стала пить чай» — цитата «пить чай» обрезана
+    for (let j = s - 1; !cut && j >= 0 && cl[j] === cl[s]; j--) if (NEG.has(toks[j])) cut = true;
+    // 3) «не я» после цитаты в той же части фразы: «Ужин готовила не я»
+    for (let j = s + src.length; !cut && j < toks.length && cl[j] === cl[s + src.length - 1]; j++) {
+      if (NEG.has(toks[j]) && PRONOUNS.includes(toks[j + 1])) cut = true;
     }
     const marks = new Set();
     for (let k = sid[s]; k <= sid[s + src.length - 1]; k++) sents[k].marks.forEach((m) => marks.add(m));
@@ -186,7 +226,8 @@ export function rowWordProblems(row, story) {
   if (hasStory && !ctx.length && sourceFound(row.source, story)) problems.push({ field: 'source', kind: 'partial', words: [] });
   if (ctx.length) {
     ctx.forEach((c) => c.marks.forEach((m) => srcMarks.add(m)));
-    if (ctx.some((c) => c.cut)) problems.push({ field: 'source', kind: 'cut', words: [] });
+    // цитата встречается в рассказе и без обрезки (например, в правке человека) — годится; иначе нет
+    if (ctx.every((c) => c.cut)) problems.push({ field: 'source', kind: 'cut', words: [] });
   } else {
     sentencesOf(row.source).forEach((x) => x.marks.forEach((m) => srcMarks.add(m)));
   }
@@ -194,7 +235,11 @@ export function rowWordProblems(row, story) {
   const sigs = new Map(); // слово → подписи его вхождений в цитате
   // подпись проверяется у всех слов, кроме служебных («не», «бы», «если»…): «Написал» из «не написал» — тоже без «не» нельзя
   const plain = (w) => !NEXT_MARKERS.has(w) && !FUNCTION_MARKERS.has(w);
-  src.forEach((w, i) => { if (plain(w)) (sigs.get(w) || sigs.set(w, new Set()).get(w)).add(preSig(src, i)); });
+  const { toks: srcT, cl: srcC } = tokensWithClauses(row.source);
+  src.forEach((w, i) => { if (plain(w)) (sigs.get(w) || sigs.set(w, new Set()).get(w)).add(`${preSig(src, i)}|${negScoped(srcT, srcC, i) ? 'neg' : ''}`); });
+  // слова строки, которые в цитате стоят под отрицанием: строка должна содержать «не»/«ни»/«нельзя»
+  const rowWords = wordsOf(`${String((row && row.role) || '')} ${String((row && row.value) || '')}`, false);
+  const rowHasNeg = rowWords.some((w) => NEG.has(w));
   const key = (set) => [...set].sort().join(' ');
   // Признаки всей фразы (условие, «бы», чужие слова…) должны быть в строке — в роли или в значении:
   // строка читается целиком, «Рано — я бы ушла» сохраняет сослагательность.
@@ -221,7 +266,8 @@ export function rowWordProblems(row, story) {
       if (!plain(w)) continue;
       const own = sigs.get(w);
       if (own.size > 1) { problems.push({ field: fieldName, kind: 'ambiguous', words: [w] }); break; }
-      if (!own.has(preSig(words, i))) { problems.push({ field: fieldName, kind: 'bound', words: [w] }); break; }
+      const [pre, neg] = [...own][0].split('|');
+      if (pre !== preSig(words, i) || (neg && !rowHasNeg)) { problems.push({ field: fieldName, kind: 'bound', words: [w] }); break; }
     }
   }
   return problems;
