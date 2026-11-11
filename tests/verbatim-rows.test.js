@@ -450,3 +450,14 @@ test('вырожденный рассказ из одного слова и null
   }
   assert.doesNotThrow(() => validateEpisode({ ...ep, rows: [null, { role: 'Т', value: 'т', source: 'т' }] }, 'т'));
 });
+
+// ── Разбор cf0c2497 ──────────────────────────────────────────────────────────
+
+test('сон через переводы строк и «проснулась» внутри сна; обрезка после «не» через много прозрачных слов', () => {
+  for (const { story, row } of fx.review9.reject) {
+    assert.equal(rowWordsGrounded(row, story), false, `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+  for (const { story, row } of fx.review9.accept) {
+    assert.deepEqual(rowWordProblems(row, story), [], `${row.role} — ${row.value} ← ${JSON.stringify(story)}`);
+  }
+});

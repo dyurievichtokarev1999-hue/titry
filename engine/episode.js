@@ -191,10 +191,9 @@ const RETRACT = new Set(['вру', 'шучу', 'наврала', 'соврала
 const WAKE = /^(просну(лась|лся|лись)|проснувшись)$/;
 
 function sentencesOf(text, homo = true) {
-  // сон или видение действует до конца абзаца (пустая строка) или до «проснулась»: «Приснилась бабушка. Мы сидели…»
+  // сон или видение действует до конца рассказа или до фразы с «проснулась» без слов сна: «Приснилась бабушка. Мы сидели…»
   let dreamCarry = false;
   const list = splitPhrases(text).map(({ text: raw, end }) => {
-    if (!wordsOf(raw, homo).length && end === '\n') dreamCarry = false; // пустая строка — новый абзац
     const words = wordsOf(raw, homo);
     const low = raw.toLowerCase().replace(/ё/g, 'е');
     const marks = new Set();
@@ -221,8 +220,8 @@ function sentencesOf(text, homo = true) {
     const dreamHere = words.some((w) => DREAM.test(w));
     if (dreamCarry && words.length) marks.add('сон');
     if (dreamHere) marks.add('сон');
-    if (words.some((w) => WAKE.test(w))) dreamCarry = false;
-    else if (dreamHere) dreamCarry = true;
+    if (dreamHere) dreamCarry = true; // «Мне снилось, что я проснулась» — всё ещё сон
+    else if (words.some((w) => WAKE.test(w))) dreamCarry = false;
     return { words, marks };
   }).filter((x) => x.words.length);
   // отказ от сказанного действует и на предыдущую фразу: «Чай пила. Вру, не пила.»
@@ -329,24 +328,26 @@ function storyAnalysis(story) {
     const here = NEG.has(toks[j]) && PRONOUNS.includes(toks[j + 1]);
     negPronAfter[j] = here || (j + 1 < toks.length && cl[j + 1] === cl[j] && negPronAfter[j + 1]);
   }
-  storyCache = { story, data: { sents, toks, sid, cl, scopeBefore, negPronAfter } };
+  // ближайшее слово перед позицией, не «прозрачное» (предлог, местоимение, «очень»…): обрезка проверяется за O(1)
+  const prevSolid = new Array(toks.length + 1).fill(-1);
+  for (let j = 1; j <= toks.length; j++) prevSolid[j] = TRANSPARENT.has(toks[j - 1]) ? prevSolid[j - 1] : j - 1;
+  storyCache = { story, data: { sents, toks, sid, cl, scopeBefore, negPronAfter, prevSolid } };
   return storyCache.data;
 }
 
 function quoteContext(source, story) {
   const src = wordsOf(source);
-  const { sents, toks, sid, cl, scopeBefore, negPronAfter } = storyAnalysis(String(story || ''));
+  const { sents, toks, sid, cl, scopeBefore, negPronAfter, prevSolid } = storyAnalysis(String(story || ''));
   const out = [];
   for (let s = 0; s + src.length <= toks.length; s++) {
     if (!src.every((w, k) => toks[s + k] === w)) continue;
     let cut = false;
     // 1) «буду», «не», «почти» прямо перед цитатой (через прозрачные слова) в той же фразе;
     //    «не» в самом конце предыдущей фразы («Я не. Пила чай.») — тоже обрезка
-    for (let j = s - 1; j >= 0 && j >= s - 12; j--) {
+    {
+      const j = prevSolid[s];
       // через границу фразы — только «не», «буду», «почти» (не намерение: «Купила всё, что хотела. Утром…»)
-      if (sid[j] !== sid[s] && !(isNext(toks[j]) || NEG.has(toks[j]) || TRANSPARENT.has(toks[j]))) break;
-      if (isNext(toks[j]) || NEG.has(toks[j]) || (sid[j] === sid[s] && (toks[j] === 'без' || scopeWord(toks, j)))) { cut = true; break; }
-      if (!TRANSPARENT.has(toks[j])) break;
+      if (j >= 0 && (isNext(toks[j]) || NEG.has(toks[j]) || (sid[j] === sid[s] && (toks[j] === 'без' || scopeWord(toks, j))))) cut = true;
     }
     // 2) отрицание, «без» или намерение раньше в той же части фразы: «не стала пить чай» — цитата «пить чай» обрезана
     if (!cut && scopeBefore[s]) cut = true;
