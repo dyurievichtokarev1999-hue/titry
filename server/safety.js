@@ -473,14 +473,45 @@ export function insufficientAfterExclusion(ep, story, validation = validateSafeE
   return missing('title') || missing('genre') || usable < LIMITS.rowsMin;
 }
 
-export function loadHelp(file = path.join(here, '..', 'config', 'help.json')) {
+export const HELP_FILE = path.join(here, '..', 'config', 'help.json');
+export const TELEGRAM_TEXT_LIMIT = 4096; // лимит одного текстового сообщения Telegram, в символах
+
+export function loadHelp(file = HELP_FILE) {
   const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
   const contacts = [cfg.emergency, ...(cfg.contacts || [])].filter((c) => c && c.verified && c.phone);
   return { region: cfg.region, contacts };
 }
 
+// Контакты помощи в памяти процесса (решение владельца по PR 11, 11.11 11:05): файл читается и проверяется
+// один раз — при старте бота и монтажной (prepareHelp) — и во время работы не перечитывается.
+let preparedHelp = null;
+
+/**
+ * Прочитать и проверить help.json один раз. Ошибка — исключение с кодом help_config (вызывающий не стартует):
+ * файл не читается, нет ни одного проверенного контакта с номером, текст блока помощи пуст или длиннее
+ * одного сообщения Telegram (делить блок посреди контакта нельзя).
+ */
+export function prepareHelp(file = HELP_FILE) {
+  const fail = () => Object.assign(new Error('help'), { code: 'help_config' });
+  let help;
+  try { help = loadHelp(file); } catch { throw fail(); }
+  if (!Array.isArray(help.contacts) || !help.contacts.length) throw fail();
+  if (help.contacts.some((c) => typeof c.label !== 'string' || !c.label.trim() || typeof c.phone !== 'string' || !c.phone.trim())) throw fail();
+  for (const level of ['concern', 'urgent']) {
+    const text = helpMessage(level, help);
+    if (!text.trim() || text.length > TELEGRAM_TEXT_LIMIT) throw fail();
+  }
+  preparedHelp = help;
+  return help;
+}
+
+/** Проверенные при старте контакты. Без старта (тесты, скрипты) — один раз при первом обращении, с той же проверкой. */
+export function currentHelp() {
+  return preparedHelp || prepareHelp();
+}
+
 /** Текст экрана помощи. Без обещаний «мы всегда заметим» и без давления. */
-export function helpMessage(level, help = loadHelp()) {
+export function helpMessage(level, help = currentHelp()) {
   const list = help.contacts.map((c) => `• ${c.label}: ${c.phone}${c.hours ? ` (${c.hours})` : ''}`).join('\n');
   if (level === 'urgent') {
     return [

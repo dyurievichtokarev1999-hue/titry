@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS, episodeToText } from '../engine/episode.js';
 import { makeDraft, modelSafetyCheck, hasClaudeCredentials } from './draft.js';
 import { makeGate } from './gate.js';
-import { helpMessage, loadHelp, assessEpisodeRisk, validateSafeEpisode, INSUFFICIENT_TEXT } from './safety.js';
+import { helpMessage, prepareHelp, assessEpisodeRisk, validateSafeEpisode, INSUFFICIENT_TEXT, TELEGRAM_TEXT_LIMIT } from './safety.js';
 import { renderEpisode, ROOT } from './render.js';
 import { logError, safeCode } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS, cleanupVoiceOrphans } from './stt.js';
@@ -72,25 +72,22 @@ export const TEXT = {
   insufficient: INSUFFICIENT_TEXT, // текст — в server/safety.js
 };
 
-export const TELEGRAM_TEXT_LIMIT = 4096; // лимит одного текстового сообщения Telegram, в символах
+export { TELEGRAM_TEXT_LIMIT };
 
 /**
  * Ответ при нехватке материала: реплика; при concern — одним сообщением «реплика, пустая строка, блок помощи».
- * help.json читается только при concern. Возвращает список сообщений: обычно одно. Два — только в явно
- * журналируемых отказах (не молча): блок помощи не помещается в лимит Telegram (message_too_long) —
- * реплика и блок уходят подряд; help.json не читается (help_config) — уходит реплика, без блока.
+ * Контакты — проверенные при старте (prepareHelp в prepareBot), файл во время работы не перечитывается,
+ * ветки «реплика без помощи» нет. Защитная ветка: если вместе не помещается в лимит Telegram — СНАЧАЛА блок
+ * помощи, ЗАТЕМ реплика, в журнал — код message_too_long (без текста). Сам блок длиннее лимита не бывает:
+ * это ошибка проверки при старте.
  */
 export function insufficientMessages(concern, { help, log = logError } = {}) {
   if (!concern) return [TEXT.insufficient];
-  let block;
-  try { block = helpMessage('concern', help || loadHelp()); } catch (e) {
-    log('insufficient', { code: 'help_config' });
-    return [TEXT.insufficient];
-  }
+  const block = help ? helpMessage('concern', help) : helpMessage('concern');
   const one = `${TEXT.insufficient}\n\n${block}`;
   if (one.length <= TELEGRAM_TEXT_LIMIT) return [one];
   log('insufficient', { code: 'message_too_long' });
-  return [TEXT.insufficient, block];
+  return [block, TEXT.insufficient];
 }
 
 // ── Чистые функции: разбор правок ────────────────────────────────────────────
@@ -469,8 +466,8 @@ export function createBot({
   // что у прежней карточки concern (helpMessage('concern')), без переходной фразы, черновика и кнопок.
   // Признак concern — уровень всего рассказа, как у прежней карточки. Решение владельца 11.11 09:05: ОДНО сообщение
   // «реплика, пустая строка, блок помощи» — между двумя сообщениями блок помощи мог бы потеряться. Длина
-  // (реплика + helpMessage('concern')) проверяется при каждой отправке (insufficientMessages): сверх лимита Telegram 4096
-  // сообщение не делится молча — код message_too_long в журнале; сейчас 256 знаков.
+  // (реплика + helpMessage('concern')) ограничена тестом (≤ 3500) и проверяется при отправке (insufficientMessages):
+  // сверх 4096 — сначала блок помощи, затем реплика, код message_too_long в журнале; сейчас 256 знаков.
   async function replyInsufficient(chatId, s, story, gen, current, concern) {
     // Тот же рассказ сейчас в работе и ещё не остановлен: поздняя остановка (как в ветке !r.episode, at: 'late').
     // Без этого два подряд одинаковых рассказа, у первого из которых проверка вернула true, оставляли человека
@@ -699,7 +696,9 @@ export function telegram(token) {
  * хранилища запретов. Любая ошибка — исключение: вызывающий не начинает опрос Telegram (fail closed).
  * Нет ключа хранилища — тоже отказ запуска, а не тихий режим.
  */
-export async function prepareBot({ cleanup = cleanupVoiceOrphans, ledger } = {}) {
+export async function prepareBot({ cleanup = cleanupVoiceOrphans, ledger, helpFile } = {}) {
+  // Контакты помощи — до всего остального: без проверенного блока помощи бот не стартует (решение владельца 11:05).
+  try { prepareHelp(helpFile); } catch (e) { logError('help.load', e); throw Object.assign(new Error('startup'), { code: 'help_config', stage: 'help.load' }); }
   try { await cleanup(); } catch (e) { logError('voice.cleanup', e); throw Object.assign(new Error('startup'), { code: safeCode(e), stage: 'voice.cleanup' }); }
   const l = ledger || makeLedger({ file: path.join(ROOT, 'data', 'state', 'blocked-v1.json'), key: process.env[KEY_ENV], keyVersion: process.env[KEY_VERSION_ENV] || 'v1' });
   try { await l.load(); } catch (e) { logError('ledger.load', e); throw Object.assign(new Error('startup'), { code: 'ledger', stage: 'ledger.load' }); }
@@ -711,7 +710,7 @@ async function main() {
   if (!token) { console.error('Задайте TELEGRAM_BOT_TOKEN (выдаёт @BotFather).'); process.exit(2); }
   let ledger;
   try { ledger = await prepareBot(); } catch {
-    console.error(`Запуск остановлен: не подтверждена очистка временных файлов или хранилище запретов (${KEY_ENV}, ${KEY_VERSION_ENV}). Задачи не принимаются. Остатки tmp и файл хранилища не удаляйте вручную без владельца кода.`);
+    console.error(`Запуск остановлен: не проверены контакты помощи (config/help.json), не подтверждена очистка временных файлов или хранилище запретов (${KEY_ENV}, ${KEY_VERSION_ENV}). Задачи не принимаются. Остатки tmp и файл хранилища не удаляйте вручную без владельца кода.`);
     process.exit(3);
   }
   const tg = telegram(token);

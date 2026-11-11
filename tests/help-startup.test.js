@@ -1,0 +1,119 @@
+// Контакты помощи проверяются один раз при старте (решение владельца по PR 11, 11.11 11:05).
+// Невалидный или отсутствующий config/help.json — бот и монтажная не стартуют (код 3), обработчики не регистрируются,
+// в журнал — только этап и код. Запуск — на копии server/engine/config во временной папке (свой help.json).
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { prepareHelp, helpMessage, TELEGRAM_TEXT_LIMIT } from '../server/safety.js';
+import { prepareBot } from '../server/bot.js';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const GOOD = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'help.json'), 'utf8'));
+const BAD = {
+  'нет файла': null,
+  'не JSON': '{ это не json',
+  'нет проверенных контактов': { region: 'RU', emergency: { label: 'Экстренные', phone: '112', verified: false }, contacts: [] },
+  'проверенный контакт без номера': { region: 'RU', emergency: { label: 'Экстренные', phone: '', verified: true }, contacts: [] },
+  'пустая подпись контакта': { region: 'RU', emergency: { label: ' ', phone: '112', verified: true }, contacts: [] },
+  'блок помощи длиннее одного сообщения': { region: 'RU', emergency: { label: 'Ж'.repeat(TELEGRAM_TEXT_LIMIT), phone: '112', verified: true }, contacts: [] },
+};
+
+async function helpFile(dir, value) {
+  const f = path.join(dir, 'help.json');
+  if (value !== null) await fs.writeFile(f, typeof value === 'string' ? value : JSON.stringify(value));
+  return f;
+}
+
+test('prepareHelp: невалидный или отсутствующий help.json — ошибка help_config; рабочий файл проходит', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-help-'));
+  try {
+    for (const [name, value] of Object.entries(BAD)) {
+      const d = await fs.mkdtemp(path.join(dir, 'c-'));
+      const f = await helpFile(d, value);
+      assert.throws(() => prepareHelp(f), { code: 'help_config' }, name);
+    }
+    const ok = prepareHelp(await helpFile(await fs.mkdtemp(path.join(dir, 'ok-')), GOOD));
+    assert.ok(ok.contacts.length > 0);
+    for (const level of ['concern', 'urgent']) assert.ok(helpMessage(level, ok).trim().length > 0, level);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('prepareBot: плохой help.json — отказ на этапе help.load до очистки и хранилища', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-help-'));
+  try {
+    let cleaned = 0, loaded = 0;
+    const ledger = { load: async () => { loaded++; } };
+    await assert.rejects(prepareBot({ helpFile: await helpFile(dir, BAD['нет проверенных контактов']), cleanup: async () => { cleaned++; }, ledger }), { stage: 'help.load', code: 'help_config' });
+    assert.equal(cleaned, 0); assert.equal(loaded, 0);
+    prepareHelp(); // вернуть проверенные контакты репозитория для остальных тестов процесса
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+// Копия кода с собственным config/help.json: настоящий вход server/bot.js и server/app.js.
+async function tree(helpValue) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-help-entry-'));
+  for (const d of ['server', 'engine']) await fs.cp(path.join(ROOT, d), path.join(dir, d), { recursive: true });
+  await fs.mkdir(path.join(dir, 'config'));
+  await fs.copyFile(path.join(ROOT, 'package.json'), path.join(dir, 'package.json'));
+  await fs.symlink(path.join(ROOT, 'node_modules'), path.join(dir, 'node_modules'), 'dir');
+  if (helpValue !== null) await fs.writeFile(path.join(dir, 'config', 'help.json'), typeof helpValue === 'string' ? helpValue : JSON.stringify(helpValue));
+  return dir;
+}
+
+function run(dir, entry, env, preload) {
+  return new Promise((resolve) => {
+    const args = preload ? ['--import', preload, path.join(dir, entry)] : [path.join(dir, entry)];
+    const p = spawn(process.execPath, args, { env: { ...process.env, TITRY_BLOCKED_HMAC_KEY: 'test-only-key-not-a-secret', TITRY_BLOCKED_KEY_VERSION: 'v-help-test', ...env }, cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '', err = '';
+    p.stdout.on('data', (d) => { out += d; }); p.stderr.on('data', (d) => { err += d; });
+    const timer = setTimeout(() => p.kill('SIGKILL'), 20000);
+    p.on('exit', (code) => { clearTimeout(timer); resolve({ code, out, err }); });
+  });
+}
+
+for (const name of ['нет файла', 'не JSON', 'нет проверенных контактов']) {
+  test(`запуск бота: help.json «${name}» → код 3, Telegram не опрашивается, в журнале только этап и код`, { timeout: 30000 }, async () => {
+    const dir = await tree(BAD[name]);
+    try {
+      const flag = path.join(dir, 'telegram.flag');
+      const preload = path.join(dir, 'preload.mjs');
+      await fs.writeFile(preload, `import fs from 'node:fs';
+globalThis.fetch = async () => { fs.writeFileSync(${JSON.stringify(flag)}, '1'); process.exit(0); };`);
+      const r = await run(dir, 'server/bot.js', { TELEGRAM_BOT_TOKEN: 'test-only' }, preload);
+      assert.equal(r.code, 3, r.err);
+      assert.match(r.err, /"stage":"help\.load","code":"help_config"/);
+      assert.ok(!r.err.includes(dir), 'путей в журнале нет');
+      await assert.rejects(fs.stat(flag), { code: 'ENOENT' }, 'к Telegram не обращались: обработчики не зарегистрированы');
+    } finally { await fs.rm(dir, { recursive: true, force: true }); }
+  });
+
+  test(`запуск монтажной: help.json «${name}» → код 3, порт не открыт`, { timeout: 30000 }, async () => {
+    const dir = await tree(BAD[name]);
+    try {
+      const r = await run(dir, 'server/app.js', { PORT: '0' });
+      assert.equal(r.code, 3, r.err);
+      assert.match(r.err, /"stage":"help\.load","code":"help_config"/);
+      assert.doesNotMatch(r.out, /Монтажная: http/, 'listen не вызывался');
+      assert.ok(!r.err.includes(dir));
+    } finally { await fs.rm(dir, { recursive: true, force: true }); }
+  });
+}
+
+test('контроль: с рабочим help.json тот же запуск бота проходит проверку помощи и доходит до Telegram', { timeout: 30000 }, async () => {
+  const dir = await tree(GOOD);
+  try {
+    const flag = path.join(dir, 'telegram.flag');
+    const preload = path.join(dir, 'preload.mjs');
+    await fs.writeFile(preload, `import fs from 'node:fs';
+globalThis.fetch = async () => { fs.writeFileSync(${JSON.stringify(flag)}, '1'); process.exit(0); };`);
+    const rt = path.join(dir, 'runtime'); await fs.mkdir(rt, { mode: 0o700 });
+    const r = await run(dir, 'server/bot.js', { TELEGRAM_BOT_TOKEN: 'test-only', TITRY_RUNTIME_DIR: rt }, preload);
+    assert.doesNotMatch(r.err, /help\.load/);
+    assert.equal(r.code, 0, r.err);
+    await fs.stat(flag);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});

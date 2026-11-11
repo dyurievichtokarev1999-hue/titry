@@ -10,7 +10,7 @@ import { MOODS, TRACKS, sanitizeEpisode, validateEpisode, episodeToText } from '
 import { makeDraft, hasClaudeCredentials, DEFAULT_MODEL, modelSafetyCheck } from './draft.js';
 import { renderEpisode, ROOT } from './render.js';
 import { logError, safeCode } from './errlog.js';
-import { loadHelp, helpMessage, assessEpisodeRisk, validateSafeEpisode, INSUFFICIENT_TEXT } from './safety.js';
+import { currentHelp, prepareHelp, helpMessage, assessEpisodeRisk, validateSafeEpisode, INSUFFICIENT_TEXT } from './safety.js';
 import { makeGate } from './gate.js';
 import { makeLedger, KEY_ENV, KEY_VERSION_ENV } from './ledger.js';
 
@@ -192,7 +192,7 @@ export function createApp({
     'GET /api/config': async () => ({
       provider: hasClaudeCredentials() ? 'claude' : 'manual',
       model: hasClaudeCredentials() ? DEFAULT_MODEL : null,
-      help: loadHelp(),
+      help: currentHelp(), // проверено при старте, файл не перечитывается
     }),
 
     'POST /api/draft': async (req) => {
@@ -370,6 +370,12 @@ export function createApp({
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT || 4173);
+  // Контакты помощи — один раз при старте, до приёма задач: без проверенного блока помощи монтажная не стартует.
+  try { prepareHelp(); } catch (e) {
+    logError('help.load', e);
+    console.error('Запуск остановлен: контакты помощи (config/help.json) не читаются или не прошли проверку. Задачи не принимаются.');
+    process.exit(3);
+  }
   // Хранилище запретов: data/state/blocked-v1.json; пустой набор запретов не подставляется никогда.
   // Если хранилище сломается уже во время работы — ролики не выдаются (503 ledger).
   const ledger = makeLedger({ file: path.join(ROOT, 'data', 'state', 'blocked-v1.json'), key: process.env[KEY_ENV], keyVersion: process.env[KEY_VERSION_ENV] || 'v1' });

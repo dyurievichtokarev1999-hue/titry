@@ -199,32 +199,43 @@ test('бот: нехватка после concern → ровно одна отп
   }
 });
 
-test('бот: сообщение нехватки с блоком помощи помещается в одно сообщение Telegram (4096) — с текущим help.json и с худшим набором из него', async () => {
+// Ограничитель (решение владельца 11.11 11:05): «реплика + пустая строка + helpMessage('concern')» ≤ 3500 знаков,
+// с запасом до лимита Telegram 4096. Падает тест — PR не сливается.
+test('ограничитель: реплика + пустая строка + блок помощи concern ≤ 3500 знаков (текущий help.json и худший набор из него)', async () => {
   assert.equal(TELEGRAM_TEXT_LIMIT, 4096);
+  const message = `${REPLY}\n\n${helpMessage('concern')}`;
+  assert.ok(message.length <= 3500, `длина ${message.length}`);
   const now = insufficientMessages(true);
-  assert.equal(now.length, 1);
-  assert.ok(now[0].length < TELEGRAM_TEXT_LIMIT, `длина ${now[0].length}`);
+  assert.deepEqual(now, [message], 'одно сообщение');
   assert.match(now[0], /112/, 'в блоке — проверенный номер');
   // Худший случай из файла: все контакты проверены, длинные часы работы.
   const cfg = JSON.parse(await fs.readFile(new URL('../config/help.json', import.meta.url), 'utf8'));
   const all = { region: cfg.region, contacts: [cfg.emergency, ...(cfg.contacts || [])].map((c) => ({ ...c, phone: c.phone || '8-800-000-00-00', hours: 'круглосуточно, бесплатно, анонимно, из любого региона' })) };
   const worst = insufficientMessages(true, { help: all });
-  assert.equal(worst.length, 1); assert.ok(worst[0].length < TELEGRAM_TEXT_LIMIT, `длина ${worst[0].length}`);
+  assert.equal(worst.length, 1); assert.ok(worst[0].length <= 3500, `длина ${worst[0].length}`);
 });
 
-test('бот: без concern help.json не читается; отказы блока помощи журналируются, а не делятся молча', () => {
+test('helpMessage никогда не пустой: concern и urgent содержат проверенный номер', () => {
+  for (const level of ['concern', 'urgent']) {
+    const t = helpMessage(level);
+    assert.ok(t.trim().length > 0, level);
+    assert.match(t, /112/, level);
+  }
+});
+
+test('защитная ветка деления: сначала блок помощи, затем реплика; в журнал — только код', () => {
   const logs = [];
-  const log = (stage, e) => logs.push(e.code);
-  // Без concern — только реплика, даже если чтение help.json сломано.
+  const log = (stage, e) => logs.push(JSON.stringify({ stage, ...e }));
+  // Без concern — только реплика, контакты не нужны.
   assert.deepEqual(insufficientMessages(false, { help: { get contacts() { throw new Error('не читать'); } }, log }), [REPLY]);
-  // help.json не читается → реплика уходит, код help_config в журнале.
-  const broken = { get contacts() { throw new Error('битый help.json'); } };
-  assert.deepEqual(insufficientMessages(true, { help: broken, log }), [REPLY]);
-  // Не помещается в 4096 → два сообщения подряд (реплика, блок) и код message_too_long, а не тихий отказ.
-  const huge = { contacts: [{ label: 'Ж'.repeat(5000), phone: '112' }] };
-  const parts = insufficientMessages(true, { help: huge, log });
-  assert.equal(parts.length, 2); assert.equal(parts[0], REPLY); assert.ok(parts[1].includes('Ж'.repeat(10)));
-  assert.deepEqual(logs, ['help_config', 'message_too_long']);
+  // Вместе длиннее 4096 (блок сам по себе ≤ 4096: длиннее не пропускает проверка при старте).
+  const long = { contacts: [{ label: 'Ж'.repeat(4096 - 200), phone: '112' }] };
+  assert.ok(helpMessage('concern', long).length <= 4096);
+  const parts = insufficientMessages(true, { help: long, log });
+  assert.equal(parts.length, 2);
+  assert.equal(parts[0], helpMessage('concern', long), 'сначала блок помощи');
+  assert.equal(parts[1], REPLY, 'затем реплика');
+  assert.deepEqual(logs, [JSON.stringify({ stage: 'insufficient', code: 'message_too_long' })]);
 });
 
 test('бот: нехватка без concern → ровно одна реплика, без блока помощи', async () => {
