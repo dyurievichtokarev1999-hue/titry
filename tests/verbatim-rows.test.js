@@ -459,7 +459,7 @@ test('бот: правка — собственные слова человек�
   });
 });
 
-test('бот: «N: текст» — роль и значение из слов текста правки; одно слово — прежняя роль, ошибка понятным текстом', () => {
+test('бот: «N: текст» — роль и значение из слов текста правки; пару не собрать — без прежней роли, ошибка понятным текстом', () => {
   const ep = sanitizeEpisode({ date: '2026-11-12', title: 'Т', genre: 'камерное кино', rows: [
     { role: 'Утром', value: 'пила чай', source: 'Утром пила чай' }, { role: 'Днём', value: 'мыла посуду', source: 'Днём мыла посуду' }] });
   assert.equal(applyEdit(ep, parseEdit('2: вечером гуляла в парке')), null);
@@ -467,8 +467,71 @@ test('бот: «N: текст» — роль и значение из слов �
   assert.equal(applyEdit(ep, parseEdit('1: работала')), null);
   const v = validateEpisode(ep, `Утром пила чай${EDIT_SEP}вечером гуляла в парке${EDIT_SEP}работала`);
   const msg = draftMessage(ep, v);
-  assert.match(msg, /Строка 1: .*«1: роль — текст»/);
-  assert.doesNotMatch(msg, /цитат/);
+  assert.match(msg, /Строка 1: нет роли\. Напиши её так: «1: роль — текст»/);
+  assert.doesNotMatch(msg, /цитат|утром/i);
+  // сон и «почти»: пару не собрать — прежняя роль («Утром») не остаётся и не называется «словом не из рассказа»
+  for (const t of ['2: мне снилось что я летала', '2: почти уснула за рулём']) {
+    const e2 = sanitizeEpisode({ date: '2026-11-12', title: 'Т', genre: 'камерное кино', rows: [
+      { role: 'Днём', value: 'мыла посуду', source: 'Днём мыла посуду' }, { role: 'Утром', value: 'пила чай', source: 'Утром пила чай' }] });
+    assert.equal(applyEdit(e2, parseEdit(t)), null);
+    const m = draftMessage(e2, validateEpisode(e2, `Днём мыла посуду${EDIT_SEP}${parseEdit(t).value}`));
+    assert.match(m, /Строка 2: нет роли/, t);
+    assert.doesNotMatch(m, /«утром»/, t);
+  }
+});
+
+test('бот (разбор 4196cbf): правка, дословно стоящая в рассказе, не получает признаки рассказа (настоящий createBot)', async () => {
+  for (const [story, edit] of [
+    ['Мама сказала. Я пила чай. Днём я мыла посуду.', '+ Я — пила чай'],
+    ['Мне снилось, что вечером гуляла в парке. Днём я мыла посуду. Утром я пила чай.', '+ Вечером — гуляла в парке'],
+    ['Если бы вечером гуляла в парке. Днём я мыла посуду. Утром я пила чай.', '+ Вечером — гуляла в парке'],
+    ['Я не пила чай. Днём я мыла посуду. Утром я ела кашу.', '+ Пила — чай'],
+  ]) {
+    await withBot(async ({ tg, say, play, rendered }) => {
+      await say(story);
+      await say('+ Днём — мыла посуду');
+      await say(edit);
+      assert.doesNotMatch(tg.sent.at(-1).text, /⚠ Строка/, `${story} | ${edit}: ${tg.sent.at(-1).text}`);
+      await play('c');
+      assert.equal(rendered.length, 1, edit);
+    });
+  }
+});
+
+test('правка не меняет проверку строки модели: признаки и «не» из правки на неё не переходят, обрезку не снимают', () => {
+  const ep = (row) => sanitizeEpisode({ date: '2026-11-12', title: 'Т', genre: 'камерное кино', rows: [
+    row, { role: 'Днём', value: 'мыла посуду', source: 'Днём я мыла посуду' }] });
+  const story = 'Утром я пила чай. Днём я мыла посуду.';
+  const row = { role: 'Утром', value: 'пила чай', source: 'Утром я пила чай' };
+  // правка со сном или чужими словами, где дословно стоит цитата строки модели, — строка модели годится
+  for (const edit of ['Мне снилось утром я пила чай', 'Мама сказала утром я пила чай']) {
+    assert.deepEqual(validateEpisode(ep(row), `${story}${EDIT_SEP}${edit}`).errors, [], edit);
+  }
+  // строка модели, обрезанная в рассказе после «не», правкой без «не» не «воскресает»
+  const cut = { role: 'Пила', value: 'чай', source: 'пила чай' };
+  const told = 'Утром я не пила чай. Днём я мыла посуду.';
+  assert.equal(validateEpisode(ep(cut), told).ok, false);
+  assert.equal(validateEpisode(ep(cut), `${told}${EDIT_SEP}Утром — пила чай с мамой`).ok, false);
+  // строка модели со сном в рассказе правкой без сна не «очищается»
+  const dream = { role: 'Утром', value: 'пила чай', source: 'Утром я пила чай' };
+  assert.equal(validateEpisode(ep(dream), `Мне снилось, что утром я пила чай. Днём я мыла посуду.${EDIT_SEP}Утром я пила чай`).ok, false);
+});
+
+test('правила черновика модели (покрытие после удаления тестов белого списка): манера речи, «отрубилась», опровержения', () => {
+  const ok = (story, row) => rowWordProblems(row, story).length === 0;
+  const row = { role: 'Анализы', value: 'хорошие', source: 'Анализы хорошие' };
+  // манера речи без сказанного в конце фразы не переносится на следующую; с адресатом или источником — переносится
+  assert.equal(ok('Брат кричал. Анализы хорошие.', row), true);
+  for (const lead of ['Брат орал на меня.', 'Я прочитала в газете.', 'Мама читала мне сказку.']) {
+    assert.equal(ok(`${lead} Анализы хорошие.`, row), false, lead);
+  }
+  // «отрубилась» — сон: следующая фраза под признаком сна
+  const tea = { role: 'Утром', value: 'пила чай', source: 'Утром я пила чай' };
+  assert.equal(ok('Утром я пила чай.', tea), true);
+  assert.equal(ok('Я отрубилась, и утром я пила чай.', tea), false);
+  // опровержения: «Это неправда.» и «Но это был сон.» снимают сказанное раньше
+  assert.equal(ok('Утром я пила чай. Это неправда.', tea), false);
+  assert.equal(ok('Утром я пила чай. Днём я мыла посуду. Но это был сон.', tea), false);
 });
 
 test('разделитель правок не приходит из рассказа; проверка безопасности читает правку как продолжение рассказа', async () => {
@@ -479,4 +542,14 @@ test('разделитель правок не приходит из расск�
   assert.equal(validateEpisode(ep, cleanInput(`Мне приснился сон.${EDIT_SEP}Я купила квартиру. Я пила кофе.`)).ok, false);
   // безопасность: «Я хочу» + правка «умереть» — urgent
   assert.equal(assessEpisodeRisk(joinEdits(`Я так устала. Я хочу${EDIT_SEP}умереть`), ep).level, 'urgent');
+});
+
+test('сообщение об обрезке после «не» — понятным текстом, без «цитаты»', () => {
+  const ep = sanitizeEpisode({ date: '2026-11-12', title: 'Т', genre: 'камерное кино', rows: [
+    { role: 'Пила', value: 'чай', source: 'пила чай' }, { role: 'Днём', value: 'мыла посуду', source: 'Днём я мыла посуду' }] });
+  const v = validateEpisode(ep, 'Утром я не пила чай. Днём я мыла посуду.');
+  assert.ok(v.errors.some((e) => e.kind === 'words:cut'), JSON.stringify(v.errors));
+  const msg = draftMessage(ep, v);
+  assert.match(msg, /Строка 1: в рассказе перед этими словами стоит «не» или похожее слово/);
+  assert.doesNotMatch(msg, /цитат/);
 });

@@ -423,9 +423,10 @@ function preSig(tokens, i) {
 
 /** Все вхождения цитаты в рассказ по границам слов: [{ cut, marks }] — cut: цитата начинается сразу после признака. */
 /** Разбор рассказа для quoteContext; последний разбор запоминается — заготовка проверяет много строк одного рассказа. */
-let storyCache = { story: null, data: null };
+// запоминаются несколько последних разборов: строки проверяются и по рассказу, и по рассказу без правок
+const storyCache = new Map();
 function storyAnalysis(story) {
-  if (storyCache.story === story) return storyCache.data;
+  if (storyCache.has(story)) return storyCache.get(story);
   const sents = sentencesOf(story);
   const toks = [], sid = [];
   sents.forEach((s, k) => s.words.forEach((w) => { toks.push(w); sid.push(k); }));
@@ -442,8 +443,10 @@ function storyAnalysis(story) {
   const prevSolid = new Array(toks.length + 1).fill(-1);
   // слова-паузы тоже прозрачны для обрезки: «Я не… Ну то есть… Пила чай.»
   for (let j = 1; j <= toks.length; j++) prevSolid[j] = TRANSPARENT.has(toks[j - 1]) || FILL.has(toks[j - 1]) ? prevSolid[j - 1] : j - 1;
-  storyCache = { story, data: { sents, toks, sid, cl, scopeBefore, negPronAfter, prevSolid } };
-  return storyCache.data;
+  const data = { sents, toks, sid, cl, scopeBefore, negPronAfter, prevSolid };
+  if (storyCache.size >= 4) storyCache.delete(storyCache.keys().next().value);
+  storyCache.set(story, data);
+  return data;
 }
 
 function quoteContext(source, story) {
@@ -494,13 +497,23 @@ export function rowWordProblems(row, story) {
   if (src.length > PHRASE_MAX_WORDS) return [{ field: 'source', kind: 'partial', words: [] }];
   const problems = [];
   let srcMarks = new Set();
-  const hasStory = typeof story === 'string' && story.trim() !== '';
-  const ctx = hasStory ? quoteContext(row.source, story) : [];
+  let hasStory = typeof story === 'string' && story.trim() !== '';
+  // Опора бота: рассказ, затем правки человека через EDIT_SEP. Правка — его собственные слова (решение 3б, 12.11):
+  // строка, чья цитата — целиком текст правки, проверяется только по этому тексту, признаки рассказа на неё не переходят.
+  // Остальные строки (черновик модели) — по самому рассказу: признаки и «не» из правок на них тоже не переходят.
+  let base = story;
+  if (hasStory && story.includes(EDIT_SEP)) {
+    const [told, ...edits] = story.split(EDIT_SEP);
+    const key = src.join(' ');
+    if (edits.some((b) => wordsOf(b).join(' ') === key)) hasStory = false;
+    else if (quoteContext(row.source, told).length) base = told;
+  }
+  const ctx = hasStory ? quoteContext(row.source, base) : [];
   // цитата есть в рассказе, но не целыми словами («е пила чай» из «не пила чай»): строка не годится
   if (hasStory && !ctx.length && sourceFound(row.source, story)) problems.push({ field: 'source', kind: 'partial', words: [] });
   if (ctx.length) {
     ctx.forEach((c) => c.marks.forEach((m) => srcMarks.add(m)));
-    // цитата встречается в рассказе и без обрезки (например, в правке человека) — годится; иначе нет
+    // цитата встречается в рассказе и без обрезки — годится; если везде обрезана — нет
     if (ctx.every((c) => c.cut)) problems.push({ field: 'source', kind: 'cut', words: [] });
   } else {
     sentencesOf(row.source).forEach((x) => x.marks.forEach((m) => srcMarks.add(m)));

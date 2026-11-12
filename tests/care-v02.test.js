@@ -182,7 +182,7 @@ test('бот: правка от самого человека становитс
   const bot = createBot({ safetyCheck: async () => false, tg, metrics: makeMetrics(path.join(dir, 'm.jsonl')), render, draft: (s, o) => makeDraft(s, { ...o, provider: 'manual' }) });
   const chat = { id: 6, type: 'private' };
   await bot.handleUpdate({ message: { chat, text: SAFE_STORY } });
-  // рассказ не от первого лица: заготовка строк не берёт (белый список формы фразы, решение 11.11) —
+  // заготовка без модели строк не предлагает (вариант 1, 12.11) —
   // человек добавляет строки сам, их слова становятся опорой
   await bot.handleUpdate({ message: { chat, text: '+ Утром — я кормила жирафа' } });
   await bot.handleUpdate({ message: { chat, text: '+ Вечером — я звонила другу' } });
