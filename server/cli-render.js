@@ -1,7 +1,7 @@
 // Рендер эпизода из JSON-файла: node server/cli-render.js episode.json [out.mp4] [preview|standard|hd]
 // Файл должен содержать { story, episode }: без исходного рассказа рендер не запускается.
 import fs from 'node:fs/promises';
-import { sanitizeEpisode, validateEpisode } from '../engine/episode.js';
+import { cleanInput, sanitizeEpisode, validateEpisode } from '../engine/episode.js';
 import { renderEpisode, closeRenderer } from './render.js';
 
 const [, , input, out, preset = 'standard'] = process.argv;
@@ -11,7 +11,8 @@ if (!input) {
 }
 const raw = JSON.parse(await fs.readFile(input, 'utf8'));
 const ep = sanitizeEpisode(raw.episode || raw);
-const story = typeof raw.story === 'string' ? raw.story : '';
+// разделитель правок бота из файла не принимается: рассказ сам не снимает признаки
+const story = typeof raw.story === 'string' ? cleanInput(raw.story) : '';
 const v = validateEpisode(ep, story);
 for (const w of v.warnings) console.warn('Предупреждение:', w.msg);
 if (!v.ok) {

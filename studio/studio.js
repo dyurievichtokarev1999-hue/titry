@@ -61,7 +61,7 @@ function renderRows() {
   state.episode.rows.forEach((r, i) => {
     const line = document.createElement('div');
     line.className = 'rowline';
-    for (const [k, ph] of [['role', 'Друг'], ['value', 'вечерний звонок'], ['source', 'друг позвонил поговорить']]) {
+    for (const [k, ph] of [['role', 'Друг'], ['value', 'позвонил поговорить'], ['source', 'друг позвонил поговорить']]) {
       const inp = document.createElement('input');
       inp.dataset.k = k; inp.placeholder = ph; inp.value = r[k] || '';
       inp.setAttribute('aria-label', `Строка ${i + 1}: ${k === 'role' ? 'роль' : k === 'value' ? 'значение' : 'цитата'}`);

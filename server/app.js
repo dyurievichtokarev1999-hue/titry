@@ -6,7 +6,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { MOODS, TRACKS, sanitizeEpisode, validateEpisode, episodeToText } from '../engine/episode.js';
+import { MOODS, TRACKS, sanitizeEpisode, validateEpisode, episodeToText, cleanInput } from '../engine/episode.js';
 import { makeDraft, hasClaudeCredentials, DEFAULT_MODEL, modelSafetyCheck } from './draft.js';
 import { renderEpisode, ROOT } from './render.js';
 import { logError, safeCode } from './errlog.js';
@@ -41,6 +41,10 @@ function send(res, code, body, type = 'application/json; charset=utf-8') {
   res.writeHead(code, { ...SECURITY, 'Content-Type': type, 'Content-Length': buf.length });
   res.end(buf);
 }
+
+/** Предел длины рассказа — как в makeDraft (server/draft.js). */
+const STORY_MAX = 6000;
+const TOO_LONG = 'Рассказ слишком длинный для одного эпизода.';
 
 async function readJson(req, limit = 200_000) {
   let size = 0; const chunks = [];
@@ -189,7 +193,7 @@ export function createApp({
 
     'POST /api/draft': async (req) => {
       const body = await readJson(req);
-      const story = body.story;
+      const story = typeof body.story === 'string' ? cleanInput(body.story) : body.story; // разделитель правок не приходит снаружи
       const draftStop = (risk) => safetyStop(risk, 'Черновик остановлен: сработал фильтр безопасности.');
       const before = gate.status(SCOPE, story);
       if (before.kind === 'safety') return draftStop({ level: 'urgent', byModel: true, matches: [] });
@@ -221,7 +225,7 @@ export function createApp({
     'POST /api/recheck': async (req) => {
       const body = await readJson(req);
       const ep = sanitizeEpisode(body.episode);
-      const story = String(body.story || '');
+      const story = cleanInput(body.story || '');
       const r = await gate.organizerRetry(SCOPE, story, ep, `${story}\n${episodeToText(ep)}`);
       if (r.ok) return { rechecked: true };
       if (r.notPaused) return { status: 409, body: { error: 'Для этого рассказа нет технической приостановки.' } };
@@ -233,15 +237,19 @@ export function createApp({
     'POST /api/validate': async (req) => {
       const body = await readJson(req);
       const ep = sanitizeEpisode(body.episode);
-      return { episode: ep, validation: validateSafeEpisode(ep, String(body.story || '')), text: episodeToText(ep) };
+      // длина рассказа ограничивается до проверки (тот же предел, что у черновика)
+      if (cleanInput(body.story || '').length > STORY_MAX) return { status: 413, body: { error: TOO_LONG } };
+      return { episode: ep, validation: validateSafeEpisode(ep, cleanInput(body.story || '')), text: episodeToText(ep) };
     },
 
     'POST /api/render': async (req) => {
       const body = await readJson(req);
       const ep = sanitizeEpisode(body.episode);
-      const story = String(body.story || '');
+      const story = cleanInput(body.story || '');
       const risk = assessEpisodeRisk(story, ep);
       if (risk.level === 'urgent') { gate.markSafety(SCOPE, story); return safetyStop(risk); }
+      // длина — после остановки по безопасности (длинный опасный рассказ всё равно останавливается), до проверки строк
+      if (story.length > STORY_MAX) return { status: 413, body: { error: TOO_LONG } };
       const v = validateSafeEpisode(ep, story);
       if (!v.ok) return { status: 422, body: { error: 'Исправьте ошибки перед рендером.', validation: v } };
       // Инвариант: после остановки по рассказу ни один запрос с ним не запускает рендер и не отдаёт ролик.

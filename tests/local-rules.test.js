@@ -146,7 +146,8 @@ test('Свойство: для любого рассказа S открытых 
 test('QH/QC/QF через настоящий /api/render (вариант QA: без «обещаний» и строки «Выводы»): QH — 422, рендер 0 при разрешающей модели', async () => {
   const story0 = ex.story.replace(/\s*Я хочу закончить здесь, без выводов и обещаний на завтра\.$/, '');
   assert.ok(!/обеща/.test(story0));
-  const episode = { ...structuredClone(ex.episode), rows: ex.episode.rows.filter((r) => r.role !== 'Выводы') };
+  const episode = { ...structuredClone(ex.episode), rows: ex.episode.rows.filter((r) => !/выводов/.test(r.source)) };
+  assert.equal(episode.rows.length, ex.episode.rows.length - 1, 'строка «Без выводов» убрана вместе с её фразой');
   const run = async (extra, safetyCheck) => {
     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-qh-'));
     let renders = 0;

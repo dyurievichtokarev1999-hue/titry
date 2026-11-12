@@ -5,8 +5,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS, episodeToText } from '../engine/episode.js';
-import { makeDraft, modelSafetyCheck, hasClaudeCredentials } from './draft.js';
+import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS, episodeToText, EDIT_SEP, cleanInput, joinEdits } from '../engine/episode.js';
+import { makeDraft, modelSafetyCheck, hasClaudeCredentials, pairFromSentence } from './draft.js';
 import { makeGate } from './gate.js';
 import { helpMessage, assessEpisodeRisk, validateSafeEpisode } from './safety.js';
 import { renderEpisode, ROOT } from './render.js';
@@ -38,10 +38,10 @@ export const TEXT = {
   voiceEmpty: 'Не получилось разобрать голосовое. Можно повторить или написать текстом.',
   editHelp: [
     'Как поправить:',
-    '<code>2: вечерний звонок</code> — новый текст строки 2',
-    '<code>2: Друг — вечерний звонок</code> — роль и текст',
+    '<code>2: вечером гуляла в парке</code> — новая строка 2 из твоих слов',
+    '<code>2: Вечером — гуляла в парке</code> — роль и текст',
     '<code>-3</code> — убрать строку 3',
-    '<code>+ Окно — долгий вечер</code> — добавить строку',
+    '<code>+ Ночью — смотрела в окно</code> — добавить строку',
     '<code>название: Письмо, которое ушло</code>',
     '<code>жанр: тихая драма</code>',
     '<code>после: Посуда — до завтра.</code> или <code>после: -</code>',
@@ -86,6 +86,13 @@ export function parseEdit(text) {
   return null;
 }
 
+/** Строка из правки человека: цитата — его роль и текст в том порядке, как editCorpus добавляет их в опору. */
+function ownRow(role, value) {
+  // Без обрезки: длинную роль или текст покажет проверка черновика понятной ошибкой длины.
+  // Правка человека — его собственные слова (решение 3б, 12.11): опора строки — сам текст правки.
+  return { role, value, source: `${role} ${value}`, own: true };
+}
+
 /** Применить правку к эпизоду. Номера строк — как в сообщении с черновиком (без фиксированных строк). */
 export function applyEdit(ep, cmd) {
   const rows = ep.rows;
@@ -97,18 +104,31 @@ export function applyEdit(ep, cmd) {
       rows.splice(idx, 1); return null;
     case 'add':
       if (rows.length >= LIMITS.rowsMax) return `Больше ${LIMITS.rowsMax} строк не поместится. Сначала убери одну.`;
-      rows.push({ role: cmd.role.slice(0, LIMITS.role), value: cmd.value.slice(0, LIMITS.value), source: cmd.value.slice(0, LIMITS.value) }); return null;
+      // Слова роли и значения — из цитаты этой же строки: цитата — то, что человек написал в правке (роль и текст).
+      rows.push(ownRow(cmd.role, cmd.value)); return null;
     case 'row':
       if (idx < 0 || idx >= rows.length) return `Строки ${cmd.n} нет.`;
-      if (cmd.role) rows[idx].role = cmd.role.slice(0, LIMITS.role);
-      rows[idx].value = cmd.value.slice(0, LIMITS.value);
-      rows[idx].source = rows[idx].value; // слова самого человека; бот добавляет правку в опору (editCorpus)
+      if (cmd.role) { rows[idx] = ownRow(cmd.role, cmd.value); return null; }
+      // Только новый текст: роль и значение берутся из слов этого же текста (правило 11.11 — без чужих слов).
+      // Если пару собрать не из чего, прежняя роль остаётся, проверка черновика покажет ошибку, ролик не соберётся;
+      // правку не отклоняем, чтобы её текст прошёл обычную проверку безопасности.
+      {
+        const pair = pairFromSentence(cmd.value, new Set(), cmd.value);
+        if (pair) { rows[idx] = { ...pair.row, own: true }; return null; }
+      }
+      // пару собрать не из чего (одно слово, сон, «почти»…): роли из этого текста нет — проверка покажет «нет роли»,
+      // а не «слово не из рассказа» про прежнюю роль, которой человек не писал
+      rows[idx].role = '';
+      rows[idx].value = cmd.value;
+      rows[idx].source = cmd.value;
+      rows[idx].own = true;
       return null;
     case 'title': if (!cmd.value) return 'Название не может быть пустым.'; ep.title = cmd.value.slice(0, LIMITS.title); return null;
     case 'genre': if (!cmd.value) return 'Жанр не может быть пустым.'; ep.genre = cmd.value.slice(0, LIMITS.genre); return null;
     case 'lead': ep.lead = (cmd.value || 'ты').slice(0, 24); return null;
     case 'post':
-      ep.post = cmd.value === '-' || !cmd.value ? { text: '', source: '' } : { text: cmd.value.slice(0, LIMITS.post), source: cmd.value.slice(0, LIMITS.post) };
+      ep.post = cmd.value === '-' || !cmd.value ? { text: '', source: '' } : { text: cmd.value, source: cmd.value, own: true };
+      // без обрезки, как в ownRow: опора — полный текст правки; длинную сцену покажет понятная ошибка длины
       return null;
     default: return 'Не понял правку.';
   }
@@ -122,6 +142,26 @@ export function editCorpus(cmd) {
 }
 
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+/** Ошибка проверки словами для человека: без «цитаты» и служебных терминов. */
+export function personMessage(e) {
+  if (!e) return '';
+  // строка без роли (правка «N: текст», из которого пару не собрать): подсказываем, как написать
+  const noRole = /^rows\.(\d+)\.role$/.exec(e.path || '');
+  if (noRole && /нет роли/.test(e.msg || '')) return `${e.msg} Напиши её так: «${+noRole[1] + 1}: роль — текст».`;
+  if (!String(e.kind || '').startsWith('words:')) return e.msg;
+  const n = e.row + 1;
+  const redo = `Напиши её заново своими словами: «${n}: роль — текст».`;
+  switch (e.kind) {
+    case 'words:long': return `Строка ${n}: роль — одно-два слова. ${redo}`;
+    case 'words:bound': return `Строка ${n}: в рассказе слово «${e.words[0]}» стоит с другими словами («не», «бы», «если», «сказала»…), а без них смысл другой. ${redo}`;
+    case 'words:cut': return `Строка ${n}: в рассказе перед этими словами стоит «не» или похожее слово, без него смысл другой. ${redo}`;
+    case 'words:ambiguous': return `Строка ${n}: слово «${e.words[0]}» в рассказе встречается и с «не», и без него. ${redo}`;
+    case 'words:empty': return `Строка ${n}: в ней не хватает слов. ${redo}`;
+    case 'words:missing': return `Строка ${n}: слово «${e.words[0]}» не из твоего рассказа. ${redo}`;
+    default: return `Строка ${n}: эти слова не складываются из твоего рассказа. ${redo}`;
+  }
+}
 
 /** Черновик в виде сообщения Telegram (HTML). */
 export function draftMessage(ep, validation) {
@@ -138,7 +178,7 @@ export function draftMessage(ep, validation) {
   if (ep.post && ep.post.text) lines.push('', `После титров: ${esc(ep.post.text)}`);
   lines.push('', `Плёнка: ${MOODS[ep.mood].film} · музыка: ${TRACKS[ep.music].file ? TRACKS[ep.music].title : 'тишина'}`);
   const problems = validation ? validation.errors : [];
-  if (problems.length) lines.push('', ...problems.map((e) => `⚠ ${esc(e.msg)}`));
+  if (problems.length) lines.push('', ...[...new Set(problems.map(personMessage))].map((m) => `⚠ ${esc(m)}`));
   lines.push('', 'Похоже на твой день? Любую строку можно поправить.');
   return lines.join('\n');
 }
@@ -432,7 +472,7 @@ export function createBot({
   async function doRender(chatId, s) {
     // Правки после черновика тоже проверяются: опасная строка не попадёт в ролик.
     if (s.verdict !== 'ok' || !s.episode) return tg.send(chatId, TEXT.noDraft);
-    const risk = assessEpisodeRisk(s.story, s.episode);
+    const risk = assessEpisodeRisk(joinEdits(s.story), s.episode); // правки — продолжение рассказа для проверки безопасности
     if (risk.level === 'urgent') return stopForSafety(chatId, s, 'urgent', { at: 'render' });
     const v = validateSafeEpisode(s.episode, s.story);
     if (!v.ok) { await showDraft(chatId, s); return; }
@@ -445,7 +485,7 @@ export function createBot({
     const story = s.story;
     // Отдельная проверка именно этой версии (рассказ + строки + пост + название/жанр) перед очередью.
     s.stage = 'rendering';
-    const g = await track(chatId, gate.verify(s.scope, original, ep, `${story}\n${episodeToText(ep)}`));
+    const g = await track(chatId, gate.verify(s.scope, original, ep, `${joinEdits(story)}\n${episodeToText(ep)}`));
     if (!alive(chatId, s) || s.draftId !== gen) return; // удалённая или заменённая сессия не оживает
     if (g.kind === 'safety') return stopForSafety(chatId, s, 'urgent', { at: 'check', byModel: true });
     if (!g.ok) {
@@ -495,7 +535,7 @@ export function createBot({
     const chatId = msg.chat.id;
     if (msg.chat.type !== 'private') return; // только личные чаты: истории не для групп
     const s = session(chatId);
-    const text = (msg.text || '').trim();
+    const text = cleanInput(msg.text || '').trim(); // разделитель правок не может прийти от человека
 
     if (text === '/start') { s.stage = 'idle'; s.period = 'day'; await metrics.log(chatId, 'start'); return tg.send(chatId, TEXT.start); }
     if (text === '/year') { s.stage = 'idle'; s.period = 'year'; await metrics.log(chatId, 'year'); return tg.send(chatId, TEXT.year); }
@@ -526,7 +566,7 @@ export function createBot({
       if (msg.voice.duration > MAX_VOICE_SECONDS) return tg.send(chatId, TEXT.voiceLong);
       await tg.action(chatId, 'typing');
       let story = '';
-      try { story = await transcribe(await tg.fileBuffer(msg.voice.file_id), { duration: msg.voice.duration }); }
+      try { story = cleanInput(await transcribe(await tg.fileBuffer(msg.voice.file_id), { duration: msg.voice.duration })); }
       catch (e) { logError('stt', e); }
       if (!alive(chatId, s)) return; // /delete во время распознавания: ничего не отвечаем
       if (!story) return tg.send(chatId, TEXT.voiceEmpty);
@@ -541,7 +581,8 @@ export function createBot({
         const err = applyEdit(s.episode, cmd);
         if (err) return tg.send(chatId, err);
         const own = editCorpus(cmd);
-        if (own) s.story = `${s.story}\n${own}`; // опора хранится только в памяти сессии
+        // правка — самостоятельный текст: отделена от рассказа, признаки рассказа на неё не переходят (сессия PR 14)
+        if (own) s.story = `${s.story}${EDIT_SEP}${own}`; // опора хранится только в памяти сессии
         s.edits = (s.edits || 0) + 1;
         s.stage = 'draft';
         return showDraft(chatId, s);

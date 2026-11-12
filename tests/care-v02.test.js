@@ -18,8 +18,8 @@ const SAFE_STORY = `Сегодня на работе обсуждали ${UNIQUE
 const goodEpisode = () => sanitizeEpisode({
   date: '2026-11-07', title: 'Жираф и звонок', genre: 'тёплая драма', mood: 'warm', music: 'warm',
   rows: [
-    { role: 'Работа', value: UNIQUE, source: `обсуждали ${UNIQUE}` },
-    { role: 'Друг', value: 'вечерний звонок', source: 'Вечером позвонил друг' },
+    { role: 'На работе', value: `обсуждали ${UNIQUE}`, source: `на работе обсуждали ${UNIQUE}` },
+    { role: 'Друг', value: 'вечером позвонил', source: 'Вечером позвонил друг' },
   ],
   post: { text: 'Ужин и сериал.', source: 'был ужин и сериал' },
 });
@@ -137,7 +137,7 @@ test('журнал монтажной не содержит текста рас�
       const text = await fs.readFile(path.join(dir, f), 'utf8');
       assert.ok(!text.includes('жираф'), 'нет уникальной фразы');
       assert.ok(!text.includes('позвонил друг'), 'нет цитат');
-      assert.ok(!text.includes('вечерний звонок'), 'нет текста строк');
+      assert.ok(!text.includes('вечером позвонил') && !text.includes('На работе'), 'нет текста строк');
       const rec = JSON.parse(text);
       assert.equal(rec.reaction, 'fit');
       assert.equal(rec.rows, 2);
@@ -182,11 +182,14 @@ test('бот: правка от самого человека становитс
   const bot = createBot({ safetyCheck: async () => false, tg, metrics: makeMetrics(path.join(dir, 'm.jsonl')), render, draft: (s, o) => makeDraft(s, { ...o, provider: 'manual' }) });
   const chat = { id: 6, type: 'private' };
   await bot.handleUpdate({ message: { chat, text: SAFE_STORY } });
-  await bot.handleUpdate({ message: { chat, text: '1: Работа — обсуждение жирафа' } });
+  // заготовка без модели строк не предлагает (вариант 1, 12.11) —
+  // человек добавляет строки сам, их слова становятся опорой
+  await bot.handleUpdate({ message: { chat, text: '+ Утром — я кормила жирафа' } });
+  await bot.handleUpdate({ message: { chat, text: '+ Вечером — я звонила другу' } });
   await bot.handleUpdate({ callback_query: { id: 'a', data: `play:${playId(tg)}`, message: { chat } } });
   assert.equal(rendered.length, 1);
-  assert.equal(rendered[0].ep.rows[0].value, 'обсуждение жирафа');
-  assert.ok(rendered[0].opts.story.includes('обсуждение жирафа'), 'правка человека — часть опоры');
+  assert.ok(rendered[0].ep.rows.some((r) => r.value === 'я кормила жирафа'));
+  assert.ok(rendered[0].opts.story.includes('я кормила жирафа'), 'правка человека — часть опоры');
 
   await bot.handleUpdate({ message: { chat, text: '2: не хочу больше жить' } });
   await bot.handleUpdate({ callback_query: { id: 'b', data: `play:${playId(tg)}`, message: { chat } } });
