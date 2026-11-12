@@ -406,3 +406,33 @@ test('адаптер Telegram: у вызова API есть предел ожи�
     clearInterval(keep);
   } finally { globalThis.fetch = saved; }
 });
+
+test('после экрана остановки или «не отправлю» поздний «безопасно» по другому сообщению не шлёт «Собираю ролик»', async () => {
+  for (const second of ['Убить себя', 'unknown']) {
+    const slow = deferred(); const r = deferred();
+    const failOther = () => { throw Object.assign(new Error('x'), { code: 'incomplete_response' }); };
+    const bb = setup({ render: () => r.promise, second: (t) => (t === 'Пила чай' ? slow.promise : failOther()) });
+    await bb.say(ex.story);
+    const p = bb.play();
+    await waitFor(() => bb.counters.render === 1);
+    const qa = bb.say('Пила чай'); await tick();
+    await bb.say(second === 'unknown' ? 'Хожу кругами' : second);
+    const n = bb.sent.length;
+    slow.resolve(false); await qa;
+    assert.equal(bb.sent.length, n, `${second}: после остановки/«не отправлю» обещаний ролика нет`);
+    r.resolve(); await p;
+    assert.equal(bb.counters.video, 0, second);
+  }
+});
+
+test('подпись к голосовому проверяется: безопасная расшифровка + опасная подпись → остановка, ролика нет', async () => {
+  const r = deferred();
+  const b = setup({ transcribe: async () => 'Пила чай', render: () => r.promise });
+  await b.say(ex.story);
+  const p = b.play();
+  await waitFor(() => b.counters.render === 1);
+  await b.bot.handleUpdate({ message: { chat, voice: { file_id: 'f', duration: 3 }, caption: 'Убить себя' } });
+  r.resolve(); await p;
+  assert.equal(b.counters.video, 0);
+  assert.match(b.sent.at(-1), URGENT_CARD);
+});

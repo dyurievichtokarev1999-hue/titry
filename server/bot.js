@@ -375,8 +375,9 @@ export function createBot({
   }
   async function stopForSafety(chatId, s, level, extra = {}) {
     applyStop(s);
-    await metrics.log(chatId, 'safety', { level, ...extra });
-    await tg.send(chatId, helpMessage('urgent'));
+    // Экран остановки — до записи в журнал: сбой или зависание журнала не задерживает помощь.
+    try { await tg.send(chatId, helpMessage('urgent')); }
+    finally { try { await metrics.log(chatId, 'safety', { level, ...extra }); } catch (e) { logError('metrics', e); } }
   }
 
   // Сессия ещё та же: не удалена через /delete и не заменена новой после истечения срока.
@@ -612,9 +613,12 @@ export function createBot({
       return sendSafe(chatId, unknownMsg(media ? 'unsupported' : 'check'));
     }
     if (media) return sendSafe(chatId, unknownMsg('unsupported')); // подпись безопасна, но вложение не проверено
+    // «Собираю ролик» (и эхо) — только если ролик ещё может уйти: доставка ждёт, предел не истёк, не было
+    // остановки и «неизвестно» по другому сообщению этой же доставки. Иначе — ничего: противоречивых обещаний нет.
+    const stillDelivering = () => s.delivering && (s.deliveryEpoch || 0) === epoch && !s.veto && s.verdict !== 'blocked';
+    if (!stillDelivering()) return;
     if (echo) await sendSafe(chatId, echo); // эхо расшифровки — только при безопасном исходе и необязательно
-    // «Собираю ролик» — только если доставка ещё ждёт (не истёк предел): обещание, которое бот выполнит.
-    if (s.delivering && (s.deliveryEpoch || 0) === epoch) return sendSafe(chatId, TEXT.rendering);
+    if (stillDelivering()) return sendSafe(chatId, TEXT.rendering);
   }
 
   async function onMessage(msg) {
@@ -667,12 +671,15 @@ export function createBot({
             story = await transcribe(await tg.fileBuffer(msg.voice.file_id), { duration: msg.voice.duration });
           } catch (e) { logError('stt', e); }
           story = String(story || '').trim();
+          const caption = typeof msg.caption === 'string' ? msg.caption.trim() : ''; // подпись к голосовому — тоже текст
           if (!story) {
             s.veto = true; // содержание голоса неизвестно — ролик не отправляется
             if (!alive(chatId, s)) return;
+            if (caption) return await duringRender(chatId, s, caption, { media: true }); // опасная подпись → остановка
             return await sendSafe(chatId, unknownMsg('voiceEmpty'));
           }
-          return await duringRender(chatId, s, story, { echo: `Расшифровка:\n«${story}»` }); // своё удержание — синхронно
+          const body = caption ? `${story}\n${caption}` : story;
+          return await duringRender(chatId, s, body, { echo: `Расшифровка:\n«${story}»` }); // своё удержание — синхронно
         } finally { releaseVoice(); }
       }
       await tg.action(chatId, 'typing');
