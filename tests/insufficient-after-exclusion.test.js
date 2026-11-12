@@ -2,12 +2,13 @@
 // обязательный элемент эпизода (title, genre или LIMITS.rowsMin строк). Шесть критериев редактора повествования.
 // Только вымышленные тексты: tests/fixtures/oi-intent.json и безопасный контроль.
 import test from 'node:test';
+import { modelLike } from './helpers/fake-model.js';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { makeDraft, draftRuleBased } from '../server/draft.js';
-import { insufficientAfterExclusion, INSUFFICIENT_AFTER_EXCLUSION, validateSafeEpisode, assessRisk, helpMessage, loadHelp } from '../server/safety.js';
+import { INSUFFICIENT_INVITE_TEXT, insufficientAfterExclusion, INSUFFICIENT_AFTER_EXCLUSION, validateSafeEpisode, assessRisk, helpMessage, loadHelp } from '../server/safety.js';
 import { createBot, TEXT, insufficientMessages, TELEGRAM_TEXT_LIMIT } from '../server/bot.js';
 import { createApp, INSUFFICIENT_TEXT } from '../server/app.js';
 import crypto from 'node:crypto';
@@ -17,6 +18,8 @@ import { LIMITS } from '../engine/episode.js';
 const OI = JSON.parse(await fs.readFile(new URL('./fixtures/oi-intent.json', import.meta.url), 'utf8')).cases;
 const byId = Object.fromEntries(OI.map((c) => [c.id, c.text]));
 const REPLY = 'Не получилось собрать титры только из твоих слов. Сегодня можно без ролика.';
+// В боте за репликой — приглашение написать строки правкой (вариант 1, 12.11); в монтажной — только реплика.
+const BOT_REPLY = `${REPLY}\n\n${INSUFFICIENT_INVITE_TEXT}`;
 const SAFE = 'Утром я пила чай. Вечером я пекла пирог.';
 // Concern-фрагмент + две безопасные пары: исключение есть, но материала хватает.
 const MIX = 'Я злюсь на брата и хочу его ударить. Утром я пила чай. Вечером я пекла пирог.';
@@ -25,7 +28,8 @@ const HELP = /помощ|112|телефон доверия|8-800/i;
 const THREAT_WORDS = /удар|убит|хочу\s+(?:его|её|ее)/i;
 // Concern по местному фильтру: OI07–OI12, кроме тех, что местный фильтр поднимает до urgent.
 const CONCERN = ['OI07', 'OI08', 'OI09', 'OI10', 'OI11', 'OI12'].filter((id) => assessRisk(byId[id]).level === 'concern');
-const manual = (story, o = {}) => makeDraft(story, { ...o, provider: 'manual' });
+// Вариант 1 (12.11): заготовка строк не даёт — черновик в этих тестах от поддельной модели (tests/helpers/fake-model.js).
+const manual = modelLike;
 
 // Подставной клиент модели: ответ черновика (end_turn, один текстовый блок) или сбой.
 const modelClient = (raw) => ({ beta: { messages: { create: async () => {
@@ -134,18 +138,24 @@ test('черновик модели не собирается после иск�
     { role: 'Вечером', value: 'пекла пирог', source: 'Вечером я пекла пирог' },
   ] });
   const r = await makeDraft(MIX, { provider: 'claude', client: modelClient(raw) });
-  assert.ok(!r.insufficient, 'заготовка собирается — это не нехватка');
+  // Вариант 1 (PR 13, 12.11): заготовка строк не даёт — черновик модели, опиравшийся на угрозу, ведёт к нехватке
+  // после исключения; черновика и текста угрозы в ответе нет.
+  assert.equal(r.insufficient, true);
+  assert.equal(r.code, 'insufficient_after_exclusion');
   assert.equal(r.provider, 'manual');
-  assert.equal(r.validation.ok, true, JSON.stringify(r.validation.errors));
-  assert.equal(r.episode.rows.length, 2);
-  assert.doesNotMatch(fields(r.episode), THREAT_WORDS);
+  assert.equal(r.episode, null);
+  assert.doesNotMatch(JSON.stringify(r), THREAT_WORDS);
   // Тот же рассказ без опорных безопасных пар: и модель, и заготовка не собираются → нехватка.
   const n = await makeDraft(byId.OI08, { provider: 'claude', client: modelClient({ ...raw, rows: [] }) });
   assert.equal(n.insufficient, true); assert.equal(n.episode, null);
 });
 
 test('пара без значения или без роли — не пригодна', () => {
-  const ep = draftRuleBased(MIX).episode;
+  const ep = { ...draftRuleBased(MIX).episode, rows: [
+    { role: 'Утром', value: 'пила чай', source: 'Утром я пила чай' },
+    { role: 'Вечером', value: 'пекла пирог', source: 'Вечером я пекла пирог' },
+  ] };
+  assert.equal(insufficientAfterExclusion(ep, MIX), false);
   ep.rows[1].value = '';
   assert.equal(insufficientAfterExclusion(ep, MIX), true);
 });
@@ -161,7 +171,7 @@ test('заготовка без ИИ проверяется validateSafeEpisode:
 // ── Бот: подставные safetyCheck и render ───────────────────────────────────
 
 const chat = { id: 88001, type: 'private' };
-function botSetup({ check = () => false, hasKey, draft = manual } = {}) {
+function botSetup({ check = () => false, hasKey, draft = modelLike } = {}) {
   const sent = []; const events = []; const counters = { render: 0, video: 0, check: 0 };
   const tg = {
     send: async (c, text, extra = {}) => { sent.push({ text, extra }); }, action: async () => {}, answer: async () => {},
@@ -190,7 +200,7 @@ test('бот: нехватка после concern → ровно одна отп
     const after = b.sent.slice(b.texts().indexOf(TEXT.working) + 1);
     assert.equal(after.length, 1, `${id}: ровно один вызов отправки`);
     assert.equal(after[0].extra.parse_mode, undefined, `${id}: без HTML-разметки — контакты не экранируются`);
-    assert.equal(after[0].text, `${REPLY}\n\n${helpMessage('concern')}`, `${id}: порядок «реплика → блок», без переходной фразы`);
+    assert.equal(after[0].text, `${BOT_REPLY}\n\n${helpMessage('concern')}`, `${id}: порядок «реплика (с приглашением) → блок», без переходной фразы`);
     for (const m of after) assert.equal(m.extra.reply_markup, undefined, `${id}: без кнопок`);
     assert.doesNotMatch(b.texts().join('\n'), /Сейчас важнее не титры/, `${id}: не карточка urgent`);
     assert.deepEqual(b.events, [{ event: 'insufficient_after_exclusion' }], `${id}: метрика без текста и номеров`);
@@ -205,7 +215,7 @@ test('бот: нехватка после concern → ровно одна отп
 // с запасом до лимита Telegram 4096. Падает тест — PR не сливается.
 test('ограничитель: реплика + пустая строка + блок помощи concern ≤ 3500 знаков (текущий help.json и худший набор из него)', async () => {
   assert.equal(TELEGRAM_TEXT_LIMIT, 4096);
-  const message = `${REPLY}\n\n${helpMessage('concern')}`;
+  const message = `${BOT_REPLY}\n\n${helpMessage('concern')}`;
   assert.ok(message.length <= 3500, `длина ${message.length}`);
   const now = insufficientMessages(true);
   assert.deepEqual(now, [message], 'одно сообщение');
@@ -229,14 +239,14 @@ test('защитная ветка деления: сначала блок пом
   const logs = [];
   const log = (stage, e) => logs.push(JSON.stringify({ stage, ...e }));
   // Без concern — только реплика, контакты не нужны.
-  assert.deepEqual(insufficientMessages(false, { help: { get contacts() { throw new Error('не читать'); } }, log }), [REPLY]);
+  assert.deepEqual(insufficientMessages(false, { help: { get contacts() { throw new Error('не читать'); } }, log }), [BOT_REPLY]);
   // Вместе длиннее 4096 (блок сам по себе ≤ 4096: длиннее не пропускает проверка при старте).
   const long = { contacts: [{ label: 'Ж'.repeat(4096 - 200), phone: '112' }] };
   assert.ok(helpMessage('concern', long).length <= 4096);
   const parts = insufficientMessages(true, { help: long, log });
   assert.equal(parts.length, 2);
   assert.equal(parts[0], helpMessage('concern', long), 'сначала блок помощи');
-  assert.equal(parts[1], REPLY, 'затем реплика');
+  assert.equal(parts[1], BOT_REPLY, 'затем реплика');
   assert.deepEqual(logs, [JSON.stringify({ stage: 'insufficient', code: 'message_too_long' })]);
 });
 
@@ -245,7 +255,7 @@ test('бот: нехватка без concern → ровно одна репли
   const b = botSetup({ draft });
   await b.say(SAFE);
   const after = b.sent.slice(b.texts().indexOf(TEXT.working) + 1);
-  assert.deepEqual(after.map((m) => m.text), [REPLY]);
+  assert.deepEqual(after.map((m) => m.text), [BOT_REPLY]);
   assert.doesNotMatch(b.texts().join('\n'), HELP);
   assert.equal(b.counters.check, 1, 'отдельная проверка до реплики');
 });
@@ -253,17 +263,17 @@ test('бот: нехватка без concern → ровно одна репли
 test('бот: две пары — обычный черновик, реплики нехватки нет', async () => {
   const b = botSetup();
   await b.say(SAFE);
-  assert.ok(!b.texts().includes(REPLY));
+  assert.ok(!b.texts().some((t) => t.startsWith(REPLY)));
   assert.ok(b.bot.sessions.get(chat.id).episode);
 });
 
 test('бот: отдельная проверка true → остановка, а не нехватка', async () => {
   const b = botSetup({ check: () => true });
   await b.say(byId.OI10);
-  assert.ok(!b.texts().includes(REPLY)); assert.match(b.texts().at(-1), HELP);
+  assert.ok(!b.texts().some((t) => t.startsWith(REPLY))); assert.match(b.texts().at(-1), HELP);
   // Повтор того же рассказа — снова остановка.
   await b.say(byId.OI10);
-  assert.ok(!b.texts().includes(REPLY)); assert.match(b.texts().at(-1), HELP);
+  assert.ok(!b.texts().some((t) => t.startsWith(REPLY))); assert.match(b.texts().at(-1), HELP);
 });
 
 test('бот: незавершённая проверка или нет ключа → технический ответ, а не нехватка', async () => {
@@ -275,10 +285,10 @@ test('бот: незавершённая проверка или нет ключ
   assert.equal(b.texts().at(-1), TEXT.checkPaused, 'второй неполный ответ — техническая пауза');
   await b.say(byId.OI10);
   assert.equal(b.texts().at(-1), TEXT.checkPaused, 'пауза держится, нехватка её не подменяет');
-  assert.ok(!b.texts().includes(REPLY));
+  assert.ok(!b.texts().some((t) => t.startsWith(REPLY)));
   const k = botSetup({ hasKey: () => false });
   await k.say(byId.OI10);
-  assert.equal(k.texts().at(-1), TEXT.checkUnavailable); assert.ok(!k.texts().includes(REPLY));
+  assert.equal(k.texts().at(-1), TEXT.checkUnavailable); assert.ok(!k.texts().some((t) => t.startsWith(REPLY)));
 });
 
 test('бот: /delete во время отдельной проверки → реплики нет, запрет по ответу true сохраняется', async () => {
@@ -289,7 +299,7 @@ test('бот: /delete во время отдельной проверки → р
   await b.say('/delete');
   release(true);
   await p;
-  assert.ok(!b.texts().includes(REPLY));
+  assert.ok(!b.texts().some((t) => t.startsWith(REPLY)));
   assert.ok(!b.events.some((e) => e.event === 'insufficient_after_exclusion'), 'после /delete метрика не пишется');
   await b.say(byId.OI10);
   assert.match(b.texts().at(-1), HELP, 'тот же рассказ после /delete — остановка');
@@ -303,14 +313,14 @@ test('бот: новый рассказ во время проверки → у�
   await b.say(SAFE);
   release(false);
   await p;
-  assert.ok(!b.texts().includes(REPLY));
+  assert.ok(!b.texts().some((t) => t.startsWith(REPLY)));
   assert.ok(b.bot.sessions.get(chat.id).episode, 'черновик нового рассказа на месте');
 });
 
 test('бот: местный urgent → помощь без отдельной проверки и без нехватки', async () => {
   const b = botSetup();
   await b.say(URGENT);
-  assert.match(b.texts().at(-1), HELP); assert.ok(!b.texts().includes(REPLY)); assert.equal(b.counters.check, 0);
+  assert.match(b.texts().at(-1), HELP); assert.ok(!b.texts().some((t) => t.startsWith(REPLY))); assert.equal(b.counters.check, 0);
 });
 
 // ── Критерий 6: ручная правка не обходит правило ───────────────────────────
@@ -326,7 +336,7 @@ test('бот: правка не возвращает исключённый фр
     await b.say(edit);
     if (s.episode) assert.equal(JSON.stringify(s.episode), was, `${edit}: черновик не изменён`);
     if (s.episode) assert.doesNotMatch(fields(s.episode), THREAT_WORDS, edit);
-    assert.ok(!b.texts().includes(REPLY), `${edit}: реплики нехватки нет`);
+    assert.ok(!b.texts().some((t) => t.startsWith(REPLY)), `${edit}: реплики нехватки нет`);
     await b.press(`play:${s.draftId}`);
     // Один вердикт на правку: либо остановка сразу на правке (тогда ролика нет), либо прежний черновик собирается
     // без остановки на «Смотреть» (разбор 940f41cc).
@@ -345,7 +355,7 @@ test('бот: правка не возвращает исключённый фр
 
 // ── Монтажная ───────────────────────────────────────────────────────────────
 
-async function withApp({ check = () => false, hasKey, draft = manual } = {}, fn) {
+async function withApp({ check = () => false, hasKey, draft = modelLike } = {}, fn) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-ins-'));
   const counters = { render: 0, check: 0 };
   const server = createApp({
@@ -496,12 +506,15 @@ test('заметка организатору при переходе на за�
     { role: 'Утром', value: 'пила чай', source: 'Утром я пила чай' },
     { role: 'Вечером', value: 'пекла пирог', source: 'Вечером я пекла пирог' },
   ] });
+  // Вариант 1 (PR 13, 12.11): заготовка строк не даёт, поэтому переход на неё — всегда нехватка без черновика и без
+  // заметки; в ответе нет текста рассказа.
   const a = await makeDraft(MIX, { provider: 'claude', client: modelClient(titleFromThreat) });
-  assert.match(a.note, /Название или жанр/);
   const fewRows = modelDraft({ rows: [{ role: 'Утром', value: 'пила чай', source: 'Утром я пила чай' }] });
   const b = await makeDraft(MIX, { provider: 'claude', client: modelClient(fewRows) });
-  assert.match(b.note, /не хватило строк/);
-  for (const r of [a, b]) assert.ok(!/злюсь|ударить|чай|пирог/i.test(r.note), 'в заметке нет текста рассказа');
+  for (const r of [a, b]) {
+    assert.equal(r.insufficient, true); assert.equal(r.episode, null);
+    assert.ok(!/злюсь|ударить|чай|пирог/i.test(JSON.stringify(r)), 'в ответе нет текста рассказа');
+  }
 });
 
 // Ветка «остановка на входе»: проверка прежней сессии (до /delete) вернула true уже после того, как тот же

@@ -5,10 +5,10 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS, episodeToText, plainPhrase, EDIT_SEP, cleanInput, joinEdits } from '../engine/episode.js';
-import { makeDraft, modelSafetyCheck, hasClaudeCredentials, pairFromSentence } from './draft.js';
+import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS, episodeToText, EDIT_SEP, cleanInput, joinEdits } from '../engine/episode.js';
+import { makeDraft, draftRuleBased, modelSafetyCheck, hasClaudeCredentials, pairFromSentence } from './draft.js';
 import { makeGate } from './gate.js';
-import { helpMessage, prepareHelp, assessRisk, assessEpisodeRisk, validateSafeEpisode, threatErrors, threatPronounFilter, INSUFFICIENT_TEXT, INSUFFICIENT_AFTER_EXCLUSION, INSUFFICIENT_MATERIAL, EDIT_NOT_IN_TITLES_TEXT, editNotInTitlesText, TELEGRAM_TEXT_LIMIT } from './safety.js';
+import { helpMessage, prepareHelp, assessRisk, assessEpisodeRisk, validateSafeEpisode, threatErrors, threatPronounFilter, INSUFFICIENT_TEXT, INSUFFICIENT_INVITE_TEXT, INSUFFICIENT_AFTER_EXCLUSION, INSUFFICIENT_MATERIAL, EDIT_NOT_IN_TITLES_TEXT, editNotInTitlesText, TELEGRAM_TEXT_LIMIT } from './safety.js';
 import { renderEpisode, ROOT } from './render.js';
 import { logError, safeCode } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS, cleanupVoiceOrphans } from './stt.js';
@@ -39,14 +39,13 @@ export const TEXT = {
   editExcluded: EDIT_NOT_IN_TITLES_TEXT, // текст — в server/safety.js; окончательный утверждает редактор
   editHelp: [
     'Как поправить:',
-    '<code>2: вечером я позвонила другу</code> — новая строка 2 из твоих слов',
-    '<code>2: Вечером — я позвонила другу</code> — роль и текст',
+    '<code>2: вечером гуляла в парке</code> — новая строка 2 из твоих слов',
+    '<code>2: Вечером — гуляла в парке</code> — роль и текст',
     '<code>-3</code> — убрать строку 3',
-    '<code>+ Ночью — я смотрела в окно</code> — добавить строку',
-    'Строка — простая фраза о себе: «я…» или «мы…», без «не», «что», кавычек и вопросов.',
+    '<code>+ Ночью — смотрела в окно</code> — добавить строку',
     '<code>название: Письмо, которое ушло</code>',
     '<code>жанр: тихая драма</code>',
-    '<code>после: Я оставила посуду до завтра.</code> или <code>после: -</code>',
+    '<code>после: Посуда — до завтра.</code> или <code>после: -</code>',
   ].join('\n'),
   noDraft: 'Сначала расскажи о дне: голосом или текстом.',
   fit: 'Хорошо. Ролик можно сохранить или переслать. На сегодня достаточно.',
@@ -72,6 +71,7 @@ export const TEXT = {
   // Внутренняя причина insufficient_after_exclusion (редактор повествования), дословно: только эта реплика —
   // без черновика, ролика, просьбы дописать и кнопок. Показывается только после stop и технических исходов.
   insufficient: INSUFFICIENT_TEXT, // текст — в server/safety.js
+  insufficientInvite: INSUFFICIENT_INVITE_TEXT, // текст — в server/safety.js; утверждает редактор
 };
 
 export { TELEGRAM_TEXT_LIMIT };
@@ -84,12 +84,14 @@ export { TELEGRAM_TEXT_LIMIT };
  * не бывает: это ошибка проверки при старте. Параметр help — только для тестов, он эту проверку обходит.
  */
 export function insufficientMessages(concern, { help, log = logError } = {}) {
-  if (!concern) return [TEXT.insufficient];
+  // Реплика нехватки и сразу приглашение написать строки правкой (решение владельца 12.11 11:05, вариант 1).
+  const reply = `${TEXT.insufficient}\n\n${TEXT.insufficientInvite}`;
+  if (!concern) return [reply];
   const block = help ? helpMessage('concern', help) : helpMessage('concern');
-  const one = `${TEXT.insufficient}\n\n${block}`;
+  const one = `${reply}\n\n${block}`;
   if (one.length <= TELEGRAM_TEXT_LIMIT) return [one];
   log('insufficient', { code: 'message_too_long' });
-  return [block, TEXT.insufficient];
+  return [block, reply];
 }
 
 /**
@@ -136,11 +138,8 @@ export function parseEdit(text) {
 /** Строка из правки человека: цитата — его роль и текст в том порядке, как editCorpus добавляет их в опору. */
 function ownRow(role, value) {
   // Без обрезки: длинную роль или текст покажет проверка черновика понятной ошибкой длины.
-  // Белый список формы фразы (решение 11.11): опорой становится только простое утверждение от первого лица.
-  // Иначе цитаты нет — проверка черновика покажет ошибку, ролик не соберётся; текст правки всё равно уходит
-  // в опору для проверки безопасности (editCorpus).
-  const text = `${role} ${value}`;
-  return { role, value, source: plainPhrase(text, text) ? text : '' };
+  // Правка человека — его собственные слова (решение 3б, 12.11): опора строки — сам текст правки.
+  return { role, value, source: `${role} ${value}` };
 }
 
 /** Применить правку к эпизоду. Номера строк — как в сообщении с черновиком (без фиксированных строк). */
@@ -166,16 +165,15 @@ export function applyEdit(ep, cmd) {
         const pair = pairFromSentence(cmd.value, new Set(), cmd.value);
         if (pair) { rows[idx] = { ...pair.row }; return null; }
       }
+      // пару собрать не из чего (одно слово): прежняя роль остаётся, опора — текст правки
       rows[idx].value = cmd.value;
-      rows[idx].source = ''; // не простое утверждение от первого лица — опоры нет, ролик не соберётся
+      rows[idx].source = cmd.value;
       return null;
     case 'title': if (!cmd.value) return 'Название не может быть пустым.'; ep.title = cmd.value.slice(0, LIMITS.title); return null;
     case 'genre': if (!cmd.value) return 'Жанр не может быть пустым.'; ep.genre = cmd.value.slice(0, LIMITS.genre); return null;
     case 'lead': ep.lead = (cmd.value || 'ты').slice(0, 24); return null;
     case 'post':
-      // сцена после титров — тоже только простое утверждение от первого лица (белый список); иначе опоры нет
-      ep.post = cmd.value === '-' || !cmd.value ? { text: '', source: '' }
-        : { text: cmd.value.slice(0, LIMITS.post), source: plainPhrase(cmd.value, cmd.value) ? cmd.value.slice(0, LIMITS.post) : '' };
+      ep.post = cmd.value === '-' || !cmd.value ? { text: '', source: '' } : { text: cmd.value.slice(0, LIMITS.post), source: cmd.value.slice(0, LIMITS.post) };
       return null;
     default: return 'Не понял правку.';
   }
@@ -193,10 +191,6 @@ const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replac
 /** Ошибка проверки словами для человека: без «цитаты» и служебных терминов. */
 export function personMessage(e) {
   if (!e) return '';
-  if (/нет цитаты из рассказа/.test(e.msg || '') && /^rows\.\d+\.source$/.test(e.path || '')) {
-    const k = Number(e.path.split('.')[1]) + 1;
-    return `Строка ${k}: напиши её простой фразой о себе, например «${k}: Утром — я пила чай».`;
-  }
   if (!String(e.kind || '').startsWith('words:')) return e.msg;
   const n = e.row + 1;
   const redo = `Напиши её заново своими словами: «${n}: роль — текст».`;
@@ -431,6 +425,7 @@ export function createBot({
   // Остановка по безопасности: прежний черновик уничтожается, рассказ запоминается как запрещённый.
   async function stopForSafety(chatId, s, level, extra = {}) {
     s.episode = null;
+    s.skeleton = null;
     s.verdict = 'blocked';
     s.draftId = (s.draftId || 0) + 1; // кнопки всех прежних черновиков перестают работать
     s.stage = 'help';
@@ -450,6 +445,7 @@ export function createBot({
   async function handleStory(chatId, s, story, source) {
     // Новый рассказ сразу отменяет прежний черновик: его кнопки больше ничего не запускают.
     s.episode = null;
+    s.skeleton = null;
     s.verdict = null;
     s.draftId = (s.draftId || 0) + 1;
     const gen = s.draftId; // поколение: результат ожидания применяется, только если оно всё ещё текущее
@@ -562,7 +558,10 @@ export function createBot({
       return tg.send(chatId, g.kind === 'technical' ? TEXT.checkPaused : TEXT.checkUnavailable);
     }
     if (!current()) return;
-    s.stage = 'idle'; // черновика нет: правки и кнопки не к чему применять
+    // Черновика нет, но человек может написать строки сам (вариант 1): правки ложатся на пустую заготовку эпизода
+    // (название, жанр, плёнка — из draftRuleBased, строк нет). Кнопок нет, пока нет черновика.
+    s.stage = 'compose';
+    s.skeleton = draftRuleBased(story, { date: todayIso(now()), period: s.period }).episode;
     await metrics.log(chatId, code === INSUFFICIENT_MATERIAL ? INSUFFICIENT_MATERIAL : INSUFFICIENT_AFTER_EXCLUSION);
     if (!current()) return;
     for (const text of insufficientMessages(concern)) await tg.send(chatId, text);
@@ -674,6 +673,11 @@ export function createBot({
     }
 
     if (!text) return;
+    // Пустая заготовка после нехватки: первая правка открывает черновик (рассказ уже прошёл ту же проверку,
+    // что перед репликой нехватки: остановка → технические исходы → нехватка).
+    if (s.stage === 'compose' && s.skeleton && !s.episode && parseEdit(text)) {
+      s.episode = s.skeleton; s.skeleton = null; s.verdict = 'ok'; s.edits = 0; s.stage = 'draft';
+    }
     if ((s.stage === 'draft' || s.stage === 'watched') && s.episode) {
       const cmd = parseEdit(text);
       if (cmd) {

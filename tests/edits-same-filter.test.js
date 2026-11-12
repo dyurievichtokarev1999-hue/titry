@@ -2,19 +2,22 @@
 // местоимение на человека из исключённой угрозы; обычная нехватка у заготовки — та же реплика, что после исключения.
 // Только вымышленные короткие примеры.
 import test from 'node:test';
+import { modelLike } from './helpers/fake-model.js';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { makeDraft, draftRuleBased, groundDraft } from '../server/draft.js';
 import { assessRisk, threatErrors, threatPhrase, threatSentences, threatPronounFilter, helpMessage, validateSafeEpisode,
-  INSUFFICIENT_TEXT, INSUFFICIENT_MATERIAL, INSUFFICIENT_AFTER_EXCLUSION, EDIT_NOT_IN_TITLES_TEXT, EDIT_NOT_IN_TITLES, editNotInTitlesText } from '../server/safety.js';
+  INSUFFICIENT_TEXT, INSUFFICIENT_INVITE_TEXT, INSUFFICIENT_MATERIAL, INSUFFICIENT_AFTER_EXCLUSION, EDIT_NOT_IN_TITLES_TEXT, EDIT_NOT_IN_TITLES, editNotInTitlesText } from '../server/safety.js';
 import { createBot, TEXT, editExcludedMessages } from '../server/bot.js';
 import { EDIT_SEP } from '../engine/episode.js';
 import { createApp } from '../server/app.js';
 import { rowWordsGrounded, wordsOf } from '../engine/episode.js';
 
 const REPLY = 'Не получилось собрать титры только из твоих слов. Сегодня можно без ролика.';
+// В боте за репликой — приглашение написать строки правкой (вариант 1, 12.11); в монтажной — только реплика.
+const BOT_REPLY = `${REPLY}\n\n${INSUFFICIENT_INVITE_TEXT}`;
 const SAFE = 'Утром я пила чай. Вечером я пекла пирог.';
 const ONE = 'Сегодня утром я долго пила чай.'; // одна фраза — у заготовки одна строка
 const URGENT = 'Сегодня всё валится из рук. Я не хочу больше жить.';
@@ -25,7 +28,7 @@ const fields = (ep) => [ep.title, ep.genre, ep.lead, ...(ep.rows || []).flatMap(
 const modelClient = (raw) => ({ beta: { messages: { create: async () => ({ stop_reason: 'end_turn', model: 'm', usage: {}, content: [{ type: 'text', text: JSON.stringify(raw) }] }) } } });
 const modelDraft = (over) => ({ title: 'Обычный день', genre: 'тихая драма', mood: 'quiet', grammatical_gender: 'unknown', safety_flag: false, rows: [], post: { text: '', source: '' }, ...over });
 
-function botSetup({ check = () => false, draft = manual } = {}) {
+function botSetup({ check = () => false, draft = modelLike } = {}) {
   const sent = []; const events = []; const counters = { render: 0, video: 0, check: 0 }; const checked = [];
   const tg = {
     send: async (c, text, extra = {}) => { sent.push({ text, extra }); }, action: async () => {}, answer: async () => {},
@@ -92,7 +95,7 @@ test('бот: рассказ без угрозы + правка «+ Брату �
   // С 15:05 словарь угроз поднимает уровень до concern: реплика и блок помощи concern одним сообщением.
   assert.equal(b.texts().at(-1), `${EDIT_NOT_IN_TITLES_TEXT}\n\n${helpMessage('concern')}`);
   assert.equal(TEXT.editExcluded, EDIT_NOT_IN_TITLES_TEXT, 'текст в одном месте');
-  assert.ok(!b.texts().includes(REPLY)); assert.doesNotMatch(b.texts().join('\n'), URGENT_CARD);
+  assert.ok(!b.texts().some((t) => t.startsWith(REPLY))); assert.doesNotMatch(b.texts().join('\n'), URGENT_CARD);
   assert.doesNotMatch(log + JSON.stringify(b.events), /жить|Брат/, 'текста правки нет в журнале и метриках');
   assert.deepEqual(b.events.at(-1), { event: 'edit_excluded', level: 'concern' });
   // Черновик без этой строки собирается; отдельная проверка видит и правку (контекст рассказа + правка).
@@ -122,7 +125,7 @@ test('бот: правка с concern → строка не берётся, ре
     const field = edit.startsWith('после') ? 'post' : 'rows.0';
     assert.equal(after[0].text, `${editNotInTitlesText(field)}\n\n${helpMessage('concern')}`, edit);
     assert.equal(JSON.stringify(b.s().episode), was, `${edit}: черновик прежний`);
-    assert.ok(!b.texts().includes(REPLY), edit); assert.doesNotMatch(b.texts().join('\n'), URGENT_CARD, edit);
+    assert.ok(!b.texts().some((t) => t.startsWith(REPLY)), edit); assert.doesNotMatch(b.texts().join('\n'), URGENT_CARD, edit);
     assert.doesNotMatch(log + JSON.stringify(b.events), /удар/, `${edit}: текста правки нет в журнале и метриках`);
   }
 });
@@ -134,7 +137,7 @@ test('бот: правка с urgent → остановка как у расск
   const log = await quiet(() => b.say('2: не хочу больше жить'));
   assert.equal(b.texts().at(-1), helpMessage('urgent'));
   assert.equal(b.s().episode, null);
-  assert.ok(!b.texts().includes(REPLY));
+  assert.ok(!b.texts().some((t) => t.startsWith(REPLY)));
   assert.deepEqual(b.events.at(-1), { event: 'safety', level: 'urgent', at: 'edit' });
   assert.doesNotMatch(log + JSON.stringify(b.events), /жить/);
   await b.press(`play:${old}`);
@@ -185,13 +188,14 @@ test('бот: правка «2: днём я гуляла в парке» к бе
 
 // ── п. 3: местоимение на человека из исключённой угрозы ─────────────────────
 
-test('заготовка: фраза с местоимением на человека из угрозы отбрасывается; другие люди и рассказы без угрозы — нет', () => {
+// Вариант 1 (12.11): заготовка строк не даёт; правило местоимений работает для черновика модели и для правок.
+test('черновик модели: фраза с местоимением на человека из угрозы отбрасывается; другие люди и рассказы без угрозы — нет', async () => {
   const st = 'Я бы убил брата. Он опять шумел. Утром я пила чай. Вечером я пекла пирог.';
   assert.equal(assessRisk(st).level, 'concern');
   const f = threatPronounFilter(st);
   assert.equal(f('Он опять шумел'), true);
   assert.equal(f('Утром я пила чай'), false);
-  const r = draftRuleBased(st);
+  const r = await modelLike(st);
   assert.doesNotMatch(fields(r.episode), /шумел/);
   assert.equal(r.episode.rows.length, 2);
   // Местоимение в предложении с угрозой («Я бы его убил») — тоже цель угрозы.
@@ -222,7 +226,7 @@ test('(а) makeDraft: нехватка у заготовки без исключ
   assert.equal(r.episode, null);
   assert.deepEqual(Object.keys(r).sort(), ['code', 'episode', 'insufficient', 'provider', 'risk']);
   // Две строки — обычный черновик.
-  const ok = await manual(SAFE);
+  const ok = await modelLike(SAFE);
   assert.ok(ok.episode); assert.ok(!ok.insufficient);
 });
 
@@ -230,7 +234,7 @@ test('(а) бот: нехватка у заготовки → только ре�
   const b = botSetup();
   await b.say(ONE);
   const after = b.sent.slice(b.texts().indexOf(TEXT.working) + 1).map((m) => m.text);
-  assert.deepEqual(after, [REPLY]);
+  assert.deepEqual(after, [BOT_REPLY]);
   assert.doesNotMatch(b.texts().join('\n'), /Нужно хотя бы|⚠/);
   assert.equal(b.s().episode, null);
   assert.deepEqual(b.events, [{ event: INSUFFICIENT_MATERIAL }]);
@@ -242,7 +246,7 @@ async function withApp(opts, fn) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-edits-'));
   const counters = { render: 0 };
   const server = createApp({
-    dataDir, draft: opts.draft || manual, safetyCheck: async () => false, hasKey: () => true,
+    dataDir, draft: opts.draft || modelLike, safetyCheck: async () => false, hasKey: () => true,
     render: async (e, o) => { counters.render++; return { seconds: 1, outPath: o.outPath }; },
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
@@ -266,7 +270,7 @@ test('(б) остановленный фильтром текст → тольк
   const b = botSetup();
   await b.say(URGENT);
   assert.match(b.texts().at(-1), URGENT_CARD);
-  assert.ok(!b.texts().includes(REPLY));
+  assert.ok(!b.texts().some((t) => t.startsWith(REPLY)));
   await withApp({}, async ({ post }) => {
     const r = await post('/api/draft', { story: URGENT });
     assert.equal(r.body.kind, 'safety');
@@ -285,8 +289,8 @@ test('(в) одна и та же реплика для модели и заго�
   const bm = botSetup({ draft: viaModel });
   const br = botSetup();
   await bm.say(ONE); await br.say(ONE);
-  assert.equal(bm.texts().at(-1), REPLY);
-  assert.equal(br.texts().at(-1), REPLY);
+  assert.equal(bm.texts().at(-1), BOT_REPLY);
+  assert.equal(br.texts().at(-1), BOT_REPLY);
   await withApp({ draft: viaModel }, async ({ post }) => {
     const r = await post('/api/draft', { story: ONE });
     assert.deepEqual(r.body, { kind: 'insufficient', error: REPLY });
@@ -294,7 +298,7 @@ test('(в) одна и та же реплика для модели и заго�
 });
 
 test('validateSafeEpisode по-прежнему пропускает обычный черновик из двух строк', async () => {
-  const r = await manual(SAFE);
+  const r = await modelLike(SAFE);
   assert.equal(validateSafeEpisode(r.episode, SAFE).ok, true);
 });
 
@@ -471,7 +475,7 @@ test('третий разбор, важно: пожелания смерти л�
   for (const t of ['Брат, чтоб ты сдох', 'Брату пусть сдохнет', 'Желаю брату сдохнуть', 'Чтоб он сдох', 'Сдохни, брат']) assert.equal(threatPhrase(t), true, t);
 });
 
-test('третий разбор, важно: «меня придушит» не попадает ни в пост, ни в название; заготовка не берёт такую фразу', async () => {
+test('третий разбор, важно: «меня придушит» не попадает ни в пост, ни в название; черновик модели не берёт такую фразу', async () => {
   for (const edit of ['после: Мама меня придушит за вазу', 'название: Мама меня придушит']) {
     const b = botSetup();
     await b.say(SAFE);
@@ -480,7 +484,7 @@ test('третий разбор, важно: «меня придушит» не 
   }
   for (const st of ['Утром я пила чай. Вечером я пекла пирог. Днём гуляла в парке. Мама меня придушит за вазу.',
     'Мама меня придушит за вазу. Утром я пила чай. Вечером я пекла пирог. Днём гуляла в парке.']) {
-    const r = await manual(st);
+    const r = await modelLike(st);
     assert.ok(r.episode, st);
     assert.doesNotMatch(fields(r.episode), /придушит/, st);
     assert.equal(r.validation.ok, true, JSON.stringify(r.validation.errors));
@@ -673,4 +677,49 @@ test('12.11, п. 2, седьмой разбор: бытовое «грохнул
     'Брату ногу переломали на тренировке.', 'Мужа прикончили в сериале.']) assert.equal(assessRisk(t).level, 'none', t);
   // Местоимение в прошедшем времени уровень не поднимает, но в титры строка не попадает.
   for (const t of ['Вечером — я закопала его', 'Я — оторвала ему руку']) assert.equal(threatPhrase(t), true, t);
+});
+
+// ── Вариант 1 (решение владельца 12.11 11:05): реплика нехватки + приглашение, строки — правкой ──
+
+test('вариант 1: нехватка у заготовки → реплика и приглашение одним сообщением; правки открывают черновик', async () => {
+  const b = botSetup({ draft: manual });
+  await b.say(SAFE);
+  assert.equal(b.texts().at(-1), BOT_REPLY);
+  assert.match(INSUFFICIENT_INVITE_TEXT, /\+ Утром — пила чай/);
+  assert.equal(b.s().episode, null, 'черновика нет до первой правки');
+  await b.say('+ Утром — пила чай');
+  assert.ok(b.s().episode);
+  assert.match(b.texts().at(-1), /Похоже на твой день/);
+  await b.say('+ Вечером — пекла пирог');
+  assert.equal(b.s().validation.ok, true, JSON.stringify(b.s().validation.errors));
+  await b.press(`play:${b.s().draftId}`);
+  assert.equal(b.counters.video, 1);
+  // Опора строк — сам текст правки; строки рассказа не предлагались.
+  assert.deepEqual(b.s().episode.rows.map((r) => r.source), ['Утром пила чай', 'Вечером пекла пирог']);
+});
+
+test('вариант 1: правки после нехватки проходят тот же фильтр и словарь угроз; новый рассказ сбрасывает заготовку', async () => {
+  const t = botSetup({ draft: manual });
+  await t.say(SAFE);
+  await t.say('+ Брату — не жить');
+  assert.ok(t.texts().at(-1).startsWith(EDIT_NOT_IN_TITLES.row));
+  assert.doesNotMatch(fields(t.s().episode || {}), /жить/);
+  const u = botSetup({ draft: manual });
+  await u.say(SAFE);
+  await u.say('+ Мысль — не хочу больше жить');
+  assert.equal(u.texts().at(-1), helpMessage('urgent'));
+  assert.equal(u.s().episode, null); assert.equal(u.s().skeleton, null);
+  const n = botSetup({ draft: manual });
+  await n.say(SAFE);
+  await n.say('Сегодня был совсем другой день, тихий и длинный.');
+  assert.equal(n.texts().at(-1), BOT_REPLY, 'не правка — новый рассказ');
+  assert.equal(n.s().episode, null);
+});
+
+test('вариант 1: нехватка после concern — реплика, приглашение и блок помощи одним сообщением (≤ 3500)', async () => {
+  const b = botSetup({ draft: manual });
+  await b.say('Я злюсь на брата и хочу его ударить. Утром я пила чай.');
+  const last = b.texts().at(-1);
+  assert.equal(last, `${BOT_REPLY}\n\n${helpMessage('concern')}`);
+  assert.ok(last.length <= 3500);
 });

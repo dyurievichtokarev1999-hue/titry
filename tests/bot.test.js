@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { applyEdit, createBot, draftMessage, makeMetrics, parseEdit } from '../server/bot.js';
+import { TEXT, applyEdit, createBot, draftMessage, makeMetrics, parseEdit } from '../server/bot.js';
 import { draftRuleBased } from '../server/draft.js';
 
 // Есть ли значение id среди значений полей журнала (рекурсивно). Подстроку не ищем:
@@ -24,14 +24,14 @@ test('разбор правок', () => {
 });
 
 test('правки применяются и соблюдают лимиты', () => {
+  // заготовка без модели строк не предлагает (вариант 1, 12.11): строки пишет человек
   const { episode } = draftRuleBased('Утром я работала. Днём я встретилась с другом. Вечером мы ужинали. Потом мы гуляли.', { date: '2026-11-05' });
+  assert.equal(episode.rows.length, 0);
+  for (const t of ['+ Утром — работала', '+ Днём — встреча с другом', '+ Вечером — ужинали']) assert.equal(applyEdit(episode, parseEdit(t)), null);
   const n = episode.rows.length;
-  // Белый список формы фразы (11.11): «Утро — работа» не простое утверждение от первого лица — опоры нет
   assert.equal(applyEdit(episode, { op: 'row', n: 1, role: 'Утро', value: 'работа' }), null);
-  assert.equal(episode.rows[0].source, '', 'не простая фраза о себе — опоры нет, ролик не соберётся');
-  // Цитата строки — то, что человек написал в правке целиком (роль и текст): слова роли тоже из неё (правило 11.11).
-  assert.equal(applyEdit(episode, { op: 'row', n: 1, role: 'Утром', value: 'я работала' }), null);
-  assert.equal(episode.rows[0].source, 'Утром я работала', 'отредактированная строка опирается на слова самого человека');
+  // Цитата строки — то, что человек написал в правке целиком (роль и текст): это его собственные слова (решение 3б).
+  assert.equal(episode.rows[0].source, 'Утро работа', 'отредактированная строка опирается на слова самого человека');
   assert.equal(applyEdit(episode, { op: 'delete', n: 99 }), 'Строки 99 нет.');
   assert.equal(applyEdit(episode, { op: 'delete', n: 1 }), null);
   assert.equal(episode.rows.length, n - 1);
@@ -65,14 +65,16 @@ test('сценарий бота: рассказ → правка → ролик 
   const render = async (ep, opts) => { rendered.push(ep); await fs.mkdir(path.dirname(opts.outPath), { recursive: true }); await fs.writeFile(opts.outPath, 'mp4'); return { outPath: opts.outPath, duration: 24, seconds: 1 }; };
   const bot = createBot({ safetyCheck: async () => false, tg, metrics, render, draft: (s, o) => import('../server/draft.js').then((m) => m.makeDraft(s, { ...o, provider: 'manual' })) });
   const chat = { id: 42, type: 'private' };
-  // Слияние с PR 14 (решение владельца 11.11 12:05, п. 4): без двух строк у заготовки — реплика нехватки без черновика,
-  // поэтому рассказ здесь даёт две строки от первого лица; правки добавляют ещё две.
-  const story = 'Утром я правил письмо. Днём я гулял в парке.';
+  // Слияние с PR 14 (вариант 1, 12.11): заготовка строк не даёт — реплика нехватки с приглашением, черновика с ⚠ нет;
+  // строки человек пишет сам правками, первая правка открывает черновик.
+  const story = 'Сегодня я долго правил письмо и отправил его. Вечером позвонил друг. Потом ужин и сериал.';
 
   await bot.handleUpdate({ message: { chat, text: '/start' } });
   await bot.handleUpdate({ message: { chat, text: story } });
-  assert.ok(tg.sent.some((m) => /Похоже на твой день/.test(m.text)));
+  assert.ok(tg.sent.some((m) => m.text === `${TEXT.insufficient}\n\n${TEXT.insufficientInvite}`));
+  assert.ok(!tg.sent.some((m) => /Похоже на твой день|⚠/.test(m.text)), 'черновика с ⚠ нет');
   await bot.handleUpdate({ message: { chat, text: '+ Утром — я отправил письмо' } });
+  assert.ok(tg.sent.some((m) => /Похоже на твой день/.test(m.text)));
   await bot.handleUpdate({ message: { chat, text: '+ Вечером — я смотрел сериал' } });
   await bot.handleUpdate({ callback_query: { id: 'q1', data: `mood:${playId(tg)}`, message: { chat } } });
   await bot.handleUpdate({ callback_query: { id: 'q2', data: `play:${playId(tg)}`, message: { chat } } });

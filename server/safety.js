@@ -665,6 +665,12 @@ export const INSUFFICIENT_MATERIAL = 'insufficient_material';
 /** Реплика при этой причине (редактор повествования), дословно. Единственное место текста: бот и монтажная берут отсюда. */
 export const INSUFFICIENT_TEXT = 'Не получилось собрать титры только из твоих слов. Сегодня можно без ролика.';
 /**
+ * Приглашение после реплики нехватки в боте (решение владельца 12.11 11:05, вариант 1): человек может написать строки
+ * сам правкой — его собственные слова, тот же фильтр безопасности и словарь угроз. ЧЕРНОВИК: текст утверждает редактор
+ * повествования. Единственное место текста.
+ */
+export const INSUFFICIENT_INVITE_TEXT = 'Если хочешь, строки можно написать самому или самой: «+ Утром — пила чай». Для титров нужно хотя бы две.';
+/**
  * Реплика, когда строку из правки человека не берём в титры (фраза из словаря угроз или часть, исключённая правилом
  * «угроза не в титрах»). Решение владельца 11.11 12:05, п. 2: нейтрально, без морали и без навязанного позитива.
  * ЧЕРНОВИК: окончательный текст утверждает редактор повествования. Единственное место текста.
@@ -746,7 +752,7 @@ export function prepareHelp(file = HELP_FILE) {
   for (const level of ['concern', 'urgent']) if (helpMessage(level, help).length > TELEGRAM_TEXT_LIMIT) throw fail();
   // Реплика нехватки идёт одним сообщением с блоком concern (бот): «реплика + пустая строка + блок» ≤ 3500,
   // с запасом до лимита Telegram (решение владельца 11.11 11:05). urgent с репликой не соединяется.
-  if (INSUFFICIENT_TEXT.length + 2 + helpMessage('concern', help).length > INSUFFICIENT_WITH_HELP_LIMIT) throw fail();
+  if (INSUFFICIENT_TEXT.length + 2 + INSUFFICIENT_INVITE_TEXT.length + 2 + helpMessage('concern', help).length > INSUFFICIENT_WITH_HELP_LIMIT) throw fail();
   preparedHelp = help;
   helpFailure = null;
   return help;
