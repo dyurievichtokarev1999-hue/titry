@@ -580,3 +580,37 @@ test('сообщение об обрезке после «не» — понят�
   assert.match(msg, /Строка 1: в рассказе перед этими словами стоит «не» или похожее слово/);
   assert.doesNotMatch(msg, /цитат/);
 });
+
+test('сцена после титров (разбор 66adcc7): слова — из её цитаты, признаки не оторваны; черновик модели и правка в боте', () => {
+  const STORY2 = 'Утром я пила чай. Днём я мыла посуду. Посуду домою завтра. Мне снилось, что я отдохнула.';
+  const ep = (post) => sanitizeEpisode({ date: '2026-11-12', title: 'Т', genre: 'камерное кино', rows: [
+    { role: 'Утром', value: 'пила чай', source: 'Утром я пила чай' }, { role: 'Днём', value: 'мыла посуду', source: 'Днём я мыла посуду' }], post });
+  // пример разбора: текст не из цитаты — ошибка, и в монтажной, и в черновике модели
+  const bad = { text: 'Я была счастлива весь день', source: 'Днём я мыла посуду' };
+  const v = validateEpisode(ep(bad), STORY2);
+  assert.ok(v.errors.some((e) => e.path === 'post.text' && e.kind === 'post:missing'), JSON.stringify(v.errors));
+  assert.doesNotMatch(v.errors.find((e) => e.path === 'post.text').msg, /цитат/);
+  const raw = { title: 'Т', genre: 'камерное кино', mood: 'quiet', rows: [
+    { role: 'Утром', value: 'пила чай', source: 'Утром я пила чай' }, { role: 'Днём', value: 'мыла посуду', source: 'Днём я мыла посуду' }] };
+  assert.equal(groundDraft({ ...raw, post: bad }, STORY2).episode.post.text, '');
+  // признак сна не отрывается
+  const dream = { text: 'Отдохнула', source: 'я отдохнула' };
+  assert.equal(validateEpisode(ep(dream), STORY2).ok, false);
+  assert.equal(groundDraft({ ...raw, post: dream }, STORY2).episode.post.text, '');
+  // слова из цитаты в форме рассказчика — годится
+  const good = { text: 'Посуду домою завтра', source: 'Посуду домою завтра' };
+  assert.deepEqual(validateEpisode(ep(good), STORY2).errors, []);
+  assert.equal(groundDraft({ ...raw, post: good }, STORY2).episode.post.text, 'Посуду домою завтра');
+  // правка «после: …» в боте — слова человека (own), проверяется по тексту правки
+  const e2 = ep(good);
+  assert.equal(applyEdit(e2, parseEdit('после: отдохнула во сне')), null);
+  assert.equal(e2.post.own, true);
+  assert.deepEqual(validateEpisode(sanitizeEpisode(e2), `${STORY2}${EDIT_SEP}отдохнула во сне`).errors, []);
+});
+
+test('строка модели (без own) — только по рассказу: цитата, которая есть лишь в правке, ей не опора (разбор 66adcc7)', () => {
+  const row = { role: 'Вечером', value: 'гуляла', source: 'Вечером гуляла' };
+  const story = `Утром я пила чай.${EDIT_SEP}Вечером гуляла в парке`;
+  assert.ok(rowWordProblems(row, story).some((p) => p.kind === 'absent'));
+  assert.deepEqual(rowWordProblems({ ...row, own: true, source: 'Вечером гуляла в парке' }, story), []);
+});

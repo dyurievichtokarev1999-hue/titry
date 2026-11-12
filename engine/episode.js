@@ -145,7 +145,6 @@ const REPORT_STEM = /^(сказ|говор|писа|напис|пиш|дума|�
 /** Чужие оценки: «Мама ругала меня, я плохая», «Начальник хвалил отчёт…». Возвратные «ругались» — не оценка. */
 const RATE = /^(обруга(л|ла|ли)|выруга(л|ла|ли)|отчита(л|ла|ли)|отчитыва(л|ла|ли|ет|ют|ешь)|хвал(ят|ит|ишь)|пристыди(л|ла|ли)|упрека(л|ла|ли|ет)|руга(л|ла|ли|ет|ют|ешь|ю)|отруга(л|ла|ли)|наруга(л|ла|ли)|хвали(л|ла|ли|т|шь)|хвалю|похвали(л|ла|ли)|оценил(а|и)?|оценива(л|ла|ет|ют)|критикова(л|ла|ли)|критику(ет|ют)|упрекнул(а)?|осуди(л|ла|ли))$/;
 const VERB_END = /(л|ла|ли|ло|лся|лась|лись|ю|ет|ют|ит|ят|ешь|ишь|ем|им|ете|ите|ть|ться|ется|ются|ал|яла|ял)$/;
-const SUBJECT = new Set(['я', 'ты', 'он', 'она', 'оно', 'мы', 'вы', 'они']);
 
 /** Латинские буквы, похожие на русские, внутри русского слова («нe» с латинской e). */
 const HOMO = { a: 'а', e: 'е', o: 'о', p: 'р', c: 'с', x: 'х', y: 'у', k: 'к', m: 'м', t: 'т', h: 'н', b: 'в' };
@@ -374,15 +373,10 @@ function scopeWord(toks, j) {
 }
 
 /**
- * Какие слова действуют на слово i до конца части фразы: «не стала пить чай» — «чай» под «не»;
+ * Какие слова действуют на каждое слово до конца части фразы: «не стала пить чай» — «чай» под «не»;
  * «без сахара и молока» — «молока» под «без»; «хотела уйти и хлопнуть дверью» — под «хотела».
- * «не я / не он» в той же части — под «не». Возвращает отсортированный список таких слов.
+ * «не я / не он» в той же части — под «не». Для каждого слова — отсортированный список; один проход, линейно.
  */
-function scopeOf(toks, cl, i) {
-  return scopesAll(toks, cl)[i];
-}
-
-/** То же для всех слов сразу, за один проход по частям фразы (линейно по длине). */
 function scopesAll(toks, cl) {
   const res = new Array(toks.length);
   let start = 0;
@@ -477,11 +471,6 @@ function quoteContext(source, story) {
   return out;
 }
 
-/** Цитата есть в рассказе как последовательность целых слов (а не кусок слова). */
-export function sourceFoundWhole(source, story) {
-  return wordsOf(source).length > 0 && quoteContext(source, story).length > 0;
-}
-
 /**
  * Ошибки слов строки относительно её цитаты: [{ field: 'role'|'value'|'source', kind, words }].
  * kind: missing — слова нет в цитате; bound — слово оторвано от признака или признак приставлен;
@@ -507,11 +496,15 @@ export function rowWordProblems(row, story) {
     const [told, ...edits] = story.split(EDIT_SEP);
     const key = src.join(' ');
     if (row.own === true && edits.some((b) => wordsOf(b).join(' ') === key)) hasStory = false;
-    else if (quoteContext(row.source, told).length) base = told;
+    else {
+      // строка модели (и любая без own) — только по рассказу: цитата из правки ей не опора
+      base = told;
+      if (!quoteContext(row.source, told).length) problems.push({ field: 'source', kind: 'absent', words: [] });
+    }
   }
   const ctx = hasStory ? quoteContext(row.source, base) : [];
   // цитата есть в рассказе, но не целыми словами («е пила чай» из «не пила чай»): строка не годится
-  if (hasStory && !ctx.length && sourceFound(row.source, story)) problems.push({ field: 'source', kind: 'partial', words: [] });
+  if (hasStory && !ctx.length && base === story && sourceFound(row.source, story)) problems.push({ field: 'source', kind: 'partial', words: [] });
   if (ctx.length) {
     ctx.forEach((c) => c.marks.forEach((m) => srcMarks.add(m)));
     // цитата встречается в рассказе и без обрезки — годится; если везде обрезана — нет
@@ -714,6 +707,7 @@ export function validateEpisode(ep, story) {
         long: `Строка ${i + 1}: роль — одно-два слова из цитаты.`,
         cut: `Строка ${i + 1}: цитата начинается сразу после «не» или похожего слова. Возьмите цитату вместе с ним.`,
         partial: `Строка ${i + 1}: цитата начинается или кончается посреди слова.`,
+        absent: `Строка ${i + 1}: цитата не найдена в самом рассказе (только в правке).`,
       }[pr.kind];
       errors.push({ ...field(`${p}.${pr.field}`, msg), kind: `words:${pr.kind}`, row: i, words: pr.words });
     }
@@ -727,6 +721,18 @@ export function validateEpisode(ep, story) {
     errors.push(field('post.source', 'У сцены после титров нет цитаты из рассказа.'));
   } else if (postText && hasStory && !sourceFound(post.source, story)) {
     errors.push(field('post.source', 'Цитата для сцены после титров не найдена в рассказе.'));
+  } else if (postText) {
+    // слова сцены после титров — из её цитаты, признаки не оторваны: как у строки (разбор 66adcc7)
+    const pr = rowWordProblems({ role: '', value: postText, source: post.source, own: post.own === true }, hasStory ? story : undefined)[0];
+    if (pr) {
+      const msg = {
+        missing: `Сцена после титров: ${pr.words.length > 1 ? 'слов' : 'слова'} ${pr.words.map((w) => `«${w}»`).join(', ')} нет в рассказе в этом месте.`,
+        bound: `Сцена после титров: в рассказе слово «${pr.words[0]}» стоит с другими словами («не», «бы», «если», «сказала»…), а без них смысл другой.`,
+        ambiguous: `Сцена после титров: слово «${pr.words[0]}» в рассказе встречается и с «не», и без него.`,
+        cut: 'Сцена после титров: в рассказе перед этими словами стоит «не» или похожее слово, без него смысл другой.',
+      }[pr.kind] || 'Сцена после титров: эти слова не складываются из рассказа.';
+      errors.push({ ...field('post.text', msg), kind: `post:${pr.kind}`, words: pr.words });
+    }
   }
   texts.push(postText);
 
@@ -760,7 +766,8 @@ export function sanitizeEpisode(input) {
     // строка из правки человека в боте (решение 3б): проверяется по тексту своей правки; без EDIT_SEP в опоре не действует
     ...(r && r.own === true ? { own: true } : {}),
   }));
-  ep.post = { text: clip(ep.post && ep.post.text, 120), source: clip(ep.post && ep.post.source, 400) };
+  ep.post = { text: clip(ep.post && ep.post.text, 120), source: clip(ep.post && ep.post.source, 400),
+    ...(ep.post && ep.post.own === true ? { own: true } : {}) };
   return ep;
 }
 
