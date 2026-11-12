@@ -24,14 +24,14 @@ test('разбор правок', () => {
 });
 
 test('правки применяются и соблюдают лимиты', () => {
+  // заготовка без модели строк не предлагает (вариант 1, 12.11): строки пишет человек
   const { episode } = draftRuleBased('Утром я работала. Днём я встретилась с другом. Вечером мы ужинали. Потом мы гуляли.', { date: '2026-11-05' });
+  assert.equal(episode.rows.length, 0);
+  for (const t of ['+ Утром — работала', '+ Днём — встреча с другом', '+ Вечером — ужинали']) assert.equal(applyEdit(episode, parseEdit(t)), null);
   const n = episode.rows.length;
-  // Белый список формы фразы (11.11): «Утро — работа» не простое утверждение от первого лица — опоры нет
   assert.equal(applyEdit(episode, { op: 'row', n: 1, role: 'Утро', value: 'работа' }), null);
-  assert.equal(episode.rows[0].source, '', 'не простая фраза о себе — опоры нет, ролик не соберётся');
-  // Цитата строки — то, что человек написал в правке целиком (роль и текст): слова роли тоже из неё (правило 11.11).
-  assert.equal(applyEdit(episode, { op: 'row', n: 1, role: 'Утром', value: 'я работала' }), null);
-  assert.equal(episode.rows[0].source, 'Утром я работала', 'отредактированная строка опирается на слова самого человека');
+  // Цитата строки — то, что человек написал в правке целиком (роль и текст): это его собственные слова (решение 3б).
+  assert.equal(episode.rows[0].source, 'Утро работа', 'отредактированная строка опирается на слова самого человека');
   assert.equal(applyEdit(episode, { op: 'delete', n: 99 }), 'Строки 99 нет.');
   assert.equal(applyEdit(episode, { op: 'delete', n: 1 }), null);
   assert.equal(episode.rows.length, n - 1);

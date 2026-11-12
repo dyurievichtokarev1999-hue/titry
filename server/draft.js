@@ -4,7 +4,7 @@
 // В обоих случаях каждая строка проверяется по рассказу: без цитаты в рассказе строка в титры не попадает.
 import { safeCode } from './errlog.js';
 import Anthropic from '@anthropic-ai/sdk';
-import { LIMITS, MOODS, blankEpisode, cleanInput, detectGender, isMarkerWord, plainPhrase, rowWordsGrounded, sanitizeEpisode, sourceFound, todayIso, validateEpisode, wordsOf } from '../engine/episode.js';
+import { LIMITS, MOODS, blankEpisode, cleanInput, detectGender, isMarkerWord, rowWordsGrounded, sanitizeEpisode, sourceFound, todayIso, validateEpisode, wordsOf } from '../engine/episode.js';
 import { assessRisk, threatSentences, touchesThreat, validateSafeEpisode } from './safety.js';
 
 export const DEFAULT_MODEL = process.env.TITRY_MODEL || 'claude-opus-5-5';
@@ -243,10 +243,6 @@ const ROLE_MODIFIERS = new Set(['весь', 'вся', 'все', 'целый', '�
   'один', 'одна', 'одно', 'два', 'две', 'три', 'четыре', 'пять', 'шесть', 'семь', 'восемь', 'девять', 'десять',
   'двадцать', 'тридцать', 'сорок', 'пятьдесят', 'сто', 'полтора', 'полторы', 'несколько', 'пару', 'пара']);
 
-function sentences(story) {
-  return String(story).split(/(?<=[.!?…])\s+|\n+/).map((s) => s.trim()).filter((s) => s.length > 2);
-}
-
 const trimEdge = (s) => s.replace(/^[\s,;:—–-]+|[\s,;:—–.!?…-]+$/g, '');
 /** Кавычки по краям значения без пары: «Ты уволен» не режется пополам. */
 const unbalancedQuotes = (s) => (s.match(/[«„“]/g) || []).length !== (s.match(/[»”]/g) || []).length || (s.match(/"/g) || []).length % 2 === 1;
@@ -267,8 +263,6 @@ export function pairFromSentence(sentence, usedRoles = new Set(), story = senten
   const source = trimEdge(String(sentence || '').replace(/[.!?…]+$/, ''));
   // из очень длинной фразы пару не берём: значение всё равно не уложится, а разбор станет долгим
   if (source.length > 1000) return null;
-  // белый список формы фразы (решение Claude 11.11): только простое утверждение от первого лица
-  if (!plainPhrase(sentence, story)) return null;
   const raw = source.split(/\s+/).filter((t) => wordsOf(t).length);
   // слова каждого токена считаются один раз: длинная фраза без точек разбирается линейно
   const memo = new Map();
@@ -334,40 +328,25 @@ export function pairFromSentence(sentence, usedRoles = new Set(), story = senten
 }
 
 /**
- * Заготовка без ИИ: из фраз рассказа — пары «роль — значение» только из слов самой фразы.
- * Это не готовые титры: монтажёр сокращает значения вручную. Если пригодных пар меньше LIMITS.rowsMin —
- * insufficient: true (нехватка материала), строки не дописываются.
+ * Заготовка без ИИ (вариант 1 — решение Claude 12.11 11:05): строк из рассказа не предлагает.
+ * Всегда нехватка (insufficient: true): реплику нехватки и приглашение написать строки правкой
+ * подключает PR 14. Человек пишет строки сам — это его собственные слова (решение 3б).
+ * Для реальных рассказов предложенные строки даёт только модельный слой.
  */
 export function draftRuleBased(story, { date = todayIso(), period = 'day' } = {}) {
   story = cleanInput(story); // разделитель правок не может прийти из рассказа
   const t = String(story).toLowerCase();
   // Настроение не названо — quiet как нейтральное оформление (редактор повествования, 10.11), не угаданное warm.
   const mood = (MOOD_WORDS.find(([re]) => re.test(t)) || [null, 'quiet'])[1];
-  // Предложения с угрозой другому человеку в заготовку не берутся (правило «угроза не становится титром»).
-  const threats = threatSentences(story);
-  const parts = sentences(story).filter((s) => !touchesThreat(s, threats, story));
-  const last = parts[parts.length - 1] || '';
-  // сцена после титров — тоже только из простого утверждения от первого лица (белый список формы фразы)
-  const post = parts.length > 3 && last.length <= 72 && plainPhrase(last, story) ? { text: last, source: last.replace(/[.!?…]+$/, '') } : { text: '', source: '' };
-  const pool = post.text ? parts.slice(0, -1) : parts;
-  const used = new Set();
-  const rows = [];
-  for (const s of pool) {
-    if (rows.length >= LIMITS.rowsMax) break;
-    const pair = pairFromSentence(s, used, story);
-    if (!pair) continue;
-    used.add(pair.roleKey);
-    rows.push(pair.row);
-  }
   const ep = sanitizeEpisode({
     ...blankEpisode({ date, mood, period }),
     title: period === 'year' ? 'Мой год' : 'Один день',
     genre: MOODS[mood].genre,
     gender: detectGender(story),
-    rows,
-    post,
+    rows: [],
+    post: { text: '', source: '' },
   });
-  return { episode: ep, dropped: [], insufficient: rows.length < LIMITS.rowsMin };
+  return { episode: ep, dropped: [], insufficient: true };
 }
 
 /**
