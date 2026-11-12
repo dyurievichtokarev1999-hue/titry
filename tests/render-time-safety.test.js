@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import { createBot, TEXT } from '../server/bot.js';
+import { createBot, TEXT, telegram } from '../server/bot.js';
 import { makeGate } from '../server/gate.js';
 import { helpMessage, helpContacts, assessRisk } from '../server/safety.js';
 
@@ -15,13 +15,15 @@ const good = async (st) => (assessRisk(st).level === 'urgent' ? { risk: assessRi
   : { episode: structuredClone(ex.episode), risk: { level: 'none' }, provider: 'claude', dropped: [] });
 const deferred = () => { let resolve; const promise = new Promise((r) => { resolve = r; }); return { promise, resolve }; };
 const tick = () => new Promise((r) => setImmediate(r));
+const unknownMsg = (why) => `${TEXT.unknownWhy[why]}\n${TEXT.unknownTail}\n\n${helpContacts()}`;
 
 // check(text): для текста ролика (содержит рассказ) — prior(), для второго сообщения — second(text).
 function setup({ prior = () => false, second = () => false, render, transcribe, holdWaitMs, chatId = chat.id, gateWrap } = {}) {
   const sent = []; const events = []; const counters = { video: 0, render: 0 };
   const h = {};
   const tg = {
-    send: async (c, text) => { if (h.failOn && h.failOn(text)) throw Object.assign(new Error('Telegram 500'), { status: 500 }); sent.push(text); }, action: async () => {}, answer: async () => {},
+    send: async (c, text) => { if (h.hangOn && h.hangOn(text)) return new Promise(() => {}); if (h.failOn && h.failOn(text)) throw Object.assign(new Error('Telegram 500'), { status: 500 }); sent.push(text); },
+    action: async () => (h.hangAction ? new Promise(() => {}) : undefined), answer: async () => {},
     fileBuffer: async () => Buffer.from(''), sendVideo: async () => { counters.video++; },
   };
   const metrics = { hash: () => 'fictional', log: async (id, ev, extra = {}) => { events.push({ ev, ...extra }); }, forget: async () => {} };
@@ -95,7 +97,7 @@ test('проверка второго сообщения не завершена
   await b.say(ex.story);
   const p = b.play(); await tick();
   await b.say('Пила чай');
-  assert.equal(b.sent.at(-1), `${TEXT.checkUnavailable}\n\n${helpContacts()}`);
+  assert.equal(b.sent.at(-1), unknownMsg('check'));
   d.resolve(false); await p;
   assert.equal(b.counters.video, 0);
 });
@@ -170,7 +172,7 @@ test('проверка сообщения зависла дольше преде
   d.resolve(false);
   await p;
   assert.equal(b.counters.video, 0);
-  assert.equal(b.sent.at(-1), `${TEXT.checkUnavailable}\n\n${helpContacts()}`);
+  assert.equal(b.sent.at(-1), unknownMsg('timeout'));
 });
 
 test('второе сообщение приходит, пока доставка уже ждёт первое: ждём оба; второе опасно → ролика нет', async () => {
@@ -275,7 +277,7 @@ test('голос во время подготовки: расшифровки н
   await b.voice();
   r.resolve(); await p;
   assert.equal(b.counters.video, 0);
-  assert.equal(b.sent.at(-1), `${TEXT.checkUnavailable}\n\n${helpContacts()}`);
+  assert.equal(b.sent.at(-1), unknownMsg('voiceEmpty'));
 });
 
 test('голос во время подготовки длиннее предела (не распознаётся) → ролик не отправляется', async () => {
@@ -336,4 +338,71 @@ test('кружок или аудиофайл во время подготовк�
     r.resolve(); await p;
     assert.equal(b.counters.video, 0, JSON.stringify(Object.keys(extra)));
   }
+});
+
+// Решение Claude 12.11 20:00, блокер 1: экран остановки не ждёт ни эха, ни typing, ни метрик.
+test('эхо расшифровки или typing никогда не завершаются → экран остановки отправлен, эха при urgent нет, ролика нет', async () => {
+  for (const mode of ['echo', 'typing']) {
+    const r = deferred();
+    const b = setup({ transcribe: async () => 'Убить себя', render: () => r.promise });
+    await b.say(ex.story);
+    const p = b.play();
+    await waitFor(() => b.counters.render === 1);
+    if (mode === 'echo') b.hangOn = (t) => t.startsWith('Расшифровка'); else b.hangAction = true;
+    await b.voice();
+    r.resolve(); await p;
+    assert.equal(b.counters.video, 0, mode);
+    assert.match(b.sent.at(-1), URGENT_CARD, mode);
+    assert.ok(!b.sent.some((t) => t.startsWith('Расшифровка')), `${mode}: эхо при urgent не отправляется`);
+  }
+});
+
+test('отказ отправки экрана остановки не ломает остальное: метрика остановки записана, ролика нет', async () => {
+  const d = deferred();
+  const b = setup({ prior: () => d.promise });
+  await b.say(ex.story);
+  const p = b.play(); await tick();
+  b.failOn = (t) => URGENT_CARD.test(t);
+  await b.say('Убить себя'); await tick();
+  d.resolve(false); await p;
+  assert.equal(b.counters.video, 0);
+  assert.ok(b.events.some((e) => e.ev === 'safety' && e.at === 'rendering'), 'после отказа отправки обработчик дошёл до метрики');
+});
+
+// Блокер 2: для каждого входа с неизвестным исходом — ролика нет, причина, «проверка не завершилась», контакты.
+test('неизвестный исход любого входа во время подготовки — ролик 0, объяснение и контакты', async () => {
+  const cases = [
+    ['длинное голосовое', (b) => b.voice(100000), 'voiceLong', { transcribe: async () => 'Пила чай' }],
+    ['распознавание выключено', (b) => b.voice(), 'voiceOff', {}],
+    ['пустая расшифровка', (b) => b.voice(), 'voiceEmpty', { transcribe: async () => '' }],
+    ['кружок', (b) => b.bot.handleUpdate({ message: { chat, video_note: { file_id: 'v' } } }), 'unsupported', {}],
+    ['аудиофайл', (b) => b.bot.handleUpdate({ message: { chat, audio: { file_id: 'a' } } }), 'unsupported', {}],
+    ['видео без подписи', (b) => b.bot.handleUpdate({ message: { chat, video: { file_id: 'w' } } }), 'unsupported', {}],
+    ['видео с безопасной подписью', (b) => b.bot.handleUpdate({ message: { chat, video: { file_id: 'w' }, caption: 'Пила чай' } }), 'unsupported', {}],
+    ['стикер', (b) => b.bot.handleUpdate({ message: { chat, sticker: { file_id: 's' } } }), 'unsupported', {}],
+  ];
+  for (const [name, act, why, opts] of cases) {
+    const r = deferred();
+    const b = setup({ render: () => r.promise, ...opts });
+    await b.say(ex.story);
+    const p = b.play();
+    await waitFor(() => b.counters.render === 1);
+    await act(b);
+    r.resolve(); await p;
+    assert.equal(b.counters.video, 0, name);
+    assert.equal(b.sent.at(-1), unknownMsg(why), name);
+  }
+});
+
+test('адаптер Telegram: у вызова API есть предел ожидания приложения', async () => {
+  const saved = globalThis.fetch;
+  globalThis.fetch = (url, opts) => new Promise((_, rej) => { if (opts && opts.signal) opts.signal.addEventListener('abort', () => rej(opts.signal.reason)); });
+  try {
+    const keep = setInterval(() => {}, 50); // AbortSignal.timeout не держит цикл событий
+    const tg = telegram('000:fictional', { callMs: 30 });
+    const t0 = Date.now();
+    await assert.rejects(tg.send(1, 'текст'), (e) => e && (e.name === 'TimeoutError' || e.name === 'AbortError'));
+    assert.ok(Date.now() - t0 < 2000);
+    clearInterval(keep);
+  } finally { globalThis.fetch = saved; }
 });

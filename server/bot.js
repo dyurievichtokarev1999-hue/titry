@@ -23,6 +23,8 @@ const WATERMARK = process.env.BOT_WATERMARK ?? 'сделано в титрах';
 const KNOWN_COMMANDS = new Set(['start', 'year', 'delete', 'help']);
 // Сколько доставка ролика ждёт проверок сообщений, пришедших во время подготовки (как ожидание соседей в шлюзе).
 export const HOLD_WAIT_MS = 120 * 1000;
+// Предел ожидания одного вызова Telegram API (кроме длинного опроса и загрузки видео).
+export const TELEGRAM_CALL_MS = 10 * 1000;
 
 export const TEXT = {
   start: [
@@ -66,6 +68,17 @@ export const TEXT = {
   recordUnknown: 'Проверить состояние служебной записи не получилось. Полное удаление не подтверждено.',
   // ИР-02: проверка недоступна — текст редактора повествования (PM-01, 9.11) дословно. Без срока и без карточки помощи.
   more: 'Расскажи чуть подробнее: что было, что запомнилось.',
+  // Неизвестный исход проверки сообщения во время подготовки ролика (решение Claude 12.11 20:00 блокер 2):
+  // строка причины + «проверка не завершилась» + блок контактов. ВРЕМЕННЫЕ формулировки — утверждает редактор.
+  unknownWhy: {
+    check: 'Сервис не завершил проверку сообщения.',
+    voiceLong: 'Это голосовое слишком длинное — разобрать его не получилось.',
+    voiceOff: 'Голосовые сейчас не распознаются.',
+    voiceEmpty: 'Голосовое разобрать не получилось.',
+    unsupported: 'Такие сообщения пока не получается проверить.',
+    timeout: 'Проверка сообщения заняла слишком много времени.',
+  },
+  unknownTail: 'Проверка не завершилась, поэтому ролик не отправлю.',
   checkUnavailable: 'Ролик задерживается: сервис не завершил проверку. Сейчас отправить его не получится. Ждать в чате и отвечать на это сообщение не нужно.',
   // Техническая приостановка — редактор повествования 14:42, принято владельцем 15:08, дословно.
   checkPaused: 'Сервис дважды не смог завершить проверку рассказа. Сейчас ролик не создаётся. Ждать в чате и отвечать на это сообщение не нужно.',
@@ -499,7 +512,7 @@ export function createBot({
         s.deliveryEpoch = (s.deliveryEpoch || 0) + 1;
         s.veto = true;
         logError('check', { code: 'timeout' });
-        if (current()) { s.stage = 'draft'; await tg.send(chatId, `${TEXT.checkUnavailable}\n\n${helpContacts()}`); }
+        if (current()) { s.stage = 'draft'; await sendSafe(chatId, unknownMsg('timeout')); }
         return;
       }
       // Исход «неизвестно» по сообщению во время подготовки — ролик не отправляется (решение Claude 12.11 15:10 п. 2).
@@ -544,6 +557,8 @@ export function createBot({
   };
   // Отправка, сбой которой не влияет на безопасность: в журнал — только код.
   const sendSafe = async (chatId, text, extra) => { try { await tg.send(chatId, text, extra); } catch (e) { logError('send', e); } };
+  // Неизвестный исход во время подготовки: одно сообщение — причина, «проверка не завершилась», блок контактов.
+  const unknownMsg = (why) => `${TEXT.unknownWhy[why] || TEXT.unknownWhy.check}\n${TEXT.unknownTail}\n\n${helpContacts()}`;
 
   // Принцип (решение Claude 12.11 15:10 п. 1): удержание доставки снимается только после ПРИМЕНЕНИЯ результата проверки.
   // decide() возвращает промис удержания: проверка → синхронное применение (остановка / запрет ролика) → готово.
@@ -566,32 +581,38 @@ export function createBot({
     })();
   }
 
-  async function duringRender(chatId, s, text, { echo } = {}) {
+  // echo — эхо расшифровки (только при безопасном исходе, после проверки); media — сообщение с нераспознаваемым
+  // вложением (кружок, аудио, видео): подпись проверяется, но ролик всё равно не отправляется («неизвестно»).
+  async function duringRender(chatId, s, text, { echo, media } = {}) {
     let body = String(text || '').trim();
     if (body.startsWith('/')) {
       const m = /^\/([A-Za-z]+)(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(body);
       const known = m && KNOWN_COMMANDS.has(m[1].toLowerCase());
       body = known ? (m[2] || '').trim() : body.replace(/^\/+/, '').trim();
     }
-    if (!body) return sendSafe(chatId, TEXT.rendering);
+    if (!body) return sendSafe(chatId, media ? unknownMsg('unsupported') : TEXT.rendering);
     const epoch = s.deliveryEpoch || 0;
     const hold = decide(s, body);
     holdDelivery(s, hold); // синхронно, до первого await
     const r = await track(chatId, hold);
     if (!alive(chatId, s)) return; // /delete во время проверки: ничего не отвечаем (запрет, если был, остаётся)
-    if (echo) await sendSafe(chatId, echo); // эхо расшифровки — после применения результата и необязательно
+    const logSafety = (extra) => Promise.resolve().then(() => metrics.log(chatId, 'safety', extra)).catch((e) => logError('metrics', e));
     if (r.kind === 'urgent') {
-      try { await metrics.log(chatId, 'safety', { level: 'urgent', at: 'rendering', byModel: !!r.byModel }); } catch (e) { logError('metrics', e); }
-      return sendSafe(chatId, helpMessage('urgent'));
+      // Экран остановки — первым и ни от чего не зависит: эха нет (повторять опасную фразу незачем), метрики — после.
+      await sendSafe(chatId, helpMessage('urgent'));
+      return logSafety({ level: 'urgent', at: 'rendering', byModel: !!r.byModel });
     }
     if (r.kind === 'concern') {
-      try { await metrics.log(chatId, 'safety', { level: 'concern', at: 'rendering' }); } catch (e) { logError('metrics', e); }
-      return sendSafe(chatId, helpMessage('concern'));
+      await sendSafe(chatId, helpMessage('concern'));
+      if (media) await sendSafe(chatId, unknownMsg('unsupported'));
+      return logSafety({ level: 'concern', at: 'rendering' });
     }
     if (r.kind === 'unknown') {
       logError('check', { code: r.code });
-      return sendSafe(chatId, `${TEXT.checkUnavailable}\n\n${helpContacts()}`);
+      return sendSafe(chatId, unknownMsg(media ? 'unsupported' : 'check'));
     }
+    if (media) return sendSafe(chatId, unknownMsg('unsupported')); // подпись безопасна, но вложение не проверено
+    if (echo) await sendSafe(chatId, echo); // эхо расшифровки — только при безопасном исходе и необязательно
     // «Собираю ролик» — только если доставка ещё ждёт (не истёк предел): обещание, которое бот выполнит.
     if (s.delivering && (s.deliveryEpoch || 0) === epoch) return sendSafe(chatId, TEXT.rendering);
   }
@@ -627,8 +648,11 @@ export function createBot({
     if (msg.voice) {
       const voiceRefused = !sttAvailable() && transcribe === transcribeOgg ? TEXT.voiceOff : msg.voice.duration > MAX_VOICE_SECONDS ? TEXT.voiceLong : null;
       if (voiceRefused) {
-        // Голос не распознаётся — содержание неизвестно: во время подготовки ролик не отправляется (правило 12.11 15:10).
-        if (s.delivering) s.veto = true;
+        // Голос не распознаётся — содержание неизвестно: во время подготовки ролика нет, причина и контакты.
+        if (s.delivering) {
+          s.veto = true;
+          return sendSafe(chatId, unknownMsg(voiceRefused === TEXT.voiceOff ? 'voiceOff' : 'voiceLong'));
+        }
         return tg.send(chatId, voiceRefused);
       }
       if (s.delivering) {
@@ -639,14 +663,14 @@ export function createBot({
         try {
           let story = '';
           try {
-            try { await tg.action(chatId, 'typing'); } catch (e) { logError('send', e); }
+            Promise.resolve().then(() => tg.action(chatId, 'typing')).catch((e) => logError('send', e)); // не ждём
             story = await transcribe(await tg.fileBuffer(msg.voice.file_id), { duration: msg.voice.duration });
           } catch (e) { logError('stt', e); }
           story = String(story || '').trim();
           if (!story) {
             s.veto = true; // содержание голоса неизвестно — ролик не отправляется
             if (!alive(chatId, s)) return;
-            return await sendSafe(chatId, `${TEXT.checkUnavailable}\n\n${helpContacts()}`);
+            return await sendSafe(chatId, unknownMsg('voiceEmpty'));
           }
           return await duringRender(chatId, s, story, { echo: `Расшифровка:\n«${story}»` }); // своё удержание — синхронно
         } finally { releaseVoice(); }
@@ -661,10 +685,17 @@ export function createBot({
       return handleStory(chatId, s, story, 'voice');
     }
 
-    // Кружок, аудиофайл или видео во время подготовки не распознаются — содержание неизвестно, ролик не отправляется.
-    if (s.delivering && (msg.video_note || msg.audio || msg.video)) s.veto = true;
-    // Подпись к фото или файлу во время подготовки проверяется как текст.
-    if (!text && s.delivering && typeof msg.caption === 'string' && msg.caption.trim()) return duringRender(chatId, s, msg.caption);
+    if (s.delivering && !text) {
+      // Кружок, аудиофайл, видео не распознаются — исход «неизвестно»: ролика нет, причина и контакты.
+      // Подпись проверяется как текст (при опасности — экран остановки). Прочие сообщения без текста и подписи
+      // (стикер, фото, файл) — тоже «неизвестно».
+      const media = !!(msg.video_note || msg.audio || msg.video);
+      const caption = typeof msg.caption === 'string' ? msg.caption.trim() : '';
+      if (media) s.veto = true;
+      if (caption) return duringRender(chatId, s, caption, { media });
+      s.veto = true;
+      return sendSafe(chatId, unknownMsg('unsupported'));
+    }
     if (!text) return;
     if (s.delivering) return duringRender(chatId, s, text);
     if ((s.stage === 'draft' || s.stage === 'watched') && s.episode) {
@@ -746,13 +777,17 @@ export function createBot({
 
 // ── Транспорт Telegram Bot API ───────────────────────────────────────────────
 
-export function telegram(token) {
+export function telegram(token, { callMs = TELEGRAM_CALL_MS } = {}) {
   const base = `https://api.telegram.org/bot${token}`;
+  // Предел ожидания приложения для каждого вызова API (решение Claude 12.11 20:00): зависший вызов не держит ветку.
+  // getUpdates — длинный опрос (30 с) с запасом; sendVideo — загрузка файла; остальное — TELEGRAM_CALL_MS.
+  const limitFor = (method) => (method === 'getUpdates' ? 45_000 : method === 'sendVideo' ? 120_000 : callMs);
   async function call(method, body) {
     const res = await fetch(`${base}/${method}`, {
       method: 'POST',
       headers: body instanceof FormData ? undefined : { 'Content-Type': 'application/json' },
       body: body instanceof FormData ? body : JSON.stringify(body || {}),
+      signal: AbortSignal.timeout(limitFor(method)),
     });
     const data = await res.json().catch(() => ({}));
     // status — код Telegram (401/403/429…): по нему оператор различает причину в обезличенном журнале.
@@ -766,7 +801,7 @@ export function telegram(token) {
     answer: (id) => call('answerCallbackQuery', { callback_query_id: id }).catch(() => {}),
     async fileBuffer(file_id) {
       const f = await call('getFile', { file_id });
-      const res = await fetch(`https://api.telegram.org/file/bot${token}/${f.file_path}`);
+      const res = await fetch(`https://api.telegram.org/file/bot${token}/${f.file_path}`, { signal: AbortSignal.timeout(30_000) });
       if (!res.ok) throw new Error(`Telegram file ${res.status}`);
       return Buffer.from(await res.arrayBuffer());
     },
