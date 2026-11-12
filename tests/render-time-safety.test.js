@@ -436,3 +436,15 @@ test('подпись к голосовому проверяется: безоп�
   assert.equal(b.counters.video, 0);
   assert.match(b.sent.at(-1), URGENT_CARD);
 });
+
+test('отклонённое голосовое (слишком длинное) с опасной подписью → экран остановки, ролика нет', async () => {
+  const r = deferred();
+  const b = setup({ transcribe: async () => 'Пила чай', render: () => r.promise });
+  await b.say(ex.story);
+  const p = b.play();
+  await waitFor(() => b.counters.render === 1);
+  await b.bot.handleUpdate({ message: { chat, voice: { file_id: 'f', duration: 100000 }, caption: 'Убить себя' } });
+  r.resolve(); await p;
+  assert.equal(b.counters.video, 0);
+  assert.match(b.sent.at(-1), URGENT_CARD);
+});

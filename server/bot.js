@@ -655,6 +655,8 @@ export function createBot({
         // Голос не распознаётся — содержание неизвестно: во время подготовки ролика нет, причина и контакты.
         if (s.delivering) {
           s.veto = true;
+          const cap = typeof msg.caption === 'string' ? msg.caption.trim() : '';
+          if (cap && assessRisk(cap).level !== 'none') return duringRender(chatId, s, cap, { media: true }); // опасная подпись
           return sendSafe(chatId, unknownMsg(voiceRefused === TEXT.voiceOff ? 'voiceOff' : 'voiceLong'));
         }
         return tg.send(chatId, voiceRefused);
