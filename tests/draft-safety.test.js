@@ -50,13 +50,17 @@ test('черновик модели: строки без дословной ци
       // во фразе есть «написал» — признак чужих или своих слов (владелец 11.11 13:05): строка берёт его
       { role: 'Резкий черновик', value: 'написал', source: 'написал резкий черновик ответа' },
     ],
-    post: { text: 'Злость ещё здесь.', source: 'Злость ещё со мной' },
+    post: { text: 'Злость ещё со мной.', source: 'Злость ещё со мной' },
   };
   const { episode, dropped } = groundDraft(raw, STORY, { date: '2026-11-04' });
   assert.equal(episode.rows.length, 2);
   assert.equal(dropped.length, 1);
   assert.equal(episode.gender, null, 'модель сказала f, слова человека говорят m → род неизвестен');
-  assert.equal(episode.post.text, 'Злость ещё здесь.');
+  assert.equal(episode.post.text, 'Злость ещё со мной.');
+  // слово сцены после титров не из её цитаты («здесь») — сцена отбрасывается (разбор 66adcc7)
+  const other = groundDraft({ ...raw, post: { text: 'Злость ещё здесь.', source: 'Злость ещё со мной' } }, STORY, { date: '2026-11-04' });
+  assert.equal(other.episode.post.text, '');
+  assert.equal(other.dropped.length, 2);
 });
 
 test('draftWithClaude: запрос и разбор ответа (клиент подменён)', async () => {

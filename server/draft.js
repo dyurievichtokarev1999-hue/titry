@@ -4,7 +4,7 @@
 // В обоих случаях каждая строка проверяется по рассказу: без цитаты в рассказе строка в титры не попадает.
 import { safeCode } from './errlog.js';
 import Anthropic from '@anthropic-ai/sdk';
-import { LIMITS, MOODS, blankEpisode, cleanInput, detectGender, isMarkerWord, rowWordsGrounded, sanitizeEpisode, sourceFound, todayIso, validateEpisode, wordsOf } from '../engine/episode.js';
+import { LIMITS, MOODS, blankEpisode, cleanInput, detectGender, isMarkerWord, rowWordProblems, rowWordsGrounded, sanitizeEpisode, sourceFound, todayIso, validateEpisode, wordsOf } from '../engine/episode.js';
 import { assessRisk, threatSentences, touchesThreat, threatPhrase, threatPronounFilter, validateSafeEpisode, insufficientAfterExclusion, INSUFFICIENT_AFTER_EXCLUSION, INSUFFICIENT_MATERIAL } from './safety.js';
 
 export const DEFAULT_MODEL = process.env.TITRY_MODEL || 'claude-opus-5-5';
@@ -21,7 +21,7 @@ export const SYSTEM_PROMPT = `Ты — монтажёр «Титров». Чел
 - title: название эпизода, 2–5 слов, из событий рассказа. Без кавычек.
 - genre: жанр, 1–3 слова, как в кино: «тёплая драма», «тихая драма», «драма без развязки», «камерное кино», «комедия положений». Не диагноз и не оценка.
 - rows: от 3 до 6 строк «роль — значение». Роль и значение — одно-два слова из рассказа в той форме, как сказаны. Значение можно длиннее, до 6 слов, только чтобы сохранить отрицание, время, условие, сомнение или чьи это слова. Все слова роли и значения берутся из source этой строки без изменения формы и без новых слов. Примеры: из «утром я пила чай» — «Утром — пила чай»; из «я не пила кофе» — «Кофе — не пила». Слово, перед которым стоит «не» или «ни», бери только вместе с ним. Если во фразе есть «нет», «если», «бы», «почти», «может», «сказала, что», «думала», «снилось», это слово тоже должно быть в строке.
-- post: «сцена после титров» — одна короткая строка о том, что остаётся на потом или с чем человек остаётся сегодня. Только из его слов. Если ничего подходящего нет, верни пустой text.
+- post: «сцена после титров» — одна короткая строка о том, что остаётся на потом или с чем человек остаётся сегодня. Только из его слов: слова текста — из source в той форме, как сказаны, без отрыва от «не», «бы», «если» и чужих слов. Если ничего подходящего нет, верни пустой text.
 - mood: warm, sad, anger или quiet — по тому, что человек сам сказал о своём дне. Если настроение не названо или нельзя выбрать одно без догадки, quiet как нейтральное оформление. quiet не означает, что человек спокоен. Чувства, названные в рассказе, сохраняй в строках; не добавляй чувств из-за выбранной плёнки. Сарказм учитывай только когда его пояснил сам автор.
 - grammatical_gender: f или m, только если рассказчик сам говорит о себе в прошедшем времени («я устала» → f, «я устал» → m). Реплики других людей в кавычках или после «написал(а):», «сказал(а):» не учитывай. Если формы противоречат друг другу или граница чужой реплики неясна — unknown. Не угадывай по имени.
 - safety_flag: true, если в рассказе есть желание умереть, самоповреждение, мысли о самоубийстве или прямая опасность для человека. Иначе false.
@@ -137,7 +137,10 @@ export function groundDraft(raw, story, { date = todayIso(), period = 'day' } = 
     if (sourceFound(r.source, story) && rowWordsGrounded(r, story) && !threat(r.role, r.value, r.source) && !threatPhrase(`${r.role || ''} ${r.value || ''}`) && !pronounToThreat(r.source)) rows.push({ role: r.role, value: r.value, source: r.source });
     else dropped.push(r);
   }
-  const post = raw.post && raw.post.text && sourceFound(raw.post.source, story) && !threat(raw.post.text, raw.post.source)
+  // сцена после титров — как строка: слова из её цитаты, признаки не оторваны (PR 13); угроза и словарь угроз,
+  // местоимение на человека из угрозы — как у строк (PR 14)
+  const post = raw.post && raw.post.text && sourceFound(raw.post.source, story)
+    && rowWordProblems({ role: '', value: raw.post.text, source: raw.post.source }, story).length === 0 && !threat(raw.post.text, raw.post.source)
     && !threatPhrase(raw.post.text) && !pronounToThreat(raw.post.source)
     ? { text: raw.post.text, source: raw.post.source } : { text: '', source: '' };
   if (raw.post && raw.post.text && !post.text) dropped.push({ role: 'после титров', ...raw.post });
