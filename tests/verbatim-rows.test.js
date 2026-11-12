@@ -614,3 +614,19 @@ test('строка модели (без own) — только по расска�
   assert.ok(rowWordProblems(row, story).some((p) => p.kind === 'absent'));
   assert.deepEqual(rowWordProblems({ ...row, own: true, source: 'Вечером гуляла в парке' }, story), []);
 });
+
+test('бот: правка «после: …» длиннее предела — понятная ошибка длины, а не «слова не из рассказа» (разбор 49c6bf3)', async () => {
+  await withBot(async ({ tg, say }) => {
+    await say('Утром я пила чай. Днём я мыла посуду. Вечером я гуляла с собакой.');
+    await say('+ Утром — пила чай');
+    await say('+ Днём — мыла посуду');
+    const long = 'после: вечером я долго сидела на балконе и смотрела как темнеет небо над крышами домов';
+    assert.ok(long.length - 'после: '.length > LIMITS.post);
+    await say(long);
+    const msg = tg.sent.at(-1).text;
+    assert.match(msg, new RegExp(`Сцена после титров длиннее ${LIMITS.post} знаков`), msg);
+    assert.doesNotMatch(msg, /не складываются|цитат/, msg);
+    await say('после: вечером сидела на балконе');
+    assert.doesNotMatch(tg.sent.at(-1).text, /⚠/, tg.sent.at(-1).text);
+  });
+});
