@@ -436,7 +436,7 @@ test('бот (решение 3б): правка «2: вечером гуляла
     assert.doesNotMatch(tg.sent.at(-1).text, /⚠/, tg.sent.at(-1).text);
     await play('a');
     assert.equal(rendered.length, 1);
-    assert.deepEqual(rendered[0].ep.rows[1], { role: 'Вечером', value: 'гуляла в парке', source: 'вечером гуляла в парке' });
+    assert.deepEqual(rendered[0].ep.rows[1], { role: 'Вечером', value: 'гуляла в парке', source: 'вечером гуляла в парке', own: true });
   });
 });
 
@@ -463,7 +463,7 @@ test('бот: «N: текст» — роль и значение из слов �
   const ep = sanitizeEpisode({ date: '2026-11-12', title: 'Т', genre: 'камерное кино', rows: [
     { role: 'Утром', value: 'пила чай', source: 'Утром пила чай' }, { role: 'Днём', value: 'мыла посуду', source: 'Днём мыла посуду' }] });
   assert.equal(applyEdit(ep, parseEdit('2: вечером гуляла в парке')), null);
-  assert.deepEqual(ep.rows[1], { role: 'Вечером', value: 'гуляла в парке', source: 'вечером гуляла в парке' });
+  assert.deepEqual(ep.rows[1], { role: 'Вечером', value: 'гуляла в парке', source: 'вечером гуляла в парке', own: true });
   assert.equal(applyEdit(ep, parseEdit('1: работала')), null);
   const v = validateEpisode(ep, `Утром пила чай${EDIT_SEP}вечером гуляла в парке${EDIT_SEP}работала`);
   const msg = draftMessage(ep, v);
@@ -512,9 +512,36 @@ test('правка не меняет проверку строки модели:
   const told = 'Утром я не пила чай. Днём я мыла посуду.';
   assert.equal(validateEpisode(ep(cut), told).ok, false);
   assert.equal(validateEpisode(ep(cut), `${told}${EDIT_SEP}Утром — пила чай с мамой`).ok, false);
-  // строка модели со сном в рассказе правкой без сна не «очищается»
+  // строка модели со сном в рассказе правкой без сна не «очищается» (строка 2 стоит до сна и сама годится);
+  // совпадение цитаты с текстом любой правки («+», «название:», «после:», «в главной роли:») строку модели не освобождает
   const dream = { role: 'Утром', value: 'пила чай', source: 'Утром я пила чай' };
-  assert.equal(validateEpisode(ep(dream), `Мне снилось, что утром я пила чай. Днём я мыла посуду.${EDIT_SEP}Утром я пила чай`).ok, false);
+  const dreamStory = 'Днём я мыла посуду. Мне снилось, что утром я пила чай.';
+  for (const edit of ['', `${EDIT_SEP}Утром я пила чай`, `${EDIT_SEP}Утром — я пила чай`]) {
+    const v = validateEpisode(ep(dream), `${dreamStory}${edit}`);
+    assert.ok(v.errors.length && v.errors.every((e) => e.path.startsWith('rows.0.')), `${edit}: ${JSON.stringify(v.errors)}`);
+  }
+  const cutStory = 'Утром я не пила чай. Днём я мыла посуду.';
+  for (const edit of ['пила чай', 'Пила — чай']) {
+    const v = validateEpisode(ep(cut), `${cutStory}${EDIT_SEP}${edit}`);
+    assert.ok(v.errors.some((e) => e.path.startsWith('rows.0.')) && v.errors.every((e) => e.path.startsWith('rows.0.')), `${edit}: ${JSON.stringify(v.errors)}`);
+  }
+  // та же строка с флагом правки человека (own) — его слова, проверяется по тексту правки
+  assert.deepEqual(validateEpisode(ep({ ...dream, own: true }), `${dreamStory}${EDIT_SEP}Утром я пила чай`).errors, []);
+  // флаг own без правки в опоре (монтажная) ничего не освобождает
+  assert.equal(validateEpisode(ep({ ...dream, own: true }), dreamStory).ok, false);
+});
+
+test('бот: «название:», «после:», «в главной роли:» с текстом цитаты не освобождают строку модели (настоящий createBot)', async () => {
+  await withBot(async ({ tg, say }) => {
+    await say('Утром я не пила чай. Днём я мыла посуду. Вечером я гуляла с собакой.');
+    await say('+ Днём — мыла посуду');
+    await say('+ Вечером — гуляла с собакой');
+    for (const e of ['название: пила чай', 'после: пила чай', 'в главной роли: пила чай']) await say(e);
+    // строка модели «Пила — чай» без флага own по такой опоре не годится
+    const story = `Утром я не пила чай. Днём я мыла посуду.${EDIT_SEP}пила чай`;
+    assert.ok(rowWordProblems({ role: 'Пила', value: 'чай', source: 'пила чай' }, story).length > 0);
+    assert.doesNotMatch(tg.sent.at(-1).text, /⚠ Строка/);
+  });
 });
 
 test('правила черновика модели (покрытие после удаления тестов белого списка): манера речи, «отрубилась», опровержения', () => {
