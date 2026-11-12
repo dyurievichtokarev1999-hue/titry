@@ -499,13 +499,14 @@ export function rowWordProblems(row, story) {
   let srcMarks = new Set();
   let hasStory = typeof story === 'string' && story.trim() !== '';
   // Опора бота: рассказ, затем правки человека через EDIT_SEP. Правка — его собственные слова (решение 3б, 12.11):
-  // строка, чья цитата — целиком текст правки, проверяется только по этому тексту, признаки рассказа на неё не переходят.
-  // Остальные строки (черновик модели) — по самому рассказу: признаки и «не» из правок на них тоже не переходят.
+  // строка из правки (флаг own ставит только бот), чья цитата — целиком текст правки, проверяется только по этому тексту,
+  // признаки рассказа на неё не переходят. Остальные строки (черновик модели) — по самому рассказу: признаки и «не»
+  // из правок на них не переходят; совпадение цитаты с текстом правки строку модели не освобождает (разбор 26bb75b).
   let base = story;
   if (hasStory && story.includes(EDIT_SEP)) {
     const [told, ...edits] = story.split(EDIT_SEP);
     const key = src.join(' ');
-    if (edits.some((b) => wordsOf(b).join(' ') === key)) hasStory = false;
+    if (row.own === true && edits.some((b) => wordsOf(b).join(' ') === key)) hasStory = false;
     else if (quoteContext(row.source, told).length) base = told;
   }
   const ctx = hasStory ? quoteContext(row.source, base) : [];
@@ -702,7 +703,7 @@ export function validateEpisode(ep, story) {
     else if (value.length > LIMITS.valueSoft) warnings.push(field(`${p}.value`, `Строка ${i + 1}: длинная строка займёт три линии, лучше сократить.`));
     if (!String(r.source || '').trim()) errors.push(field(`${p}.source`, `Строка ${i + 1}: нет цитаты из рассказа. В титрах только то, что человек сказал сам.`));
     else if (hasStory && !sourceFound(r.source, story)) errors.push(field(`${p}.source`, `Строка ${i + 1}: цитата не найдена в рассказе. В титрах только то, что человек сказал сам.`));
-    for (const pr of rowWordProblems({ role, value, source: r.source }, hasStory ? story : undefined)) {
+    for (const pr of rowWordProblems({ role, value, source: r.source, own: r.own === true }, hasStory ? story : undefined)) {
       const what = pr.field === 'role' ? 'роли' : 'значения';
       const list = pr.words.map((w) => `«${w}»`).join(', ');
       const msg = {
@@ -756,6 +757,8 @@ export function sanitizeEpisode(input) {
   ep.gender = ep.gender === 'f' || ep.gender === 'm' ? ep.gender : null;
   ep.rows = (Array.isArray(ep.rows) ? ep.rows : []).slice(0, 10).map((r) => ({
     role: clip(r && r.role, 40), value: clip(r && r.value, 120), source: clip(r && r.source, 400),
+    // строка из правки человека в боте (решение 3б): проверяется по тексту своей правки; без EDIT_SEP в опоре не действует
+    ...(r && r.own === true ? { own: true } : {}),
   }));
   ep.post = { text: clip(ep.post && ep.post.text, 120), source: clip(ep.post && ep.post.source, 400) };
   return ep;

@@ -139,7 +139,7 @@ export function parseEdit(text) {
 function ownRow(role, value) {
   // Без обрезки: длинную роль или текст покажет проверка черновика понятной ошибкой длины.
   // Правка человека — его собственные слова (решение 3б, 12.11): опора строки — сам текст правки.
-  return { role, value, source: `${role} ${value}` };
+  return { role, value, source: `${role} ${value}`, own: true };
 }
 
 /** Применить правку к эпизоду. Номера строк — как в сообщении с черновиком (без фиксированных строк). */
@@ -163,13 +163,14 @@ export function applyEdit(ep, cmd) {
       // правку не отклоняем, чтобы её текст прошёл обычную проверку безопасности.
       {
         const pair = pairFromSentence(cmd.value, new Set(), cmd.value);
-        if (pair) { rows[idx] = { ...pair.row }; return null; }
+        if (pair) { rows[idx] = { ...pair.row, own: true }; return null; }
       }
       // пару собрать не из чего (одно слово, сон, «почти»…): роли из этого текста нет — проверка покажет «нет роли»,
       // а не «слово не из рассказа» про прежнюю роль, которой человек не писал
       rows[idx].role = '';
       rows[idx].value = cmd.value;
       rows[idx].source = cmd.value;
+      rows[idx].own = true;
       return null;
     case 'title': if (!cmd.value) return 'Название не может быть пустым.'; ep.title = cmd.value.slice(0, LIMITS.title); return null;
     case 'genre': if (!cmd.value) return 'Жанр не может быть пустым.'; ep.genre = cmd.value.slice(0, LIMITS.genre); return null;
