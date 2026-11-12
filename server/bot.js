@@ -348,16 +348,20 @@ export function createBot({
   }
 
   // Остановка по безопасности: прежний черновик уничтожается, рассказ запоминается как запрещённый.
-  async function stopForSafety(chatId, s, level, extra = {}) {
+  // Состояние остановки применяется синхронно, до любых отправок: сбой отправки не отменяет остановку.
+  function applyStop(s) {
     s.episode = null;
     s.verdict = 'blocked';
-    s.draftId = (s.draftId || 0) + 1; // кнопки всех прежних черновиков перестают работать
+    s.draftId = (s.draftId || 0) + 1; // кнопки всех прежних черновиков перестают работать; ролик не уходит
     s.stage = 'help';
     if (s.story) {
       s.blocked = s.blocked || new Set();
       s.blocked.add(storyKey(s.originalStory || s.story));
       gate.markSafety(s.scope, s.originalStory || s.story);
     }
+  }
+  async function stopForSafety(chatId, s, level, extra = {}) {
+    applyStop(s);
     await metrics.log(chatId, 'safety', { level, ...extra });
     await tg.send(chatId, helpMessage('urgent'));
   }
@@ -453,6 +457,7 @@ export function createBot({
     // Отдельная проверка именно этой версии (рассказ + строки + пост + название/жанр) перед очередью.
     s.stage = 'rendering';
     // Доставка идёт: сообщения до её конца проверяются первыми (duringRender), даже если /start сменил стадию.
+    if (!s.delivering) s.veto = false; // «неизвестно» по прежней доставке на новую не переносится
     s.delivering = (s.delivering || 0) + 1;
     try {
     const g = await track(chatId, gate.verify(s.scope, original, ep, `${story}\n${episodeToText(ep)}`));
@@ -490,10 +495,15 @@ export function createBot({
       release();
       if (!(await waitHolds(s))) {
         // Проверка сообщения не завершилась за предел: исход неизвестен — ролик не отправляется (не «безопасно»).
+        // Поздний ответ «безопасно» после этого «Собираю ролик» не отправит (deliveryEpoch).
+        s.deliveryEpoch = (s.deliveryEpoch || 0) + 1;
+        s.veto = true;
         logError('check', { code: 'timeout' });
         if (current()) { s.stage = 'draft'; await tg.send(chatId, `${TEXT.checkUnavailable}\n\n${helpContacts()}`); }
         return;
       }
+      // Исход «неизвестно» по сообщению во время подготовки — ролик не отправляется (решение Claude 12.11 15:10 п. 2).
+      if (s.veto) { if (current()) s.stage = 'draft'; return; }
       if (!current()) return;
       await tg.sendVideo(chatId, r.outPath, { caption: 'Конец сцены.', width: 720, height: 1280, duration: Math.round(r.duration), reply_markup: FEEDBACK_KB });
       // /delete во время отправки: после metrics.forget новая запись о человеке не появляется.
@@ -532,39 +542,58 @@ export function createBot({
     const all = (async () => { while (s.holds && s.holds.size) await Promise.allSettled([...s.holds]); return true; })();
     try { return await Promise.race([all, limit]); } finally { clearTimeout(timer); }
   };
-  async function duringRender(chatId, s, text) {
+  // Отправка, сбой которой не влияет на безопасность: в журнал — только код.
+  const sendSafe = async (chatId, text, extra) => { try { await tg.send(chatId, text, extra); } catch (e) { logError('send', e); } };
+
+  // Принцип (решение Claude 12.11 15:10 п. 1): удержание доставки снимается только после ПРИМЕНЕНИЯ результата проверки.
+  // decide() возвращает промис удержания: проверка → синхронное применение (остановка / запрет ролика) → готово.
+  // Он никогда не отклоняется; любой сбой без результата = «неизвестно» (ролик не отправляется). Отправки в чат —
+  // после применения, их сбой ничего не меняет.
+  function decide(s, body) {
+    return (async () => {
+      let r;
+      try {
+        const level = assessRisk(body).level;
+        if (level !== 'none') r = { kind: level };
+        else {
+          const g = await gate.probe(s.scope, body, body);
+          r = g.ok ? { kind: 'safe' } : g.kind === 'safety' ? { kind: 'urgent', byModel: true } : { kind: 'unknown', code: g.code };
+        }
+      } catch (e) { r = { kind: 'unknown', code: 'error' }; }
+      if (r.kind === 'urgent') { s.story = body; s.originalStory = body; applyStop(s); } // запрет — на это сообщение
+      else if (r.kind === 'unknown') s.veto = true;
+      return r;
+    })();
+  }
+
+  async function duringRender(chatId, s, text, { echo } = {}) {
     let body = String(text || '').trim();
     if (body.startsWith('/')) {
       const m = /^\/([A-Za-z]+)(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(body);
       const known = m && KNOWN_COMMANDS.has(m[1].toLowerCase());
       body = known ? (m[2] || '').trim() : body.replace(/^\/+/, '').trim();
     }
-    if (!body) return tg.send(chatId, TEXT.rendering);
-    const check = (async () => {
-      const level = assessRisk(body).level;
-      if (level !== 'none') return { kind: level };
-      const g = await gate.probe(s.scope, body, body);
-      if (g.ok) return { kind: 'safe' };
-      if (g.kind === 'safety') return { kind: 'urgent', byModel: true };
-      return { kind: 'unknown', code: g.code };
-    })();
-    holdDelivery(s, check);
-    const r = await track(chatId, check);
+    if (!body) return sendSafe(chatId, TEXT.rendering);
+    const epoch = s.deliveryEpoch || 0;
+    const hold = decide(s, body);
+    holdDelivery(s, hold); // синхронно, до первого await
+    const r = await track(chatId, hold);
     if (!alive(chatId, s)) return; // /delete во время проверки: ничего не отвечаем (запрет, если был, остаётся)
+    if (echo) await sendSafe(chatId, echo); // эхо расшифровки — после применения результата и необязательно
     if (r.kind === 'urgent') {
-      // Запрет — на это сообщение; draftId меняется, поэтому прежний ролик не будет ни собран, ни отправлен.
-      s.story = body; s.originalStory = body;
-      return stopForSafety(chatId, s, 'urgent', { at: 'rendering', byModel: !!r.byModel });
+      try { await metrics.log(chatId, 'safety', { level: 'urgent', at: 'rendering', byModel: !!r.byModel }); } catch (e) { logError('metrics', e); }
+      return sendSafe(chatId, helpMessage('urgent'));
     }
     if (r.kind === 'concern') {
-      await metrics.log(chatId, 'safety', { level: 'concern', at: 'rendering' });
-      return tg.send(chatId, helpMessage('concern'));
+      try { await metrics.log(chatId, 'safety', { level: 'concern', at: 'rendering' }); } catch (e) { logError('metrics', e); }
+      return sendSafe(chatId, helpMessage('concern'));
     }
     if (r.kind === 'unknown') {
       logError('check', { code: r.code });
-      return tg.send(chatId, `${TEXT.checkUnavailable}\n\n${helpContacts()}`);
+      return sendSafe(chatId, `${TEXT.checkUnavailable}\n\n${helpContacts()}`);
     }
-    return tg.send(chatId, TEXT.rendering);
+    // «Собираю ролик» — только если доставка ещё ждёт (не истёк предел): обещание, которое бот выполнит.
+    if (s.delivering && (s.deliveryEpoch || 0) === epoch) return sendSafe(chatId, TEXT.rendering);
   }
 
   async function onMessage(msg) {
@@ -598,20 +627,34 @@ export function createBot({
     if (msg.voice) {
       if (!sttAvailable() && transcribe === transcribeOgg) return tg.send(chatId, TEXT.voiceOff);
       if (msg.voice.duration > MAX_VOICE_SECONDS) return tg.send(chatId, TEXT.voiceLong);
-      // Голос во время подготовки ролика держит доставку уже с начала распознавания, а не после него.
-      let releaseVoice = null;
-      if (s.delivering) holdDelivery(s, new Promise((r) => { releaseVoice = r; }));
-      try {
-        await tg.action(chatId, 'typing');
-        let story = '';
-        try { story = await transcribe(await tg.fileBuffer(msg.voice.file_id), { duration: msg.voice.duration }); }
-        catch (e) { logError('stt', e); }
-        if (!alive(chatId, s)) return; // /delete во время распознавания: ничего не отвечаем
-        if (!story) return tg.send(chatId, TEXT.voiceEmpty);
-        await tg.send(chatId, `Расшифровка:\n«${story}»`);
-        if (s.delivering) return await duringRender(chatId, s, story);
-        return handleStory(chatId, s, story, 'voice');
-      } finally { if (releaseVoice) releaseVoice(); }
+      if (s.delivering) {
+        // Голос во время подготовки ролика держит доставку с начала распознавания. Расшифровка проверяется и результат
+        // применяется ДО эха в чат. Нет расшифровки (сбой распознавания, typing, файла) = исход «неизвестно».
+        let releaseVoice;
+        holdDelivery(s, new Promise((r) => { releaseVoice = r; }));
+        try {
+          let story = '';
+          try {
+            try { await tg.action(chatId, 'typing'); } catch (e) { logError('send', e); }
+            story = await transcribe(await tg.fileBuffer(msg.voice.file_id), { duration: msg.voice.duration });
+          } catch (e) { logError('stt', e); }
+          story = String(story || '').trim();
+          if (!story) {
+            s.veto = true; // содержание голоса неизвестно — ролик не отправляется
+            if (!alive(chatId, s)) return;
+            return await sendSafe(chatId, `${TEXT.checkUnavailable}\n\n${helpContacts()}`);
+          }
+          return await duringRender(chatId, s, story, { echo: `Расшифровка:\n«${story}»` }); // своё удержание — синхронно
+        } finally { releaseVoice(); }
+      }
+      await tg.action(chatId, 'typing');
+      let story = '';
+      try { story = await transcribe(await tg.fileBuffer(msg.voice.file_id), { duration: msg.voice.duration }); }
+      catch (e) { logError('stt', e); }
+      if (!alive(chatId, s)) return; // /delete во время распознавания: ничего не отвечаем
+      if (!story) return tg.send(chatId, TEXT.voiceEmpty);
+      await tg.send(chatId, `Расшифровка:\n«${story}»`);
+      return handleStory(chatId, s, story, 'voice');
     }
 
     if (!text) return;

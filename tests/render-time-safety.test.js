@@ -18,8 +18,9 @@ const tick = () => new Promise((r) => setImmediate(r));
 // check(text): для текста ролика (содержит рассказ) — prior(), для второго сообщения — second(text).
 function setup({ prior = () => false, second = () => false, render, transcribe, holdWaitMs, chatId = chat.id } = {}) {
   const sent = []; const events = []; const counters = { video: 0, render: 0 };
+  const h = {};
   const tg = {
-    send: async (c, text) => { sent.push(text); }, action: async () => {}, answer: async () => {},
+    send: async (c, text) => { if (h.failOn && h.failOn(text)) throw Object.assign(new Error('Telegram 500'), { status: 500 }); sent.push(text); }, action: async () => {}, answer: async () => {},
     fileBuffer: async () => Buffer.from(''), sendVideo: async () => { counters.video++; },
   };
   const metrics = { hash: () => 'fictional', log: async (id, ev, extra = {}) => { events.push({ ev, ...extra }); }, forget: async () => {} };
@@ -32,7 +33,7 @@ function setup({ prior = () => false, second = () => false, render, transcribe, 
   const say = (text) => bot.handleUpdate({ message: { chat: c, text } });
   const voice = () => bot.handleUpdate({ message: { chat: c, voice: { file_id: 'f', duration: 3 } } });
   const play = () => bot.handleUpdate({ callback_query: { id: 'q', data: 'play:1', message: { chat: c } } });
-  return { bot, sent, events, counters, say, voice, play };
+  return Object.assign(h, { bot, sent, events, counters, say, voice, play });
 }
 
 test('проверка ролика задержана; второе сообщение urgent → экран остановки, ролик не отправляется никогда', async () => {
@@ -85,7 +86,7 @@ test('рендер завершён, доставка ждёт проверку 
   assert.match(b.sent.at(-1), URGENT_CARD);
 });
 
-test('проверка второго сообщения не завершена → текст неизвестного исхода и контакты; ролик доставляется', async () => {
+test('проверка второго сообщения не завершена → текст неизвестного исхода и контакты; ролик НЕ отправляется (решение 12.11 15:10)', async () => {
   const d = deferred();
   const b = setup({ prior: () => d.promise, second: () => { throw Object.assign(new Error('сбой'), { code: 'incomplete_response' }); } });
   await b.say(ex.story);
@@ -93,7 +94,7 @@ test('проверка второго сообщения не завершена
   await b.say('Пила чай');
   assert.equal(b.sent.at(-1), `${TEXT.checkUnavailable}\n\n${helpContacts()}`);
   d.resolve(false); await p;
-  assert.equal(b.counters.video, 1);
+  assert.equal(b.counters.video, 0);
 });
 
 test('urgent уже после отправки ролика → экран остановки всё равно показан', async () => {
@@ -198,4 +199,66 @@ test('«/start@bot <хвост>» — проверяется хвост (мод�
   assert.match(b.sent.at(-1), URGENT_CARD, 'запрет — на опасное сообщение');
   await b.say(ex.story);
   assert.doesNotMatch(b.sent.at(-1), URGENT_CARD, 'рассказ ролика под запрет не попал');
+});
+
+// КОД-РЕВЬЮ QA 12.11 14:28 (дословный сценарий): распознавание даёт urgent, отправка расшифровки отклоняется (500),
+// отправка экрана помощи разрешена → 0 доставок после завершения рендера, экран остановки есть, текста нет в журнале.
+test('голос: отказ отправки расшифровки не снимает проверку — ролика нет, экран остановки есть, журнал без текста', async () => {
+  const out = [];
+  const saved = { error: console.error, log: console.log, warn: console.warn, info: console.info };
+  for (const k of Object.keys(saved)) console[k] = (...a) => out.push(a.map(String).join(' '));
+  const r = deferred();
+  let b;
+  try {
+    b = setup({ transcribe: async () => 'Убить себя', render: () => r.promise });
+    await b.say(ex.story);
+    const p = b.play();
+    await waitFor(() => b.counters.render === 1);
+    b.failOn = (t) => t.startsWith('Расшифровка'); // заглушка Telegram: отказ только на эхо расшифровки
+    await b.voice();
+    r.resolve(); await p;
+    assert.equal(b.counters.video, 0, '0 доставок после завершения рендера');
+    assert.match(b.sent.at(-1), URGENT_CARD, 'экран остановки отправлен');
+    assert.ok(!b.sent.some((t) => t.startsWith('Расшифровка')), 'эхо не дошло (500)');
+  } finally { Object.assign(console, saved); }
+  const all = `${out.join('\n')}\n${JSON.stringify(b.events)}`.toLowerCase();
+  assert.ok(!all.includes('убить себя'), all);
+});
+
+test('принцип удержания: отказ отправки «Собираю ролик» при безопасном втором сообщении — ролик доставляется после проверки', async () => {
+  const m = deferred(); const r = deferred();
+  const b = setup({ second: () => m.promise, render: () => r.promise });
+  await b.say(ex.story);
+  const p = b.play();
+  await waitFor(() => b.counters.render === 1);
+  b.failOn = (t) => t === TEXT.rendering;
+  const q = b.say('Пила чай'); await tick();
+  r.resolve(); for (let i = 0; i < 10; i++) await tick();
+  assert.equal(b.counters.video, 0, 'доставка ждёт проверку, а не отправку «Собираю ролик»');
+  m.resolve(false); await q; await p;
+  assert.equal(b.counters.video, 1);
+});
+
+test('не удалось отправить и экран остановки — ролик всё равно не отправляется', async () => {
+  const d = deferred();
+  const b = setup({ prior: () => d.promise });
+  await b.say(ex.story);
+  const p = b.play(); await tick();
+  b.failOn = (t) => URGENT_CARD.test(t);
+  await b.say('Убить себя');
+  d.resolve(false); await p;
+  assert.equal(b.counters.video, 0);
+});
+
+test('после предела ожидания поздний ответ «безопасно» не отправляет «Собираю ролик»', async () => {
+  const d = deferred(); const m = deferred();
+  const b = setup({ prior: () => d.promise, second: () => m.promise, holdWaitMs: 30 });
+  await b.say(ex.story);
+  const p = b.play(); await tick();
+  const q = b.say('Пила чай'); await tick();
+  d.resolve(false); await p;
+  const n = b.sent.length;
+  m.resolve(false); await q;
+  assert.equal(b.sent.length, n, 'после истечения предела обещания ролика нет');
+  assert.equal(b.counters.video, 0);
 });
