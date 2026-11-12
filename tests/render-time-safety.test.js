@@ -4,6 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import { createBot, TEXT } from '../server/bot.js';
+import { makeGate } from '../server/gate.js';
 import { helpMessage, helpContacts, assessRisk } from '../server/safety.js';
 
 const ex = JSON.parse(await fs.readFile(new URL('../examples/day-quiet.json', import.meta.url), 'utf8'));
@@ -16,7 +17,7 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
 const tick = () => new Promise((r) => setImmediate(r));
 
 // check(text): для текста ролика (содержит рассказ) — prior(), для второго сообщения — second(text).
-function setup({ prior = () => false, second = () => false, render, transcribe, holdWaitMs, chatId = chat.id } = {}) {
+function setup({ prior = () => false, second = () => false, render, transcribe, holdWaitMs, chatId = chat.id, gateWrap } = {}) {
   const sent = []; const events = []; const counters = { video: 0, render: 0 };
   const h = {};
   const tg = {
@@ -27,13 +28,15 @@ function setup({ prior = () => false, second = () => false, render, transcribe, 
   const bot = createBot({
     tg, metrics, draft: good, ...(transcribe ? { transcribe } : {}), ...(holdWaitMs ? { holdWaitMs } : {}),
     safetyCheck: async (t) => (t.includes(ex.story.slice(0, 20)) ? prior(t) : second(t)),
+    ...(gateWrap ? { gate: gateWrap(makeGate({ check: async (t) => (t.includes(ex.story.slice(0, 20)) ? prior(t) : second(t)) })) } : {}),
     render: async (e, o) => { counters.render++; if (render) await render(); return { seconds: 1, duration: 24, outPath: o.outPath }; },
   });
   const c = { ...chat, id: chatId };
   const say = (text) => bot.handleUpdate({ message: { chat: c, text } });
-  const voice = () => bot.handleUpdate({ message: { chat: c, voice: { file_id: 'f', duration: 3 } } });
+  const voice = (duration = 3) => bot.handleUpdate({ message: { chat: c, voice: { file_id: 'f', duration } } });
+  const photo = (caption) => bot.handleUpdate({ message: { chat: c, photo: [{ file_id: 'p' }], caption } });
   const play = () => bot.handleUpdate({ callback_query: { id: 'q', data: 'play:1', message: { chat: c } } });
-  return Object.assign(h, { bot, sent, events, counters, say, voice, play });
+  return Object.assign(h, { bot, sent, events, counters, say, voice, photo, play });
 }
 
 test('проверка ролика задержана; второе сообщение urgent → экран остановки, ролик не отправляется никогда', async () => {
@@ -261,4 +264,63 @@ test('после предела ожидания поздний ответ «б�
   m.resolve(false); await q;
   assert.equal(b.sent.length, n, 'после истечения предела обещания ролика нет');
   assert.equal(b.counters.video, 0);
+});
+
+test('голос во время подготовки: расшифровки нет (сбой распознавания) → «неизвестно», ролик не отправляется', async () => {
+  const r = deferred();
+  const b = setup({ transcribe: async () => { throw new Error('stt'); }, render: () => r.promise });
+  await b.say(ex.story);
+  const p = b.play();
+  await waitFor(() => b.counters.render === 1);
+  await b.voice();
+  r.resolve(); await p;
+  assert.equal(b.counters.video, 0);
+  assert.equal(b.sent.at(-1), `${TEXT.checkUnavailable}\n\n${helpContacts()}`);
+});
+
+test('голос во время подготовки длиннее предела (не распознаётся) → ролик не отправляется', async () => {
+  const r = deferred();
+  const b = setup({ transcribe: async () => 'Пила чай', render: () => r.promise });
+  await b.say(ex.story);
+  const p = b.play();
+  await waitFor(() => b.counters.render === 1);
+  await b.voice(100000);
+  r.resolve(); await p;
+  assert.equal(b.counters.video, 0);
+});
+
+test('исключение в самой проверке (gate.probe) → «неизвестно», ролик не отправляется', async () => {
+  const r = deferred();
+  const b = setup({ render: () => r.promise, gateWrap: (g) => ({ ...g, probe: async () => { throw new Error('хранилище'); } }) });
+  await b.say(ex.story);
+  const p = b.play();
+  await waitFor(() => b.counters.render === 1);
+  await b.say('Пила чай');
+  r.resolve(); await p;
+  assert.equal(b.counters.video, 0);
+});
+
+test('«неизвестно» прежней доставки не запрещает следующую; подпись к фото проверяется', async () => {
+  const d = deferred();
+  let fail = true;
+  const b = setup({ prior: () => d.promise, second: () => { if (fail) throw Object.assign(new Error('x'), { code: 'incomplete_response' }); return false; } });
+  await b.say(ex.story);
+  let p = b.play(); await tick();
+  await b.say('Пила чай');
+  d.resolve(false); await p;
+  assert.equal(b.counters.video, 0);
+  fail = false;
+  await b.say(ex.story);
+  p = b.bot.handleUpdate({ callback_query: { id: 'q', data: 'play:2', message: { chat } } });
+  await p;
+  assert.equal(b.counters.video, 1, 'новая доставка без «неизвестно» — ролик уходит');
+  const r = deferred();
+  const c = setup({ render: () => r.promise, chatId: 77902 });
+  await c.say(ex.story);
+  const pc = c.play();
+  await waitFor(() => c.counters.render === 1);
+  await c.photo('Убить себя');
+  r.resolve(); await pc;
+  assert.equal(c.counters.video, 0);
+  assert.match(c.sent.at(-1), URGENT_CARD);
 });

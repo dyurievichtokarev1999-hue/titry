@@ -625,8 +625,12 @@ export function createBot({
     if (text === '/help') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });
 
     if (msg.voice) {
-      if (!sttAvailable() && transcribe === transcribeOgg) return tg.send(chatId, TEXT.voiceOff);
-      if (msg.voice.duration > MAX_VOICE_SECONDS) return tg.send(chatId, TEXT.voiceLong);
+      const voiceRefused = !sttAvailable() && transcribe === transcribeOgg ? TEXT.voiceOff : msg.voice.duration > MAX_VOICE_SECONDS ? TEXT.voiceLong : null;
+      if (voiceRefused) {
+        // Голос не распознаётся — содержание неизвестно: во время подготовки ролик не отправляется (правило 12.11 15:10).
+        if (s.delivering) s.veto = true;
+        return tg.send(chatId, voiceRefused);
+      }
       if (s.delivering) {
         // Голос во время подготовки ролика держит доставку с начала распознавания. Расшифровка проверяется и результат
         // применяется ДО эха в чат. Нет расшифровки (сбой распознавания, typing, файла) = исход «неизвестно».
@@ -657,6 +661,8 @@ export function createBot({
       return handleStory(chatId, s, story, 'voice');
     }
 
+    // Подпись к фото или файлу во время подготовки проверяется как текст.
+    if (!text && s.delivering && typeof msg.caption === 'string' && msg.caption.trim()) return duringRender(chatId, s, msg.caption);
     if (!text) return;
     if (s.delivering) return duringRender(chatId, s, text);
     if ((s.stage === 'draft' || s.stage === 'watched') && s.episode) {
