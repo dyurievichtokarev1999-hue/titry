@@ -478,6 +478,9 @@ export function createBot({
       const r = await job;
       // После рендера: если черновик остановлен или сессия удалена, видео не отправляется (файл удалится ниже).
       if (r === STALE || !current()) return;
+      // Доставка ждёт проверки всех сообщений, пришедших во время подготовки (решение Claude 12.11 11:05 п. 1).
+      await waitHolds(s);
+      if (!current()) return;
       await tg.sendVideo(chatId, r.outPath, { caption: 'Конец сцены.', width: 720, height: 1280, duration: Math.round(r.duration), reply_markup: FEEDBACK_KB });
       // /delete во время отправки: после metrics.forget новая запись о человеке не появляется.
       if (!alive(chatId, s)) return;
@@ -493,6 +496,56 @@ export function createBot({
       waiting--;
       await fs.rm(out, { force: true });
     }
+  }
+
+  // Сообщение, пришедшее во время подготовки ролика (КОД-РЕВЬЮ QA PR 15, решение Claude 12.11 11:05 п. 1).
+  // Сначала — та же проверка, что у короткого текста и «/текст» (локальный фильтр, затем разовая модельная);
+  // доставка прежнего ролика ждёт завершения этих проверок (holdDelivery / waitHolds в doRender).
+  //  urgent (локально или моделью) → экран остановки; прежний ролик отменяется и не отправляется никогда;
+  //  concern → блок помощи concern, прежний ролик не отменяется (он сделан из проверенного рассказа);
+  //  безопасно → «Собираю ролик…», ролик доставляется; исход неизвестен → текст неизвестного исхода и контакты.
+  // Текст сообщения не пишется в журнал и метрики.
+  const holdDelivery = (s, p) => {
+    s.holds = s.holds || new Set();
+    s.holds.add(p);
+    p.finally(() => s.holds.delete(p)).catch(() => {});
+  };
+  const waitHolds = async (s) => {
+    while (s.holds && s.holds.size) await Promise.allSettled([...s.holds]);
+  };
+  async function duringRender(chatId, s, text) {
+    let body = String(text || '').trim();
+    if (body.startsWith('/')) {
+      const m = /^\/([A-Za-z]+)(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(body);
+      const known = m && KNOWN_COMMANDS.has(m[1].toLowerCase());
+      body = known ? (m[2] || '').trim() : body.replace(/^\/+/, '').trim();
+    }
+    if (!body) return tg.send(chatId, TEXT.rendering);
+    const check = (async () => {
+      const level = assessRisk(body).level;
+      if (level !== 'none') return { kind: level };
+      const g = await gate.probe(s.scope, body, body);
+      if (g.ok) return { kind: 'safe' };
+      if (g.kind === 'safety') return { kind: 'urgent', byModel: true };
+      return { kind: 'unknown', code: g.code };
+    })();
+    holdDelivery(s, check);
+    const r = await track(chatId, check);
+    if (!alive(chatId, s)) return; // /delete во время проверки: ничего не отвечаем (запрет, если был, остаётся)
+    if (r.kind === 'urgent') {
+      // Запрет — на это сообщение; draftId меняется, поэтому прежний ролик не будет ни собран, ни отправлен.
+      s.story = body; s.originalStory = body;
+      return stopForSafety(chatId, s, 'urgent', { at: 'rendering', byModel: !!r.byModel });
+    }
+    if (r.kind === 'concern') {
+      await metrics.log(chatId, 'safety', { level: 'concern', at: 'rendering' });
+      return tg.send(chatId, helpMessage('concern'));
+    }
+    if (r.kind === 'unknown') {
+      logError('check', { code: r.code });
+      return tg.send(chatId, `${TEXT.checkUnavailable}\n\n${helpContacts()}`);
+    }
+    return tg.send(chatId, TEXT.rendering);
   }
 
   async function onMessage(msg) {
@@ -523,8 +576,6 @@ export function createBot({
     }
     if (text === '/help') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });
 
-    if (s.stage === 'rendering') return tg.send(chatId, TEXT.rendering);
-
     if (msg.voice) {
       if (!sttAvailable() && transcribe === transcribeOgg) return tg.send(chatId, TEXT.voiceOff);
       if (msg.voice.duration > MAX_VOICE_SECONDS) return tg.send(chatId, TEXT.voiceLong);
@@ -535,10 +586,12 @@ export function createBot({
       if (!alive(chatId, s)) return; // /delete во время распознавания: ничего не отвечаем
       if (!story) return tg.send(chatId, TEXT.voiceEmpty);
       await tg.send(chatId, `Расшифровка:\n«${story}»`);
+      if (s.stage === 'rendering') return duringRender(chatId, s, story);
       return handleStory(chatId, s, story, 'voice');
     }
 
     if (!text) return;
+    if (s.stage === 'rendering') return duringRender(chatId, s, text);
     if ((s.stage === 'draft' || s.stage === 'watched') && s.episode) {
       const cmd = parseEdit(text);
       if (cmd) {
