@@ -661,6 +661,8 @@ export function createBot({
       return handleStory(chatId, s, story, 'voice');
     }
 
+    // Кружок, аудиофайл или видео во время подготовки не распознаются — содержание неизвестно, ролик не отправляется.
+    if (s.delivering && (msg.video_note || msg.audio || msg.video)) s.veto = true;
     // Подпись к фото или файлу во время подготовки проверяется как текст.
     if (!text && s.delivering && typeof msg.caption === 'string' && msg.caption.trim()) return duringRender(chatId, s, msg.caption);
     if (!text) return;

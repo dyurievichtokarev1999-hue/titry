@@ -324,3 +324,16 @@ test('«неизвестно» прежней доставки не запрещ
   assert.equal(c.counters.video, 0);
   assert.match(c.sent.at(-1), URGENT_CARD);
 });
+
+test('кружок или аудиофайл во время подготовки — содержание неизвестно, ролик не отправляется', async () => {
+  for (const extra of [{ video_note: { file_id: 'v' } }, { audio: { file_id: 'a' } }]) {
+    const r = deferred();
+    const b = setup({ render: () => r.promise });
+    await b.say(ex.story);
+    const p = b.play();
+    await waitFor(() => b.counters.render === 1);
+    await b.bot.handleUpdate({ message: { chat, ...extra } });
+    r.resolve(); await p;
+    assert.equal(b.counters.video, 0, JSON.stringify(Object.keys(extra)));
+  }
+});
