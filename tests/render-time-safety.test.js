@@ -16,7 +16,7 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
 const tick = () => new Promise((r) => setImmediate(r));
 
 // check(text): для текста ролика (содержит рассказ) — prior(), для второго сообщения — second(text).
-function setup({ prior = () => false, second = () => false, render } = {}) {
+function setup({ prior = () => false, second = () => false, render, transcribe, holdWaitMs, chatId = chat.id } = {}) {
   const sent = []; const events = []; const counters = { video: 0, render: 0 };
   const tg = {
     send: async (c, text) => { sent.push(text); }, action: async () => {}, answer: async () => {},
@@ -24,13 +24,15 @@ function setup({ prior = () => false, second = () => false, render } = {}) {
   };
   const metrics = { hash: () => 'fictional', log: async (id, ev, extra = {}) => { events.push({ ev, ...extra }); }, forget: async () => {} };
   const bot = createBot({
-    tg, metrics, draft: good,
+    tg, metrics, draft: good, ...(transcribe ? { transcribe } : {}), ...(holdWaitMs ? { holdWaitMs } : {}),
     safetyCheck: async (t) => (t.includes(ex.story.slice(0, 20)) ? prior(t) : second(t)),
     render: async (e, o) => { counters.render++; if (render) await render(); return { seconds: 1, duration: 24, outPath: o.outPath }; },
   });
-  const say = (text) => bot.handleUpdate({ message: { chat, text } });
-  const play = () => bot.handleUpdate({ callback_query: { id: 'q', data: 'play:1', message: { chat } } });
-  return { bot, sent, events, counters, say, play };
+  const c = { ...chat, id: chatId };
+  const say = (text) => bot.handleUpdate({ message: { chat: c, text } });
+  const voice = () => bot.handleUpdate({ message: { chat: c, voice: { file_id: 'f', duration: 3 } } });
+  const play = () => bot.handleUpdate({ callback_query: { id: 'q', data: 'play:1', message: { chat: c } } });
+  return { bot, sent, events, counters, say, voice, play };
 }
 
 test('проверка ролика задержана; второе сообщение urgent → экран остановки, ролик не отправляется никогда', async () => {
@@ -121,4 +123,79 @@ test('во время подготовки: «/текст» проверяетс
   const all = `${out.join('\n')}\n${JSON.stringify(b.events)}`.toLowerCase();
   assert.ok(!all.includes('убить себя') && !all.includes('сдохну'), all);
   assert.ok(b.events.some((e) => e.ev === 'safety' && e.at === 'rendering'));
+});
+
+const waitFor = async (cond) => { for (let i = 0; i < 50 && !cond(); i++) await tick(); };
+
+test('голос во время подготовки держит доставку с начала распознавания: долгая расшифровка urgent → ролика нет', async () => {
+  const t = deferred(); const r = deferred();
+  const b = setup({ transcribe: () => t.promise, render: () => r.promise });
+  await b.say(ex.story);
+  const p = b.play();
+  await waitFor(() => b.counters.render === 1);
+  const v = b.voice(); await tick();
+  r.resolve(); // рендер готов раньше расшифровки — доставка всё равно ждёт
+  for (let i = 0; i < 10; i++) await tick();
+  assert.equal(b.counters.video, 0, 'ролик ждёт распознавания голоса');
+  t.resolve('Убить себя'); await v; await p;
+  assert.equal(b.counters.video, 0);
+  assert.match(b.sent.at(-1), URGENT_CARD);
+});
+
+test('«/start» во время подготовки не снимает проверку: следующее «Сдохну» (только модель) держит и отменяет ролик', async () => {
+  const r = deferred(); const m = deferred();
+  const b = setup({ render: () => r.promise, second: () => m.promise });
+  await b.say(ex.story);
+  const p = b.play();
+  await waitFor(() => b.counters.render === 1);
+  await b.say('/start');
+  const q = b.say('Сдохну'); await tick();
+  r.resolve(); for (let i = 0; i < 10; i++) await tick();
+  assert.equal(b.counters.video, 0);
+  m.resolve(true); await q; await p;
+  assert.equal(b.counters.video, 0);
+  assert.match(b.sent.at(-1), URGENT_CARD);
+});
+
+test('проверка сообщения зависла дольше предела → ролик не отправляется, текст неизвестного исхода и контакты', async () => {
+  const d = deferred();
+  const b = setup({ prior: () => d.promise, second: () => new Promise(() => {}), holdWaitMs: 30 });
+  await b.say(ex.story);
+  const p = b.play(); await tick();
+  b.say('Пила чай'); await tick();
+  d.resolve(false);
+  await p;
+  assert.equal(b.counters.video, 0);
+  assert.equal(b.sent.at(-1), `${TEXT.checkUnavailable}\n\n${helpContacts()}`);
+});
+
+test('второе сообщение приходит, пока доставка уже ждёт первое: ждём оба; второе опасно → ролика нет', async () => {
+  const r = deferred(); const m1 = deferred(); const m2 = deferred();
+  let n = 0;
+  const b = setup({ render: () => r.promise, second: () => (++n === 1 ? m1.promise : m2.promise) });
+  await b.say(ex.story);
+  const p = b.play();
+  await waitFor(() => b.counters.render === 1);
+  const q1 = b.say('Привет'); await tick();
+  r.resolve(); for (let i = 0; i < 5; i++) await tick();
+  const q2 = b.say('Сдохну'); await tick();
+  m1.resolve(false); await q1; for (let i = 0; i < 5; i++) await tick();
+  assert.equal(b.counters.video, 0, 'доставка ждёт и второе сообщение');
+  m2.resolve(true); await q2; await p;
+  assert.equal(b.counters.video, 0);
+});
+
+test('«/start@bot <хвост>» — проверяется хвост (модель); повтор опасного текста — снова остановка, рассказ ролика не запрещён', async () => {
+  const d = deferred();
+  const b = setup({ prior: () => d.promise, second: (t) => t === 'Сдохну' });
+  await b.say(ex.story);
+  const p = b.play(); await tick();
+  await b.say('/start@titry_bot Сдохну');
+  assert.match(b.sent.at(-1), URGENT_CARD);
+  d.resolve(false); await p;
+  assert.equal(b.counters.video, 0);
+  await b.say('Сдохну');
+  assert.match(b.sent.at(-1), URGENT_CARD, 'запрет — на опасное сообщение');
+  await b.say(ex.story);
+  assert.doesNotMatch(b.sent.at(-1), URGENT_CARD, 'рассказ ролика под запрет не попал');
 });

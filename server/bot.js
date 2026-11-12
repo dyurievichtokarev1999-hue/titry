@@ -21,6 +21,8 @@ const WATERMARK = process.env.BOT_WATERMARK ?? 'сделано в титрах';
 
 // Команды бота (setMyCommands): точное совпадение обрабатывается до разбора текста.
 const KNOWN_COMMANDS = new Set(['start', 'year', 'delete', 'help']);
+// Сколько доставка ролика ждёт проверок сообщений, пришедших во время подготовки (как ожидание соседей в шлюзе).
+export const HOLD_WAIT_MS = 120 * 1000;
 
 export const TEXT = {
   start: [
@@ -309,6 +311,7 @@ export function createBot({
   safetyCheck, hasKey = safetyCheck ? () => true : hasClaudeCredentials, monoNow, wallNow,
   ledger = null, // хранилище запретов (server/ledger.js); область — участник, производная HMAC на диске
   gate = makeGate({ check: safetyCheck || ((text) => modelSafetyCheck(text)), hasKey, monoNow, wallNow, ledger }),
+  holdWaitMs = HOLD_WAIT_MS, // предел ожидания проверок сообщений, пришедших во время подготовки ролика
 } = {}) {
   const sessions = new Map();
   // Незавершённые черновики и отдельные проверки участника: их результат может создать запрет уже после /delete.
@@ -449,6 +452,9 @@ export function createBot({
     const story = s.story;
     // Отдельная проверка именно этой версии (рассказ + строки + пост + название/жанр) перед очередью.
     s.stage = 'rendering';
+    // Доставка идёт: сообщения до её конца проверяются первыми (duringRender), даже если /start сменил стадию.
+    s.delivering = (s.delivering || 0) + 1;
+    try {
     const g = await track(chatId, gate.verify(s.scope, original, ep, `${story}\n${episodeToText(ep)}`));
     if (!alive(chatId, s) || s.draftId !== gen) return; // удалённая или заменённая сессия не оживает
     if (g.kind === 'safety') return stopForSafety(chatId, s, 'urgent', { at: 'check', byModel: true });
@@ -461,6 +467,8 @@ export function createBot({
     if (waiting >= 1 + MAX_RENDER_WAITING) { s.stage = 'draft'; return tg.send(chatId, TEXT.busy); }
     const ahead = waiting;
     waiting++;
+    let released = false;
+    const release = () => { if (!released) { released = true; waiting--; } }; // место в очереди — до ожидания проверок
     const out = path.join(ROOT, 'data', 'tmp', `${metrics.hash(chatId)}-${Date.now()}.mp4`);
     const STALE = Symbol('stale');
     let job;
@@ -479,7 +487,13 @@ export function createBot({
       // После рендера: если черновик остановлен или сессия удалена, видео не отправляется (файл удалится ниже).
       if (r === STALE || !current()) return;
       // Доставка ждёт проверки всех сообщений, пришедших во время подготовки (решение Claude 12.11 11:05 п. 1).
-      await waitHolds(s);
+      release();
+      if (!(await waitHolds(s))) {
+        // Проверка сообщения не завершилась за предел: исход неизвестен — ролик не отправляется (не «безопасно»).
+        logError('check', { code: 'timeout' });
+        if (current()) { s.stage = 'draft'; await tg.send(chatId, `${TEXT.checkUnavailable}\n\n${helpContacts()}`); }
+        return;
+      }
       if (!current()) return;
       await tg.sendVideo(chatId, r.outPath, { caption: 'Конец сцены.', width: 720, height: 1280, duration: Math.round(r.duration), reply_markup: FEEDBACK_KB });
       // /delete во время отправки: после metrics.forget новая запись о человеке не появляется.
@@ -493,9 +507,10 @@ export function createBot({
         await tg.send(chatId, TEXT.renderFail);
       }
     } finally {
-      waiting--;
+      release();
       await fs.rm(out, { force: true });
     }
+    } finally { s.delivering--; }
   }
 
   // Сообщение, пришедшее во время подготовки ролика (КОД-РЕВЬЮ QA PR 15, решение Claude 12.11 11:05 п. 1).
@@ -510,8 +525,12 @@ export function createBot({
     s.holds.add(p);
     p.finally(() => s.holds.delete(p)).catch(() => {});
   };
+  // true — все проверки завершены; false — предел holdWaitMs истёк (исход неизвестен).
   const waitHolds = async (s) => {
-    while (s.holds && s.holds.size) await Promise.allSettled([...s.holds]);
+    let timer;
+    const limit = new Promise((r) => { timer = setTimeout(() => r(false), holdWaitMs); });
+    const all = (async () => { while (s.holds && s.holds.size) await Promise.allSettled([...s.holds]); return true; })();
+    try { return await Promise.race([all, limit]); } finally { clearTimeout(timer); }
   };
   async function duringRender(chatId, s, text) {
     let body = String(text || '').trim();
@@ -579,19 +598,24 @@ export function createBot({
     if (msg.voice) {
       if (!sttAvailable() && transcribe === transcribeOgg) return tg.send(chatId, TEXT.voiceOff);
       if (msg.voice.duration > MAX_VOICE_SECONDS) return tg.send(chatId, TEXT.voiceLong);
-      await tg.action(chatId, 'typing');
-      let story = '';
-      try { story = await transcribe(await tg.fileBuffer(msg.voice.file_id), { duration: msg.voice.duration }); }
-      catch (e) { logError('stt', e); }
-      if (!alive(chatId, s)) return; // /delete во время распознавания: ничего не отвечаем
-      if (!story) return tg.send(chatId, TEXT.voiceEmpty);
-      await tg.send(chatId, `Расшифровка:\n«${story}»`);
-      if (s.stage === 'rendering') return duringRender(chatId, s, story);
-      return handleStory(chatId, s, story, 'voice');
+      // Голос во время подготовки ролика держит доставку уже с начала распознавания, а не после него.
+      let releaseVoice = null;
+      if (s.delivering) holdDelivery(s, new Promise((r) => { releaseVoice = r; }));
+      try {
+        await tg.action(chatId, 'typing');
+        let story = '';
+        try { story = await transcribe(await tg.fileBuffer(msg.voice.file_id), { duration: msg.voice.duration }); }
+        catch (e) { logError('stt', e); }
+        if (!alive(chatId, s)) return; // /delete во время распознавания: ничего не отвечаем
+        if (!story) return tg.send(chatId, TEXT.voiceEmpty);
+        await tg.send(chatId, `Расшифровка:\n«${story}»`);
+        if (s.delivering) return await duringRender(chatId, s, story);
+        return handleStory(chatId, s, story, 'voice');
+      } finally { if (releaseVoice) releaseVoice(); }
     }
 
     if (!text) return;
-    if (s.stage === 'rendering') return duringRender(chatId, s, text);
+    if (s.delivering) return duringRender(chatId, s, text);
     if ((s.stage === 'draft' || s.stage === 'watched') && s.episode) {
       const cmd = parseEdit(text);
       if (cmd) {
