@@ -181,9 +181,8 @@ test('бот: правка от самого человека становитс
   const render = async (ep, opts) => { rendered.push({ ep, opts }); await fs.mkdir(path.dirname(opts.outPath), { recursive: true }); await fs.writeFile(opts.outPath, 'x'); return { outPath: opts.outPath, duration: 24, seconds: 1 }; };
   const bot = createBot({ safetyCheck: async () => false, tg, metrics: makeMetrics(path.join(dir, 'm.jsonl')), render, draft: (s, o) => makeDraft(s, { ...o, provider: 'manual' }) });
   const chat = { id: 6, type: 'private' };
-  // Слияние с PR 14 (решение владельца 11.11 12:05, п. 4): рассказ, из которого заготовка не собирает двух строк, даёт
-  // реплику нехватки без черновика. Поэтому здесь рассказ от первого лица с двумя строками; правки добавляют свои.
-  await bot.handleUpdate({ message: { chat, text: 'Утром я пила чай. Вечером я пекла пирог.' } });
+  await bot.handleUpdate({ message: { chat, text: SAFE_STORY } });
+  // заготовка без модели строк не предлагает (вариант 1, 12.11): реплика нехватки с приглашением (PR 14) —
   // человек добавляет строки сам, их слова становятся опорой
   await bot.handleUpdate({ message: { chat, text: '+ Утром — я кормила жирафа' } });
   await bot.handleUpdate({ message: { chat, text: '+ Вечером — я звонила другу' } });

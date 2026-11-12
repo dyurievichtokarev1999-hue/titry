@@ -165,7 +165,9 @@ export function applyEdit(ep, cmd) {
         const pair = pairFromSentence(cmd.value, new Set(), cmd.value);
         if (pair) { rows[idx] = { ...pair.row }; return null; }
       }
-      // пару собрать не из чего (одно слово): прежняя роль остаётся, опора — текст правки
+      // пару собрать не из чего (одно слово, сон, «почти»…): роли из этого текста нет — проверка покажет «нет роли»,
+      // а не «слово не из рассказа» про прежнюю роль, которой человек не писал
+      rows[idx].role = '';
       rows[idx].value = cmd.value;
       rows[idx].source = cmd.value;
       return null;
@@ -191,6 +193,9 @@ const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replac
 /** Ошибка проверки словами для человека: без «цитаты» и служебных терминов. */
 export function personMessage(e) {
   if (!e) return '';
+  // строка без роли (правка «N: текст», из которого пару не собрать): подсказываем, как написать
+  const noRole = /^rows\.(\d+)\.role$/.exec(e.path || '');
+  if (noRole && /нет роли/.test(e.msg || '')) return `${e.msg} Напиши её так: «${+noRole[1] + 1}: роль — текст».`;
   if (!String(e.kind || '').startsWith('words:')) return e.msg;
   const n = e.row + 1;
   const redo = `Напиши её заново своими словами: «${n}: роль — текст».`;
