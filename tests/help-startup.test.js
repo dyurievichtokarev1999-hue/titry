@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { prepareHelp, helpMessage, TELEGRAM_TEXT_LIMIT, INSUFFICIENT_TEXT, INSUFFICIENT_WITH_HELP_LIMIT } from '../server/safety.js';
+import { prepareHelp, helpMessage, TELEGRAM_TEXT_LIMIT, INSUFFICIENT_TEXT, INSUFFICIENT_INVITE_TEXT, INSUFFICIENT_WITH_HELP_LIMIT, loadHelp } from '../server/safety.js';
 import { prepareBot } from '../server/bot.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -165,4 +165,22 @@ test('ограничитель 3500 проверяется при старте: 
   assert.equal(INSUFFICIENT_WITH_HELP_LIMIT, 3500);
   prepareHelp();
   assert.ok(INSUFFICIENT_TEXT.length + 2 + helpMessage('concern').length <= INSUFFICIENT_WITH_HELP_LIMIT, 'рабочий файл проходит');
+});
+
+// Слияние с PR 14 (вариант 1): в боте за репликой идёт приглашение — предел 3500 считается вместе с ним.
+test('ограничитель 3500 учитывает приглашение: «реплика + блок» укладываются, а с приглашением — нет → проверка при старте падает', async () => {
+  const base = INSUFFICIENT_TEXT.length + 2;
+  const invite = INSUFFICIENT_INVITE_TEXT.length + 2;
+  const empty = helpMessage('concern', { region: 'RU', contacts: [{ label: '', phone: '112' }] }).length;
+  // Блок помощи такой длины, что без приглашения ровно 3500, а с приглашением — больше.
+  const help = { region: 'RU', contacts: [{ label: 'Ж'.repeat(INSUFFICIENT_WITH_HELP_LIMIT - base - empty), phone: '112' }] };
+  assert.equal(base + helpMessage('concern', help).length, INSUFFICIENT_WITH_HELP_LIMIT);
+  assert.ok(base + invite + helpMessage('concern', help).length > INSUFFICIENT_WITH_HELP_LIMIT);
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-help-inv-'));
+  const f = path.join(dir, 'help.json');
+  try {
+    await fs.writeFile(f, JSON.stringify({ region: 'RU', emergency: { label: help.contacts[0].label, phone: '112', verified: true } }));
+    assert.equal(loadHelp(f).contacts.length, 1);
+    assert.throws(() => prepareHelp(f), { code: 'help_config' });
+  } finally { await fs.rm(dir, { recursive: true, force: true }); prepareHelp(); }
 });

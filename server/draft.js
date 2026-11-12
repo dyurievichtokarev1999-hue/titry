@@ -383,6 +383,8 @@ export async function makeDraft(story, opts = {}) {
       if (result.episode.rows.length < 2 || insufficientAfterExclusion(result.episode, text)) {
         // Заметка — по фактической причине (организатору; без текста рассказа). Поведение одно и то же.
         const ep = result.episode;
+        // Вариант 1 (PR 13, 12.11): заготовка строк не даёт, поэтому этот переход всегда заканчивается нехваткой ниже,
+        // и заметка организатору наружу не уходит; оставлена на случай возврата строк заготовки.
         note = ep.rows.length < 2
           ? 'У черновика модели не хватило строк с опорой на рассказ, показана заготовка без ИИ.'
           : !String(ep.title || '').trim() || !String(ep.genre || '').trim()

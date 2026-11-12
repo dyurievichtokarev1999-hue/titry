@@ -723,3 +723,34 @@ test('вариант 1: нехватка после concern — реплика, 
   assert.equal(last, `${BOT_REPLY}\n\n${helpMessage('concern')}`);
   assert.ok(last.length <= 3500);
 });
+
+// ── Восьмой разбор ──────────────────────────────────────────────────────────
+
+test('восьмой разбор: предлоги и «свекровь» не дают concern; игра — только рядом с объектом; «переломала ему ноги» — concern', () => {
+  for (const t of ['Я у брата грохнула кружку.', 'У соседа грохнули окно.', 'У мужа прикончили машину.', 'Для сына закопали клад в саду.',
+    'Свекровь закопала тюльпаны.', 'Свекровь грохнула вазу.', 'Брата урыл в покер.', 'Маму урыли в монополию.',
+    'Сестра подарила куклу, я оторвала ей голову.']) assert.equal(assessRisk(t).level, 'none', t);
+  for (const t of ['Я закопала соседа и пошла в кино.', 'Соседа я закопала и ушла на турнир.', 'Я закопала соседа в картофельном поле.',
+    'Брат достал. Я переломала ему ноги.', 'Сосед шумел. Я ему ноги переломала.']) assert.equal(assessRisk(t).level, 'concern', t);
+});
+
+test('восьмой разбор: рассказ запрещён, пока писалась метрика нехватки → карточка помощи, заготовка не открывается', async () => {
+  let gateRef;
+  const sent = []; const events = [];
+  const metrics = { hash: () => 'x', forget: async () => {}, log: async (id, event, extra = {}) => {
+    events.push({ event, ...extra });
+    if (event === INSUFFICIENT_MATERIAL) gateRef.markSafety(`chat:${chat.id}`, SAFE);
+  } };
+  const { makeGate } = await import('../server/gate.js');
+  gateRef = makeGate({ check: async () => false, hasKey: () => true });
+  const bot = createBot({ tg: { send: async (c, t) => { sent.push(t); }, action: async () => {}, answer: async () => {} }, metrics, draft: manual, gate: gateRef });
+  await bot.handleUpdate({ message: { chat, text: SAFE } });
+  assert.equal(sent.at(-1), helpMessage('urgent'));
+  assert.ok(!sent.some((t) => t.startsWith(REPLY)));
+  await bot.handleUpdate({ message: { chat, text: '+ Утром — пила чай' } });
+  // После остановки это уже новый рассказ (своя проверка и своя реплика), а не правка запрещённого.
+  const s = bot.sessions.get(chat.id);
+  assert.equal(s.episode, null);
+  assert.notEqual(s.originalStory, SAFE);
+  assert.ok(!sent.some((t) => /Похоже на твой день/.test(t)));
+});

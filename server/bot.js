@@ -563,12 +563,17 @@ export function createBot({
       return tg.send(chatId, g.kind === 'technical' ? TEXT.checkPaused : TEXT.checkUnavailable);
     }
     if (!current()) return;
+    s.stage = 'idle'; // заготовка появится только перед самой отправкой реплики (восьмой разбор)
+    await metrics.log(chatId, code === INSUFFICIENT_MATERIAL ? INSUFFICIENT_MATERIAL : INSUFFICIENT_AFTER_EXCLUSION);
+    if (!current()) {
+      // Пока писалась метрика, тот же рассказ остановлен (например, проверкой прежней сессии): карточка помощи, не тишина.
+      if (stoppedNow() && sameStoryInWork()) return stopForSafety(chatId, s, 'urgent', { at: 'late' });
+      return;
+    }
     // Черновика нет, но человек может написать строки сам (вариант 1): правки ложатся на пустую заготовку эпизода
     // (название, жанр, плёнка — из draftRuleBased, строк нет). Кнопок нет, пока нет черновика.
     s.stage = 'compose';
     s.skeleton = draftRuleBased(story, { date: todayIso(now()), period: s.period }).episode;
-    await metrics.log(chatId, code === INSUFFICIENT_MATERIAL ? INSUFFICIENT_MATERIAL : INSUFFICIENT_AFTER_EXCLUSION);
-    if (!current()) return;
     for (const text of insufficientMessages(concern)) await tg.send(chatId, text);
   }
 
@@ -681,6 +686,10 @@ export function createBot({
     // Пустая заготовка после нехватки: первая правка открывает черновик (рассказ уже прошёл ту же проверку,
     // что перед репликой нехватки: остановка → технические исходы → нехватка).
     if (s.stage === 'compose' && s.skeleton && !s.episode && parseEdit(text)) {
+      const original = s.originalStory || s.story;
+      // Рассказ, который тем временем запрещён, черновика не открывает: карточка помощи (восьмой разбор).
+      if (isBlocked(s, original) || gate.status(s.scope, original).kind === 'safety') return stopForSafety(chatId, s, 'urgent', { at: 'late' });
+      if (gate.status(s.scope, original).kind) { s.skeleton = null; s.stage = 'idle'; return tg.send(chatId, TEXT.checkUnavailable); }
       s.episode = s.skeleton; s.skeleton = null; s.verdict = 'ok'; s.edits = 0; s.stage = 'draft';
     }
     if ((s.stage === 'draft' || s.stage === 'watched') && s.episode) {
