@@ -120,7 +120,8 @@ test('черновик модели: строки со словами не из 
   const c2 = { beta: { messages: { create: async () => ({ model: 'm', stop_reason: 'end_turn', usage: {}, content: [{ type: 'text', text: JSON.stringify(thin) }] }) } } };
   const r2 = await makeDraft(STORY, { provider: 'claude', client: c2 });
   assert.equal(r2.provider, 'manual');
-  assert.ok(r2.episode.rows.every(rowWordsGrounded));
+  // Слияние с PR 14 (решение владельца 11.11 12:05, п. 4): если и заготовка не собирает двух строк — нехватка без черновика.
+  assert.equal(r2.insufficient, true); assert.equal(r2.code, 'insufficient_material'); assert.equal(r2.episode, null);
   const d = await draftWithClaude(STORY, { client: c2, date: '2026-11-11' });
   assert.equal(d.episode.rows.length, 0);
 });
@@ -411,7 +412,8 @@ test('заготовка без модели строк не предлагае�
   // makeDraft без ключей — та же нехватка
   const md = await makeDraft('Утром я пила чай. Днём я мыла посуду. Вечером я гуляла с собакой.', { provider: 'manual' });
   assert.equal(md.insufficient, true);
-  assert.equal(md.episode.rows.length, 0);
+  // Слияние с PR 14 (решение 11.11 12:05, п. 4): нехватка — без черновика, код insufficient_material.
+  assert.equal(md.episode, null); assert.equal(md.code, 'insufficient_material');
 });
 
 /** Бот с вымышленным рассказом; строки человек пишет сам (+ или N:). */

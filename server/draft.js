@@ -5,7 +5,7 @@
 import { safeCode } from './errlog.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { LIMITS, MOODS, blankEpisode, cleanInput, detectGender, isMarkerWord, rowWordProblems, rowWordsGrounded, sanitizeEpisode, sourceFound, todayIso, validateEpisode, wordsOf } from '../engine/episode.js';
-import { assessRisk, threatSentences, touchesThreat, validateSafeEpisode } from './safety.js';
+import { assessRisk, threatSentences, touchesThreat, threatPhrase, threatPronounFilter, validateSafeEpisode, insufficientAfterExclusion, INSUFFICIENT_AFTER_EXCLUSION, INSUFFICIENT_MATERIAL } from './safety.js';
 
 export const DEFAULT_MODEL = process.env.TITRY_MODEL || 'claude-opus-5-5';
 
@@ -130,14 +130,18 @@ export function groundDraft(raw, story, { date = todayIso(), period = 'day' } = 
   // Угроза другому человеку не становится титром: строки с опорой на такое предложение отбрасываются.
   const threats = threatSentences(story);
   const threat = (...xs) => xs.some((x) => touchesThreat(x, threats, story));
+  // Как у заготовки (разбор 08ead472, согласованность): строка с местоимением на человека из исключённой угрозы.
+  const pronounToThreat = threatPronounFilter(story);
   for (const r of raw.rows || []) {
     // Слова роли и значения — только из цитаты этой строки, признаки («не», «бы», «если»…) не оторваны.
-    if (sourceFound(r.source, story) && rowWordsGrounded(r, story) && !threat(r.role, r.value, r.source)) rows.push({ role: r.role, value: r.value, source: r.source });
+    if (sourceFound(r.source, story) && rowWordsGrounded(r, story) && !threat(r.role, r.value, r.source) && !threatPhrase(`${r.role || ''} ${r.value || ''}`) && !pronounToThreat(r.source)) rows.push({ role: r.role, value: r.value, source: r.source });
     else dropped.push(r);
   }
-  // сцена после титров — как строка: слова из её цитаты, признаки не оторваны
+  // сцена после титров — как строка: слова из её цитаты, признаки не оторваны (PR 13); угроза и словарь угроз,
+  // местоимение на человека из угрозы — как у строк (PR 14)
   const post = raw.post && raw.post.text && sourceFound(raw.post.source, story)
     && rowWordProblems({ role: '', value: raw.post.text, source: raw.post.source }, story).length === 0 && !threat(raw.post.text, raw.post.source)
+    && !threatPhrase(raw.post.text) && !pronounToThreat(raw.post.source)
     ? { text: raw.post.text, source: raw.post.source } : { text: '', source: '' };
   if (raw.post && raw.post.text && !post.text) dropped.push({ role: 'после титров', ...raw.post });
   const mood = Object.hasOwn(MOODS, raw.mood ?? '') ? raw.mood : 'quiet'; // пустой или неизвестный mood — нейтральный quiet
@@ -353,7 +357,9 @@ export function draftRuleBased(story, { date = todayIso(), period = 'day' } = {}
 
 /**
  * Главная точка входа: безопасность → черновик (Claude или заготовка) → проверка.
- * Возвращает { episode, validation, risk, provider, dropped, note }.
+ * Возвращает { episode, validation, risk, provider, dropped, note }. Исходы без черновика (episode: null), по старшинству:
+ * остановка { risk: urgent } → недоступность { unavailable, code } → нехватка { insufficient: true,
+ * code: 'insufficient_after_exclusion' | 'insufficient_material', risk } (risk тут none/concern; это не остановка).
  */
 export async function makeDraft(story, opts = {}) {
   const text = cleanInput(story || '').trim();
@@ -374,8 +380,19 @@ export async function makeDraft(story, opts = {}) {
         risk = assessRisk(text, true);
         return { risk, episode: null, provider };
       }
-      if (result.episode.rows.length < 2) {
-        note = 'У черновика модели не хватило строк с опорой на рассказ, показана заготовка без ИИ.';
+      // Мало строк с опорой — или после исключения опасных частей черновик модели не собирается (название/жанр
+      // опираются на угрозу, пригодных строк меньше двух): сначала заготовка без ИИ, нехватка — только если и она
+      // не собирается. Заготовка проходит тот же validateSafeEpisode ниже.
+      if (result.episode.rows.length < 2 || insufficientAfterExclusion(result.episode, text)) {
+        // Заметка — по фактической причине (организатору; без текста рассказа). Поведение одно и то же.
+        const ep = result.episode;
+        // Вариант 1 (PR 13, 12.11): заготовка строк не даёт, поэтому этот переход всегда заканчивается нехваткой ниже,
+        // и заметка организатору наружу не уходит; оставлена на случай возврата строк заготовки.
+        note = ep.rows.length < 2
+          ? 'У черновика модели не хватило строк с опорой на рассказ, показана заготовка без ИИ.'
+          : !String(ep.title || '').trim() || !String(ep.genre || '').trim()
+            ? 'Название или жанр черновика модели опирались на исключённую часть рассказа, показана заготовка без ИИ.'
+            : 'После исключения опасных частей у черновика модели не осталось двух пригодных строк, показана заготовка без ИИ.';
         result = draftRuleBased(text, opts);
         provider = 'manual';
       }
@@ -389,7 +406,18 @@ export async function makeDraft(story, opts = {}) {
     result = draftRuleBased(text, opts);
     provider = 'manual';
   }
+  // Черновик модели и заготовка без ИИ проходят один и тот же валидатор. Если после исключения опасных частей
+  // не собирается обязательный элемент (title, genre, LIMITS.rowsMin строк) — внутренняя причина
+  // insufficient_after_exclusion: без черновика, без исключённых строк (dropped) и без дописанных событий.
+  // Сюда доходят только рассказы без stop (urgent/safety_flag) и без технической недоступности: они вернулись выше.
   const validation = validateSafeEpisode(result.episode, text);
+  if (insufficientAfterExclusion(result.episode, text, validation)) {
+    return { risk, episode: null, provider, insufficient: true, code: INSUFFICIENT_AFTER_EXCLUSION };
+  }
+  // Решение владельца 11.11 12:05, п. 4: обычная нехватка у заготовки (меньше LIMITS.rowsMin строк из слов человека,
+  // исключений не было) — тот же исход и та же реплика, что после исключения: без черновика с ⚠ и без ролика.
+  // Модель сюда попадает только через заготовку (мало строк у модели → заготовка), поэтому реплика одна для обоих путей.
+  if (result.insufficient) return { risk, episode: null, provider, insufficient: true, code: INSUFFICIENT_MATERIAL };
   return { ...result, validation, risk, provider, note };
 }
 

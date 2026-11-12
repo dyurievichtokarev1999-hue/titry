@@ -10,7 +10,7 @@ import { MOODS, TRACKS, sanitizeEpisode, validateEpisode, episodeToText, cleanIn
 import { makeDraft, hasClaudeCredentials, DEFAULT_MODEL, modelSafetyCheck } from './draft.js';
 import { renderEpisode, ROOT } from './render.js';
 import { logError, safeCode } from './errlog.js';
-import { loadHelp, helpMessage, assessEpisodeRisk, validateSafeEpisode } from './safety.js';
+import { currentHelp, prepareHelp, helpMessage, assessEpisodeRisk, validateSafeEpisode, INSUFFICIENT_TEXT } from './safety.js';
 import { makeGate } from './gate.js';
 import { makeLedger, KEY_ENV, KEY_VERSION_ENV } from './ledger.js';
 
@@ -145,6 +145,14 @@ const TECHNICAL = {
   message: 'Сервис дважды не смог завершить проверку рассказа. Сейчас ролик не создаётся. Ждать в чате и отвечать на это сообщение не нужно.',
   next: 'Повторную полную проверку можно запустить только явным действием организатора, не раньше чем через 15 минут после второго сбоя. Ожидание и перезапуск сами по себе не снимают приостановку. Если остановка по безопасности уже подтверждена, она сохраняется.',
 };
+// Нехватка материала после исключения опасных частей (внутренняя причина insufficient_after_exclusion):
+// 422 с kind 'insufficient' и одной репликой редактора повествования, дословно. Без черновика, validation, risk
+// и подсказок организатору: ни просьбы дописать, ни повтора. Имя причины в ответ не выдаётся.
+// Решение владельца 1 (PR 11): если исключался фрагмент уровня concern, в ответе ещё help — тот же блок помощи,
+// что у прежней карточки concern (helpMessage('concern')); экран показывает его сразу за репликой.
+// Признак concern — уровень всего рассказа (r.risk.level), как у прежней карточки concern: сознательно то же условие.
+export { INSUFFICIENT_TEXT }; // текст — в server/safety.js
+const INSUFFICIENT = { kind: 'insufficient', error: INSUFFICIENT_TEXT };
 const SCOPE = 'studio'; // монтажная — одна общая область запретов
 
 /**
@@ -188,7 +196,7 @@ export function createApp({
     'GET /api/config': async () => ({
       provider: hasClaudeCredentials() ? 'claude' : 'manual',
       model: hasClaudeCredentials() ? DEFAULT_MODEL : null,
-      help: loadHelp(),
+      help: currentHelp(), // проверено при старте, файл не перечитывается
     }),
 
     'POST /api/draft': async (req) => {
@@ -199,10 +207,18 @@ export function createApp({
       if (before.kind === 'safety') return draftStop({ level: 'urgent', byModel: true, matches: [] });
       if (before.kind === 'technical') return technical(before);
       if (before.kind === 'unavailable') return fromGate(before, 'draft');
-      const result = await draft(story, {
+      // Черновик — незавершённое решение по рассказу (gate.holdDraft): соседняя вкладка с тем же рассказом его ждёт.
+      const result = await gate.holdDraft(SCOPE, story, draft(story, {
         date: body.date, period: body.period, tone: body.tone, provider: body.provider,
-      });
+      }));
       if (result.unavailable) return unavailable(result.code);
+      if (result.insufficient) {
+        // Порядок исходов: stop → техническая недоступность/пауза → нехватка. Отдельная проверка рассказа
+        // (как перед рендером) идёт до реплики: опасность даёт 422/safety, неполная проверка — 503/technical.
+        const g = await gate.verify(SCOPE, story, null, String(story ?? ''), { includeDrafts: true });
+        if (!g.ok) return g.kind === 'safety' ? draftStop({ level: 'urgent', byModel: true, matches: [] }) : fromGate(g, 'draft');
+        return { status: 422, body: result.risk && result.risk.level === 'concern' ? { ...INSUFFICIENT, help: helpMessage('concern') } : { ...INSUFFICIENT } };
+      }
       if (!result.episode) {
         // S01 (локальный слой) и S03 (генератор): рассказ остановлен в этой области.
         if (result.risk.level === 'urgent') { gate.markSafety(SCOPE, story); return draftStop(result.risk); }
@@ -363,6 +379,12 @@ export function createApp({
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT || 4173);
+  // Контакты помощи — один раз при старте, до приёма задач: без проверенного блока помощи монтажная не стартует.
+  try { prepareHelp(); } catch (e) {
+    logError('help.load', e);
+    console.error('Запуск остановлен: контакты помощи (config/help.json) не читаются или не прошли проверку. Задачи не принимаются.');
+    process.exit(3);
+  }
   // Хранилище запретов: data/state/blocked-v1.json; пустой набор запретов не подставляется никогда.
   // Если хранилище сломается уже во время работы — ролики не выдаются (503 ledger).
   const ledger = makeLedger({ file: path.join(ROOT, 'data', 'state', 'blocked-v1.json'), key: process.env[KEY_ENV], keyVersion: process.env[KEY_VERSION_ENV] || 'v1' });

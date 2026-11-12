@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { applyEdit, createBot, draftMessage, makeMetrics, parseEdit } from '../server/bot.js';
+import { TEXT, applyEdit, createBot, draftMessage, makeMetrics, parseEdit } from '../server/bot.js';
 import { draftRuleBased } from '../server/draft.js';
 
 // Есть ли значение id среди значений полей журнала (рекурсивно). Подстроку не ищем:
@@ -65,17 +65,21 @@ test('сценарий бота: рассказ → правка → ролик 
   const render = async (ep, opts) => { rendered.push(ep); await fs.mkdir(path.dirname(opts.outPath), { recursive: true }); await fs.writeFile(opts.outPath, 'mp4'); return { outPath: opts.outPath, duration: 24, seconds: 1 }; };
   const bot = createBot({ safetyCheck: async () => false, tg, metrics, render, draft: (s, o) => import('../server/draft.js').then((m) => m.makeDraft(s, { ...o, provider: 'manual' })) });
   const chat = { id: 42, type: 'private' };
+  // Слияние с PR 14 (вариант 1, 12.11): заготовка строк не даёт — реплика нехватки с приглашением, черновика с ⚠ нет;
+  // строки человек пишет сам правками, первая правка открывает черновик.
   const story = 'Сегодня я долго правил письмо и отправил его. Вечером позвонил друг. Потом ужин и сериал.';
 
   await bot.handleUpdate({ message: { chat, text: '/start' } });
   await bot.handleUpdate({ message: { chat, text: story } });
-  assert.ok(tg.sent.some((m) => /Похоже на твой день/.test(m.text)));
+  assert.ok(tg.sent.some((m) => m.text === `${TEXT.insufficient}\n\n${TEXT.insufficientInvite}`));
+  assert.ok(!tg.sent.some((m) => /Похоже на твой день|⚠/.test(m.text)), 'черновика с ⚠ нет');
   await bot.handleUpdate({ message: { chat, text: '+ Утром — я отправил письмо' } });
+  assert.ok(tg.sent.some((m) => /Похоже на твой день/.test(m.text)));
   await bot.handleUpdate({ message: { chat, text: '+ Вечером — я смотрел сериал' } });
   await bot.handleUpdate({ callback_query: { id: 'q1', data: `mood:${playId(tg)}`, message: { chat } } });
   await bot.handleUpdate({ callback_query: { id: 'q2', data: `play:${playId(tg)}`, message: { chat } } });
   assert.equal(rendered.length, 1);
-  assert.equal(rendered[0].rows[0].value, 'я отправил письмо');
+  assert.ok(rendered[0].rows.some((r) => r.value === 'я отправил письмо'));
   // Настроение не названо → quiet (10.11); кнопка плёнки переключает по кругу quiet → warm.
   assert.equal(rendered[0].mood, 'warm');
   assert.ok(tg.sent.some((m) => m.type === 'video'));
