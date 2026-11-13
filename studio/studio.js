@@ -8,6 +8,9 @@ const state = {
   provider: null,
   feedback: null,
   t: 0, playing: false, last: 0,
+  drafting: 0,          // поколение запроса черновика: поздний ответ прежнего запроса (или до выбора примера) не применяется
+  screen: 0,            // поколение экрана результата: ответ рендера/перепроверки, начатых до нехватки, не показывается
+  insufficient: false,  // нехватка материала после исключения: рендер выключен до нового проверенного черновика
 };
 const T = timeline(DEFAULT_DURATION);
 const audio = new Audio();
@@ -61,7 +64,7 @@ function renderRows() {
   state.episode.rows.forEach((r, i) => {
     const line = document.createElement('div');
     line.className = 'rowline';
-    for (const [k, ph] of [['role', 'Друг'], ['value', 'вечерний звонок'], ['source', 'друг позвонил поговорить']]) {
+    for (const [k, ph] of [['role', 'Друг'], ['value', 'позвонил поговорить'], ['source', 'друг позвонил поговорить']]) {
       const inp = document.createElement('input');
       inp.dataset.k = k; inp.placeholder = ph; inp.value = r[k] || '';
       inp.setAttribute('aria-label', `Строка ${i + 1}: ${k === 'role' ? 'роль' : k === 'value' ? 'значение' : 'цитата'}`);
@@ -90,6 +93,8 @@ function showChecks() {
   const v = validateEpisode(state.episode, story);
   const ul = $('checks');
   ul.textContent = '';
+  // Нехватка: пустая форма не превращается в список «допишите» — проверять нечего, рендер выключен.
+  if (state.insufficient) { $('renderBtn').disabled = true; return v; }
   const add = (cls, msg) => { const li = document.createElement('li'); li.className = cls; li.textContent = msg; ul.append(li); };
   v.errors.forEach((e) => add('error', e.msg));
   v.warnings.forEach((w) => add('warning', w.msg));
@@ -99,7 +104,7 @@ function showChecks() {
     const m = /^rows\.(\d+)\.(\w+)$/.exec(item[0].path);
     if (m) $('rows').children[m[1]]?.querySelector(`[data-k=${m[2]}]`)?.classList.add(item[1]);
   }
-  $('renderBtn').disabled = !v.ok;
+  $('renderBtn').disabled = !v.ok || state.insufficient;
   return v;
 }
 
@@ -165,9 +170,12 @@ api('/api/config').then((c) => {
 async function requestDraft() {
   const story = $('story').value.trim();
   if (!story) { $('draftNote').textContent = 'Вставьте рассказ участника.'; return; }
+  const my = ++state.drafting;
   $('draftBtn').disabled = true; $('draftNote').textContent = 'Собираю черновик…';
   try {
     const r = await api('/api/draft', { story, date: $('date').value, period: $('period').value, tone: $('tone').value });
+    if (my !== state.drafting) return; // пока ждали, выбран пример или запрошен новый черновик
+    state.insufficient = false; // любой исход нового рассказа, кроме нехватки, возвращает обычный маршрут
     if (!r.episode) { if (r.help) showHelp(r.help); $('draftNote').textContent = 'Черновик остановлен фильтром безопасности.'; return; }
     state.episode = r.episode; state.draft = structuredClone(r.episode); state.provider = r.provider;
     fillForm(state.episode); changed();
@@ -175,9 +183,14 @@ async function requestDraft() {
     $('draftNote').textContent = (r.provider === 'claude' ? 'Черновик от Claude.' : 'Заготовка без ИИ: сократите значения до коротких фраз.') + dropped + (r.note ? ' ' + r.note : '');
     if (r.help) showHelp(r.help);
   } catch (e) {
+    // Поздний ответ (в том числе «нехватка») не очищает уже выбранный пример. Но поздняя остановка по безопасности
+    // всё равно показывает помощь: организатор должен знать, что прежний рассказ остановлен.
+    if (my !== state.drafting) { if (e.data && e.data.kind === 'safety' && e.data.help) showHelp(e.data.help); return; }
+    // Не нехватка (stop, технический ответ, ошибка) — флаг снимается, иначе кнопка перепроверки была бы мёртвой.
+    if (!(e.data && e.data.kind === 'insufficient')) state.insufficient = false;
     // ИР-02: «проверка недоступна» — экран организатора целиком (тексты редактора повествования, PM-01).
     $('draftNote').textContent = stopText(e, 'Черновик остановлен фильтром безопасности.');
-  } finally { $('draftBtn').disabled = false; }
+  } finally { if (my === state.drafting) $('draftBtn').disabled = false; }
 }
 $('draftBtn').addEventListener('click', requestDraft);
 
@@ -192,7 +205,33 @@ function stopText(e, safetyNote) {
     return `${d.error}. ${d.message} ${d.next}${when}`;
   }
   if (d.unavailable) return `${d.error}. ${d.message} ${d.next}`;
+  // Нехватка материала после исключения опасных частей: реплика дословно; при concern сразу за ней — блок помощи.
+  // Окно помощи модальное и закрывает экран, поэтому реплика стоит и в окне — сразу над тем же блоком помощи.
+  if (d.kind === 'insufficient') { enterInsufficient(); if (d.help) showHelp(`${d.error}\n\n${d.help}`); return d.error; }
   return e.message;
+}
+
+// Нехватка материала (решение владельца по PR 11): прежний ролик не играет, блок результата, ссылка скачивания
+// и кнопки повтора (в том числе перепроверки после технической паузы) скрыты, черновик очищен, рендер выключен
+// до нового проверенного черновика. Файлы на сервере не трогаются: их сохраняет и удаляет действующий маршрут.
+function enterInsufficient() {
+  state.insufficient = true;
+  state.screen++;
+  $('help').hidden = true; // помощь прежнего черновика не остаётся на экране
+  state.provider = null; state.feedback = null;
+  stop(); // предпросмотр и звук
+  const video = $('video');
+  video.pause();
+  video.removeAttribute('src'); video.load();
+  $('download').removeAttribute('href'); $('download').removeAttribute('download');
+  $('result').hidden = true;
+  $('recheckBtn').hidden = true;
+  $('renderNote').textContent = '';
+  state.t = 0;
+  state.episode = blankEpisode({ date: $('date').value || undefined, period: $('period').value || 'day' });
+  state.draft = structuredClone(state.episode);
+  fillForm(state.episode); changed();
+  $('renderBtn').disabled = true;
 }
 
 function showHelp(text) { $('helpText').textContent = text; $('help').hidden = false; $('helpClose').focus(); }
@@ -203,6 +242,9 @@ $('example').addEventListener('change', async () => {
   if (!id) return;
   const data = await (await fetch(`/examples/${id}.json`)).json();
   $('story').value = data.story;
+  state.drafting++; // ответ черновика, запрошенного до выбора примера, не применяется
+  $('draftBtn').disabled = false;
+  state.insufficient = false; // вымышленный пример со своим рассказом — обычный маршрут
   state.episode = sanitizeEpisode(data.episode); state.draft = structuredClone(state.episode); state.provider = 'example';
   state.t = T.titleHold - 0.5;
   fillForm(state.episode); changed();
@@ -210,25 +252,33 @@ $('example').addEventListener('change', async () => {
 });
 
 $('renderBtn').addEventListener('click', async () => {
+  if (state.insufficient) return;
+  const screen = state.screen;
   $('renderBtn').disabled = true; $('renderNote').textContent = 'Рендер… обычно 15–40 секунд.';
   try {
     const r = await api('/api/render', { episode: state.episode, story: $('story').value.trim() || undefined, participant: $('participant').value, preset: $('preset').value, watermark: $('watermark').checked, still: $('still').checked });
+    if (screen !== state.screen) return; // пока шёл рендер, экран перешёл в нехватку
     $('video').src = r.video; $('download').href = r.video; $('download').download = r.video.split('/').pop();
     $('result').hidden = false;
     $('renderNote').textContent = `Готово за ${r.seconds.toFixed(0)} с. Отправьте файл участнику.`;
   } catch (e) {
+    if (screen !== state.screen) return;
     $('renderNote').textContent = stopText(e, 'Ролик не собирается: сработал фильтр безопасности.');
   } finally { showChecks(); }
 });
 
 // Явное действие организатора после технической приостановки: полная проверка заново, не раньше срока.
 $('recheckBtn').addEventListener('click', async () => {
+  if (state.insufficient) return;
+  const screen = state.screen;
   $('recheckBtn').disabled = true;
   try {
     await api('/api/recheck', { episode: state.episode, story: $('story').value.trim() || undefined });
+    if (screen !== state.screen) return;
     $('recheckBtn').hidden = true;
     $('renderNote').textContent = 'Проверка пройдена заново. Можно собрать ролик.';
   } catch (e) {
+    if (screen !== state.screen) return;
     $('renderNote').textContent = stopText(e, 'Ролик не собирается: сработал фильтр безопасности.');
     if (e.data && e.data.kind === 'safety') $('recheckBtn').hidden = true;
   } finally { $('recheckBtn').disabled = false; }

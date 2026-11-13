@@ -10,7 +10,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { validateEpisode } from '../engine/episode.js';
+import { validateEpisode, LIMITS, joinEdits } from '../engine/episode.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -286,7 +286,34 @@ export function assessRisk(text, modelFlag = false) {
   const full = riskCore(t, text, modelFlag);
   // Все проверки — на исходном тексте; исключение только понижает тревогу, вызванную одной гиперболой.
   if (full.level === 'urgent' && !modelFlag && onlyHyperbole(t)) return { level: 'concern', matches: ['hyperbole_threat_with_reason'], byModel: false };
+  // Решение владельца 11.11 15:05: фраза из словаря угроз титров (threatPhrase — одна точка правды, без второго списка)
+  // поднимает none до concern: «Брата прикончу», «Брат — покойник», «Ноги переломаю соседу», «Зарежу», «Иди сдохни».
+  // Только повышение: уровни других правил не меняются (монотонность).
+  if (full.level === 'none' && phraseRisk(text)) return { level: 'concern', matches: ['threat_phrase'], byModel: false };
   return full;
+}
+/**
+ * Словарь угроз титров для оценки риска — те же выражения (DOOM_NOUN, DOOM_PRON, THREATENED_ME), без второго списка.
+ * Части: предложения и их части через запятую (не перед «если/когда/пока» — иначе «не проснётся, если не шуметь»
+ * теряет своё условие). Угроза через местоимение («Ему конец.», «Он не жилец.») — только в начале предложения и при
+ * человеке в этом или предыдущем предложении: «Телефон старый, он скоро сдохнет» — про вещь (пятый разбор).
+ */
+function phraseRisk(text) {
+  // Пустые после flat части (разделитель правок EDIT_SEP «⁂») не считаются предложениями: иначе правка теряет контекст.
+  const sents = String(text || '').split(/(?<=[.!?…;])\s+|\n+/).map((x) => x.trim()).filter((x) => x && flat(x));
+  const hasPerson = (x) => new RegExp(PRON_PERSONS.source).test(flat(x));
+  return sents.some((x, i) => {
+    const parts = [x, ...x.split(/[,;:]\s+(?!(?:если|когда|пока)(?![а-я]))/).map((y) => y.trim()).filter((y) => y && y !== x)];
+    if (parts.some((p) => { const t = flat(p); return !!t && (DOOM_NOUN.test(t) || THREATENED_ME.test(t)); })) return true;
+    // «Тебе конец», «А тебе достанется» — обращение к человеку; «он/ему/её» — нужен человек рядом (в этом или
+    // предыдущем предложении). Проверяются и части через запятую: «Начальник наорал, ему не жить» (шестой разбор).
+    const near = hasPerson(x) || (i > 0 && hasPerson(sents[i - 1]));
+    return parts.some((p) => {
+      const t = flat(p);
+      const second = /^\s*(?:\S+\s+){0,3}?(?:ты|тебе|вам|вы)(?![а-я])/.test(t);
+      return !!t && DOOM_PRON.test(t) && (second || near);
+    });
+  });
 }
 
 /**
@@ -318,7 +345,122 @@ const ROOT_ALIAS = { мать: 'мам', матер: 'мам', матушк: 'м
 function personRoot(w) { const m = PERSON_ROOT.exec(w); const r = m ? m[1] : w; return ROOT_ALIAS[r] || r; }
 const threatMemo = new Map();
 const isThreatUnit = (u) => { if (threatMemo.has(u)) return threatMemo.get(u); const v = isThreatUnitRaw(u); if (threatMemo.size < 2000) threatMemo.set(u, v); return v; };
-const isThreatUnitRaw = (u) => { const t = stripIdioms(u); return !!harmPerson(t) || PAST_NO_OBJ.test(t) || CONCERN.some((re) => re.test(t)); };
+// Решение владельца 11.11 12:05, п. 2: фраза из словаря угроз в строке не попадает в титры никогда, даже если фильтр
+// остановки счёл её гиперболой или вообще не увидел опасности («Брату — не жить»: assessRisk даёт none). Гипербола
+// отменяет только остановку, но не правило «угроза не в титрах». Словарь проверяется на тексте БЕЗ вырезания гипербол.
+// Словарь узкий (разборы 940f41cc и 08ead472): фраза — угроза, только когда слово угрозы стоит при человеке
+// в ДАТЕЛЬНОМ падеже («Брату не жить», «Соседу скоро конец»), между ними — не больше одного слова из закрытого
+// списка («скоро», «точно», «будет»…), а слово угрозы закрывает часть или идёт перед «если/когда». Поэтому
+// «Брату осталось недолго до отпуска», «Маме достанется торт», «У мамы телефон сдохнет», «Конец урока» — не угроза.
+// Принцип (третий разбор): фраза — угроза, только когда человек стоит ПЕРВЫМ, а слово угрозы ЗАКРЫВАЕТ часть фразы
+// (конец части или «если/когда…»), между ними — до двух слов из закрытого списка. Поэтому «Брату — скоро конец»,
+// «Брат — не жилец» — угроза, а «Брат не проснётся до обеда», «Приз достанется брату», «Дедушка-покойник любил
+// рыбалку», «Ноуту хана, брат» — нет. Фразы, которые чаще говорят о горе («Бабушке осталось недолго»), в словарь не входят.
+// Сильные слова — при человеке в любом падеже.
+const DOOM_STRONG = String.raw`(?:не\s+жить|не\s+жилец|не\s+жильцы|(?:жить\s+не\s+да(?:м|дим)|не\s+да(?:м|дим)\s+жить)|не\s+проснется|не\s+доживет|сдохнет|сдохнут|хана|кранты|каюк|капут|кирдык|покойник|покойница|покойники|труп|гроб)`;
+// Слабые — только при человеке в дательном («Брату конец», «Соседу достанется»).
+const DOOM_WEAK = String.raw`(?:конец|крышка|капец|пипец|достанется|не\s+поздоровится|несдобровать|не\s+сдобровать|мало\s+не\s+покажется)`;
+const DOOM_ADV = String.raw`(?:скоро|теперь|точно|полный|полная|совсем|уже|больше|просто|реально|однозначно|наверное|наверно|сегодня|завтра|будет|настанет|придет|определенно|верный|полностью|вообще|короче|все|здесь|тут|ну|вот|так|и|же|ж|ведь|то|у\s+меня|от\s+меня|я)`;
+const DAT_PRON = String.raw`(?:ему|ей|им|тебе|вам|нему|ней|ним)`;
+// Только слова-люди, без местоимений (местоимения — отдельные ветки ниже, пятый разбор).
+const PERSON_NOUN = PERSON.replace('(?:его|ее|их|ему|ей|им|тебя|тебе|вас|вам|него|нее|ним|ней|ними|', '(?:');
+if (PERSON_NOUN === PERSON) throw new Error('PERSON: неожиданная форма');
+const PERSON_DAT = String.raw`(?<!(?:^|\s)у\s)(?=[а-я]*(?:у|ю|е|и|ам|ям)(?![а-я]))${PERSON_NOUN}`;
+const PERSON_ANY = String.raw`(?<!(?:^|\s)у\s)${PERSON_NOUN}`;
+// Перед человеком — начало части или «а/и/но/я/мой…»: «Приз достанется брату» сюда не подходит (человек не первый).
+const LEAD = String.raw`(?:^|\s)(?:(?:а|и|но|ну|вот|я|мой|моя|моему|моей|этому|этой|твоему|твоей|этот|эта|тот|та)\s+)?`;
+const DOOM_TAIL = String.raw`(?=\s*$|\s+(?:если|когда|клянусь|обещаю|понял|поняла|ясно|ага|и\s+все|за\s+это|за\s+все)(?![а-я]))`;
+const ADVS = String.raw`(?:\s+${DOOM_ADV}){0,2}`;
+const NOT_SLEEP = String.raw`(?!не\s+проснется${ADVS}\s+(?:если|когда|пока)(?![а-я]))`;
+// Глаголы расправы, которых нет в фильтре остановки («Брата закопаю»): для титров — при человеке рядом.
+const HARM_EXTRA = String.raw`(?:закопа(?:ю|ем)|приконч(?:у|им)|грохн(?:у|ем)|урою|уроем|(?:ноги|ногу|руки|руку|шею|кости|ребра)\s+(?:переломаю|сломаю|поломаю))`;
+const LIMB_VERB_FUT = String.raw`(?:переломаю|сломаю|поломаю|переломаем|сломаем|оторву)`;
+const LIMB_PAST = String.raw`(?:переломал[аи]?|поломал[аи]?|оторвал[аи]?)`;
+const LIMB_VERB = String.raw`(?:${LIMB_VERB_FUT}|${LIMB_PAST})`;
+// Прошедшее время расправы (решение владельца 12.11 11:05, п. 2): «Я закопала соседа», «прикончил брата» — при человеке
+// рядом. «Закопала семена», «прикончила торт», «закопали сына в песок» (игра на пляже) — не угроза.
+const HARM_PAST = String.raw`(?:закопал[аи]?|прикончил[аи]?|грохнул[аи]?|урыл[аи]?)`;
+const NOT_PLAY = String.raw`(?!\s+(?:\S+\s+){0,3}(?:в|во)\s+(?:песок|песке|песочек|песочке|снег|снегу|листья|листьях|листву|сугроб|подушки|подушках|одеяла|одеяло|одеялах)(?![а-я])|\s+(?:\S+\s+){0,2}на\s+пляже(?![а-я]))`;
+// Седьмой разбор: только целые формы винительного падежа людей (не «мамину вазу», «папку», «другую тарелку», «всех»).
+const PAST_OBJ = String.raw`(?:соседа|соседку|соседей|брата|братьев|братика|сестру|сестренку|маму|мать|папу|отца|отчима|мачеху|мужа|жену|бывшего|бывшую|начальника|начальницу|шефа|директора|коллегу|коллег|друга|подругу|друзей|сына|дочь|дочку|ребенка|детей|учителя|учительницу|тренера|свекровь|свекра|тещу|парня|девушку|человека|людей|бабушку|дедушку|деда|одноклассника|одноклассницу|мужика|тетю|дядю)`;
+// Игра, спорт, кино: «Урыл брата в шахматы», «Мужа прикончили в сериале».
+const GAME = String.raw`(?:шахматы|шахматах|шашки|шашках|карты|картах|теннис|теннисе|футбол|футболе|хоккей|хоккее|приставку|приставке|игре|игру|fifa|доту|кс|бадминтон|пинг-понг|настолку|настолке|покер|покере|дурака|монополию|монополии|квиз|квизе|армрестлинг|споре|сериале|фильме|кино|мультике)`;
+// Игра, спорт, кино — только сразу после объекта (до трёх слов) и целым словом: «Урыл брата в шахматы», «Мужа
+// прикончили в сериале». Не «Я закопала соседа и пошла в кино», не «в картофельном поле» (восьмой разбор).
+const NOT_GAME = String.raw`(?!\s+(?:(?!(?:и|а|но|потом|затем|пошла|пошел|пошли|ушла|ушел|ушли)(?![а-я]))\S+\s+){0,2}(?:в|во|на)\s+(?:${GAME}|турнире|олимпиаде|соревнованиях|ринге|татами|экзамене)(?![а-я]))`;
+const LIMB = String.raw`(?:руки|руку|ноги|ногу|шею|кости|ребра|башку|голову)`;
+// Голая угроза глаголом от первого лица — вся часть фразы («Зарежу.», «Пристрелю!»).
+const BARE_KILL = String.raw`(?:я\s+)?(?:${DOOM_ADV}\s+){0,2}(?:убью|зарежу|пристрелю|застрелю|урою|прикончу|задушу|придушу|грохну|закопаю|прибью|отравлю|порешу)(?:\s+${DOOM_ADV}){0,2}`;
+// Человек назван словом (пятый разбор): эти ветки дают угрозу в любой части фразы.
+const DOOM_NOUN = new RegExp([
+  String.raw`^\s*${BARE_KILL}\s*$`,
+  String.raw`${LEAD}${PERSON_ANY}(?![а-я])${ADVS}\s+${NOT_SLEEP}${DOOM_STRONG}${ADVS}${DOOM_TAIL}`,
+  String.raw`${LEAD}${PERSON_DAT}(?![а-я])${ADVS}\s+${DOOM_WEAK}${ADVS}${DOOM_TAIL}`,
+  String.raw`(?<![а-я])(?:сдохни|сдохните|подохни)(?![а-я])`,
+  // Пожелания смерти: «чтоб ты сдох», «желаю брату сдохнуть», «Брату пусть сдохнет» (не «пусть он…» — см. ниже).
+  String.raw`(?<![а-я])(?:чтоб(?:ы)?\s+ты|желаю|пусть)\s+(?:(?!(?:он|она|оно|они)(?![а-я]))\S+\s+){0,2}(?:сдох\S*|подох\S*|сдохн\S*|подохн\S*|сгнил\S*)(?![а-я])`,
+  String.raw`(?<![а-я])${PERSON_NOUN}(?![а-я])(?:\s+\S+)?\s+${HARM_EXTRA}(?![а-я])`,
+  String.raw`(?<![а-я])${HARM_EXTRA}(?:\s+\S+)?\s+${PERSON_NOUN}(?![а-я])`,
+  String.raw`(?<![а-я])${HARM_PAST}\s+(?:(?:своего|свою|своих|этого|эту|этих|${DOOM_ADV})\s+)?${PAST_OBJ}(?![а-я])${NOT_PLAY}${NOT_GAME}`,
+  // Обратный порядок: «Я соседа закопала», «Соседа я закопала» («мать/дочь» совпадают с именительным — не берутся).
+  // Не после предлога («у брата», «для сына» — родительный) и не «мать/дочь/свекровь» (совпадают с именительным).
+  String.raw`(?<![а-я])(?<!(?:^|\s)(?:у|для|от|без|до|возле|около|из-за|с|со|к|ко)\s)(?!(?:мать|дочь|свекровь)(?![а-я]))${PAST_OBJ}(?:\s+(?:я|мы|ты|вчера|сегодня|уже|все|таки|же|просто|наконец))?\s+${HARM_PAST}(?![а-я])${NOT_PLAY}${NOT_GAME}`,
+  // «Я соседу ноги переломала» — только «переломал(а)»: «Брату ногу переломали на тренировке» — травма, не угроза.
+  String.raw`(?<![а-я])${PERSON_DAT}(?![а-я])(?:\s+(?:я|мы|вчера|уже))?\s+${LIMB}\s+переломал[а]?(?![а-я])${NOT_GAME}`,
+  // «Переломаю соседу ноги», «Переломаю ноги брату», «Ноги брату переломаю» (шестой разбор): глагол, человек и часть тела
+  // в любом порядке, рядом. «Переломаю себе ноги», «Сломаю ему машинку» сюда не попадают.
+  String.raw`(?<![а-я])${LIMB_VERB}\s+(?:${PERSON_NOUN})\s+${LIMB}(?![а-я])`,
+  String.raw`(?<![а-я])${LIMB_VERB}\s+${LIMB}\s+(?:${PERSON_NOUN})(?![а-я])`,
+  String.raw`(?<![а-я])${LIMB}\s+(?:${PERSON_NOUN})\s+${LIMB_VERB}(?![а-я])`,
+].join('|'));
+// Человек назван местоимением (пятый разбор): только В НАЧАЛЕ части фразы («Ему конец.», «А тебе достанется!»),
+// не «Последний кусок торта ему достанется». Для оценки риска — ещё и при человеке в этой или предыдущей фразе:
+// «Телефон старый, он скоро сдохнет» — про вещь.
+const PRON_NOM = String.raw`(?:он|она|они|ты)`;
+const PRON_DAT = String.raw`(?:ему|ей|им|тебе|вам|нему|ней|ним)`;
+const PRON_START = String.raw`^\s*(?:(?:а|и|но|ну|вот|так)\s+)?(?:${DOOM_ADV}\s+){0,2}`;
+const DOOM_PRON = new RegExp([
+  String.raw`${PRON_START}${PRON_NOM}${ADVS}\s+${NOT_SLEEP}${DOOM_STRONG}${ADVS}${DOOM_TAIL}`,
+  String.raw`${PRON_START}${PRON_DAT}${ADVS}\s+(?:${DOOM_STRONG}|${DOOM_WEAK})${ADVS}${DOOM_TAIL}`,
+  String.raw`(?<![а-я])(?:чтоб(?:ы)?|пусть)\s+(?:он|она|оно|они)\s+(?:\S+\s+){0,1}(?:сдох\S*|подох\S*|сдохн\S*|подохн\S*|сгнил\S*)(?![а-я])`,
+  // «Брат достал. Я переломала ему ноги» — как в будущем времени, при человеке рядом (восьмой разбор).
+  String.raw`(?<![а-я])переломал[а]?\s+(?:${PRON_DAT})\s+${LIMB}(?![а-я])`,
+  String.raw`(?<![а-я])(?:${PRON_DAT})\s+${LIMB}\s+переломал[а]?(?![а-я])`,
+  String.raw`(?<![а-я])${LIMB_VERB_FUT}\s+(?:${PRON_DAT})\s+${LIMB}(?![а-я])`,
+  String.raw`(?<![а-я])${LIMB}\s+(?:${PRON_DAT})\s+${LIMB_VERB_FUT}(?![а-я])`,
+  String.raw`(?<![а-я])${LIMB_VERB_FUT}\s+${LIMB}\s+(?:${PRON_DAT})(?![а-я])`,
+  // «Прикончу его.» без человека рядом — не угроза для оценки риска («Торт вкусный, прикончу его завтра»): местоимение
+  // требует человека в этом или предыдущем предложении (phraseRisk). Сознательно, шестой разбор, мелочь 5.
+  String.raw`(?<![а-я])(?:его|ее|их)(?![а-я])(?:\s+\S+)?\s+${HARM_EXTRA}(?![а-я])`,
+  String.raw`(?<![а-я])${HARM_EXTRA}(?:\s+\S+)?\s+(?:его|ее|их)(?![а-я])`,
+].join('|'));
+// Прошедшее время с местоимением («я закопала его», «оторвала ей голову»): человек рядом чаще тот, кто дал вещь
+// («Мама испекла пирог, я прикончила его»), поэтому уровень риска эти формы не поднимают, но в титры такая строка
+// не попадает (седьмой разбор, вариант (а); как «Прикончу его.»).
+const PAST_PRON_TITLES = new RegExp([
+  String.raw`(?<![а-я])${HARM_PAST}\s+(?:его|ее|их)(?![а-я])${NOT_PLAY}`,
+  String.raw`(?<![а-я])(?:его|ее|их)\s+${HARM_PAST}(?![а-я])${NOT_PLAY}`,
+  String.raw`(?<![а-я])${LIMB_PAST}\s+(?:${PRON_DAT})\s+${LIMB}(?![а-я])`,
+  String.raw`(?<![а-я])(?:${PRON_DAT})\s+${LIMB}\s+${LIMB_PAST}(?![а-я])`,
+].join('|'));
+const DOOM_PERSON = { test: (t) => DOOM_NOUN.test(t) || DOOM_PRON.test(t) || PAST_PRON_TITLES.test(t) };
+// «Мама меня убьёт за…» — гипербола для фильтра остановки (onlyHyperbole), но в титры не берётся. Только при
+// подлежащем-человеке: «Сессия меня прикончит», «Меня убьёт эта жара» — не угроза человеку.
+const ME_VERB = '(?:убьет|убьют|прибьет|прибьют|уроет|уроют|зарежет|прикончит|придушит|придушат|задушит|закопает|закопают|порвет|порвут)';
+const THREATENED_ME = new RegExp(String.raw`(?<![а-я])${PERSON}\s+(?:\S+\s+)?(?:${ME_VERB}\s+меня|меня\s+(?:\S+\s+)?${ME_VERB})(?![а-я])`);
+/** Текст строки содержит фразу из словаря угроз (без учёта гипербол). Экспортируется для тестов. */
+// Угроза другому человеку без глагола («Брату не жить»): часть рассказа с ней исключается из титров целиком.
+const doomToOther = (u) => { const t = flat(u); return !!t && DOOM_PERSON.test(t); };
+/**
+ * Текст поля титров содержит фразу из словаря угроз: угроза другому (с глаголом вреда или без) или «меня убьёт»
+ * (гипербола для фильтра остановки, но не для титров). Экспортируется для тестов.
+ */
+export function threatPhrase(text) {
+  const t = flat(text);
+  if (!t) return false;
+  return doomToOther(text) || THREATENED_ME.test(t) || isThreatUnit(String(text));
+}
+const isThreatUnitRaw = (u) => { const t = stripIdioms(u); return !!harmPerson(t) || PAST_NO_OBJ.test(t) || CONCERN.some((re) => re.test(t)) || doomToOther(u); };
 // А4: для титров опасной считается любая часть рассказа, которую фильтр сам по себе не пропускает (уровень выше none),
 // а не только угроза, найденная правилом «глагол + человек».
 // Кэш на время одного вызова threatErrors: одно и то же предложение проверяется для каждого поля эпизода.
@@ -430,29 +572,214 @@ export function threatErrors(story, ep) {
   if (!ep) return errors;
   const hit = (...xs) => xs.some((x) => touchesThreat(x, threats, story));
   const strictHit = (...xs) => xs.some((x) => touchesThreat(x, threats, story, { strict: true }));
-  if (strictHit(ep.title)) errors.push({ path: 'title', msg });
-  if (strictHit(ep.genre)) errors.push({ path: 'genre', msg });
-  if (strictHit(ep.lead)) errors.push({ path: 'lead', msg });
-  (ep.rows || []).forEach((r, i) => { if (hit(r.role, r.value, r.source)) errors.push({ path: `rows.${i}`, msg }); });
-  if (ep.post && (strictHit(ep.post.text) || hit(ep.post.source))) errors.push({ path: 'post', msg });
+  // Словарь угроз (решение 11.11 12:05, п. 2) — для всех полей титров, не только строк (третий разбор).
+  if (strictHit(ep.title) || threatPhrase(ep.title)) errors.push({ path: 'title', msg });
+  if (strictHit(ep.genre) || threatPhrase(ep.genre)) errors.push({ path: 'genre', msg });
+  if (strictHit(ep.lead) || threatPhrase(ep.lead)) errors.push({ path: 'lead', msg });
+  // Роль и значение проверяются и вместе: «Начальнику» + «конец» по отдельности безобидны.
+  (ep.rows || []).forEach((r, i) => { if (hit(r.role, r.value, r.source) || threatPhrase(`${r.role || ''} ${r.value || ''}`)) errors.push({ path: `rows.${i}`, msg }); });
+  if (ep.post && (strictHit(ep.post.text) || hit(ep.post.source) || threatPhrase(ep.post.text))) errors.push({ path: 'post', msg });
   return errors;
+}
+
+// Решение владельца 11.11 12:05, п. 3: строка заготовки (без ИИ), чьё местоимение указывает на человека из исключённой
+// угрозы, отбрасывается («Я бы убил брата. Он опять кричал.» — «он» здесь брат из угрозы). Разрешение местоимения —
+// эвристика: ближайшее предшествующее упоминание человека, совместимое по роду (в той же фразе раньше местоимения,
+// иначе в предыдущих). Местоимение в предложении с угрозой само считается целью угрозы. Если упоминания нет —
+// неясно, о ком речь, и строка тоже отбрасывается (лишнее исключение допустимо, пропуск — нет).
+const PRON_ALL = /(?<![а-я])(?:он|его|ему|него|нему|ним|нем|она|ее|ей|нее|ней|они|их|им|ними|них)(?![а-я])/g;
+const PRON_GENDER = { он: 'm', его: 'mn', ему: 'm', него: 'm', нему: 'm', ним: 'mp', нем: 'm', она: 'f', ее: 'f', ей: 'f', нее: 'f', ней: 'f', они: 'p', их: 'p', им: 'mp', ними: 'p', них: 'p' };
+const FEMALE_ROOTS = new Set(['мам', 'сестр', 'жен', 'подруг', 'доч', 'девушк', 'тет', 'мачех', 'тещ', 'внучк', 'бабушк', 'свекров']);
+// Род по корню не определяется («соседка» и «сосед», «начальница» и «начальник»): подходят к любому местоимению.
+const ANY_ROOTS = new Set(['сосед', 'коллег', 'бывш', 'партнер', 'учител', 'одноклассни', 'начальни', 'ребен', 'малыш', 'дяд',
+  'тренер', 'директор', 'шеф', 'преподавател', 'охранник', 'одногруппни', 'родственни']);
+// Люди для разрешения местоимений: список правила титров плюс слова из словаря угроз (разбор 08ead472: «Тренеру не жить.
+// Он…» — тренер должен распознаваться так же, как брат).
+const PERSON_ROOTS_SRC = PERSON_WORDS.source.replace(/^\(\?<!\[а-я\]\)\(\?:/, '').replace(/\)\[а-я\]\*$/, '');
+if (PERSON_ROOTS_SRC === PERSON_WORDS.source) throw new Error('PERSON_WORDS: неожиданная форма');
+const PRON_PERSONS = new RegExp(`(?<![а-я])(?:бабушк|дедушк|деда|деду|дед|тренер|директор|шеф|преподавател|охранник|одногруппни|родственни|${PERSON_ROOTS_SRC})[а-я]*`, 'g');
+const pronRoot = (w) => { const m = /^(бабушк|дедушк|дед|тренер|директор|шеф|преподавател|охранник|одногруппни|родственни)/.exec(w); return m ? (m[1] === 'дедушк' ? 'дед' : m[1]) : personRoot(w); };
+function compatible(pron, root) {
+  const g = PRON_GENDER[pron] || 'mfp';
+  if (g.includes('p') || ANY_ROOTS.has(root)) return true;
+  return FEMALE_ROOTS.has(root) ? g.includes('f') : g.includes('m');
+}
+/**
+ * Предикат для заготовки: true — местоимение в предложении указывает на человека из исключённой угрозы
+ * (или неясно, на кого, при угрозе человеку в рассказе). Рассказ без угрозы человеку — всегда false.
+ */
+export function threatPronounFilter(story) {
+  story = String(story || '').replace(/[^\S\n]+/g, ' ').replace(/\n\s*/g, '\n');
+  const threats = threatSentences(story);
+  if (!threats.length) return () => false;
+  const ctx = threatContext(threats, story);
+  const sents = sentencesOf(story).map((x) => x.trim()).filter(Boolean);
+  const isThreatSent = sents.map((x) => isThreatUnit(x) || threats.includes(flat(x)));
+  const peopleIn = (x) => [...flat(x).matchAll(new RegExp(PRON_PERSONS.source, 'g'))].map((m) => pronRoot(m[0]));
+  const targets = new Set([...ctx.threatPeople, ...ctx.linked, ...sents.filter((x, i) => isThreatSent[i] && isThreatUnit(x)).flatMap(peopleIn)]);
+  // Угроза человеку есть: названный человек или местоимение в предложении с угрозой. Угроза другому без
+  // распознанного человека («Я бы урыл Серёгу») — любое местоимение после неё неясно, о ком (лишнее исключение допустимо).
+  const unknownTarget = sents.some((x, i) => isThreatSent[i] && isThreatUnit(x) && !peopleIn(x).length && !new RegExp(PRON_ALL.source).test(flat(x)));
+  // Местоимение во фразе-угрозе — цель, только если рядом (в этой или предыдущей фразе) назван человек; иначе это
+  // скорее предмет («Телефон старый, он скоро сдохнет», «чтоб он сдох» о принтере) — четвёртый разбор.
+  const pronIsPerson = sents.map((x, i) => peopleIn(x).length > 0 || (i > 0 && peopleIn(sents[i - 1]).length > 0));
+  if (!targets.size && !unknownTarget && !sents.some((x, i) => isThreatSent[i] && pronIsPerson[i] && new RegExp(PRON_ALL.source).test(flat(x)))) return () => false;
+  const mentions = [];
+  const verdict = new Map(); // предложение (flat) → указывает ли местоимение на угрозу
+  sents.forEach((x, i) => {
+    const t = flat(x);
+    const found = [];
+    for (const m of t.matchAll(new RegExp(PRON_PERSONS.source, 'g'))) found.push({ pos: m.index, kind: 'person', root: pronRoot(m[0]) });
+    for (const m of t.matchAll(PRON_ALL)) found.push({ pos: m.index, kind: 'pron', word: m[0] });
+    found.sort((a, b) => a.pos - b.pos);
+    let hit = false;
+    for (const f of found) {
+      f.sent = i;
+      if (f.kind === 'person') { f.threat = isThreatSent[i] || targets.has(f.root); mentions.push(f); continue; }
+      if (isThreatSent[i]) f.threat = pronIsPerson[i];
+      else {
+        const fits = (c) => (c.kind === 'person' ? compatible(f.word, c.root) : (PRON_GENDER[c.word] || 'x').split('').some((g) => (PRON_GENDER[f.word] || '').includes(g)));
+        const ante = [...mentions].reverse().find(fits);
+        // Ближайший подходящий человек — не из угрозы, но раньше есть подходящий из угрозы: неясно, о ком речь (разбор 940f41cc).
+        // Человек, названный в той же фразе раньше местоимения («Муж — он принёс торт»), — антецедент без сомнений.
+        if (ante && ante.sent === i && !ante.threat) f.threat = false;
+        else f.threat = !ante || ante.threat || mentions.some((c) => c.threat && fits(c)) || (unknownTarget && i > sents.findIndex((x, k) => isThreatSent[k]));
+      }
+      mentions.push(f);
+      if (f.threat) hit = true;
+    }
+    verdict.set(t, (verdict.get(t) || false) || (hit && !isThreatSent[i]));
+  });
+  // Заготовка режет рассказ на фразы чуть иначе (без «;»): совпадение по вхождению в любую сторону.
+  const bad = [...verdict].filter(([k, v]) => v && k).map(([k]) => k);
+  // Сравнение по целым словам: короткая фраза «дома» не совпадает с «он сидел дома» (третий разбор).
+  const pad = (x) => ` ${x} `;
+  return (sentence) => { const t = flat(sentence); return !!t && bad.some((k) => t === k || (t.split(' ').length > 1 && (pad(t).includes(pad(k)) || pad(k).includes(pad(t))))); };
 }
 
 /** validateEpisode + правило «угроза не становится титром». Для всех серверных проверок выдачи. */
 export function validateSafeEpisode(ep, story) {
   const v = validateEpisode(ep, story);
-  const extra = threatErrors(story, ep);
+  // правки человека для угроз читаются как продолжение рассказа (разделитель — только для сверки слов)
+  const extra = threatErrors(joinEdits(story), ep);
   return extra.length ? { ...v, ok: false, errors: [...(v.errors || []), ...extra] } : v;
 }
 
-export function loadHelp(file = path.join(here, '..', 'config', 'help.json')) {
+/** Внутренняя причина: после исключения опасных частей рассказа не собирается обязательный элемент эпизода. */
+export const INSUFFICIENT_AFTER_EXCLUSION = 'insufficient_after_exclusion';
+/** Обычная нехватка материала у заготовки без ИИ (исключений не было): тот же исход и та же реплика. */
+export const INSUFFICIENT_MATERIAL = 'insufficient_material';
+/** Реплика при этой причине (редактор повествования), дословно. Единственное место текста: бот и монтажная берут отсюда. */
+export const INSUFFICIENT_TEXT = 'Не получилось собрать титры только из твоих слов. Сегодня можно без ролика.';
+/**
+ * Приглашение после реплики нехватки в боте (решение владельца 12.11 11:05, вариант 1): человек может написать строки
+ * сам правкой — его собственные слова, тот же фильтр безопасности и словарь угроз. ЧЕРНОВИК: текст утверждает редактор
+ * повествования. Единственное место текста.
+ */
+export const INSUFFICIENT_INVITE_TEXT = 'Если хочешь, строки можно написать самому или самой: «+ Утром — пила чай». Для титров нужно хотя бы две.';
+/**
+ * Реплика, когда строку из правки человека не берём в титры (фраза из словаря угроз или часть, исключённая правилом
+ * «угроза не в титрах»). Решение владельца 11.11 12:05, п. 2: нейтрально, без морали и без навязанного позитива.
+ * ЧЕРНОВИК: окончательный текст утверждает редактор повествования. Единственное место текста.
+ */
+export const EDIT_NOT_IN_TITLES_TEXT = 'Эту строку в титры не берём.';
+/**
+ * Тот же шаблон с названием поля (совет владельца 11.11 15:05): «Это название…», «Эту подпись…», «Эту строку…».
+ * ЧЕРНОВИК: окончательные тексты утверждает редактор повествования. Единственное место этих текстов.
+ */
+export const EDIT_NOT_IN_TITLES = Object.freeze({
+  row: EDIT_NOT_IN_TITLES_TEXT,
+  title: 'Это название в титры не берём.',
+  genre: 'Этот жанр в титры не берём.',
+  lead: 'Эту подпись в титры не берём.',
+  post: 'Эту сцену после титров не берём.',
+});
+/** Реплика «не берём» по полю правки: rows.N → строка, title/genre/lead/post — своё название; иначе — строка. */
+export const editNotInTitlesText = (path) => { const k = /^rows\./.test(String(path)) ? 'row' : String(path); return Object.hasOwn(EDIT_NOT_IN_TITLES, k) ? EDIT_NOT_IN_TITLES[k] : EDIT_NOT_IN_TITLES.row; };
+
+/**
+ * Не хватает ли материала ПОСЛЕ исключения опасных частей (threatSentences/threatErrors).
+ * true — только если в рассказе есть исключённые части и при этом нельзя собрать хотя бы один обязательный
+ * элемент: title, genre или LIMITS.rowsMin пригодных строк (строка заполнена, не опирается на опасную часть
+ * и её цитата найдена в рассказе). Пустой post — не нехватка. Рассказ без исключений — всегда false:
+ * там обычная проверка validateEpisode, а не эта причина. validation — результат validateSafeEpisode(ep, story).
+ */
+export function insufficientAfterExclusion(ep, story, validation = validateSafeEpisode(ep, story)) {
+  if (!ep || typeof ep !== 'object') return false;
+  const clean = String(story || '').replace(/[^\S\n]+/g, ' ').replace(/\n\s*/g, '\n');
+  const errs = (validation && validation.errors) || [];
+  const threatMsg = 'Угроза другому человеку не берётся в титры.';
+  // Исключение было: в рассказе есть опасные части или правило уже отклонило какое-то поле эпизода.
+  if (!threatSentences(clean).length && !errs.some((e) => e.msg === threatMsg)) return false;
+  const blocked = (p) => errs.some((e) => e.path === p && e.msg === threatMsg);
+  const missing = (p) => !String(ep[p] || '').trim() || blocked(p);
+  const rows = Array.isArray(ep.rows) ? ep.rows : [];
+  // Пригодная пара: есть и роль, и значение, строка не опирается на опасную часть, цитата найдена в рассказе.
+  const usable = rows.filter((r, i) => String(r.role || '').trim() && String(r.value || '').trim()
+    && !errs.some((e) => e.path === `rows.${i}` || e.path === `rows.${i}.source`)).length;
+  return missing('title') || missing('genre') || usable < LIMITS.rowsMin;
+}
+
+export const HELP_FILE = path.join(here, '..', 'config', 'help.json');
+export const TELEGRAM_TEXT_LIMIT = 4096; // лимит одного текстового сообщения Telegram, в символах
+export const INSUFFICIENT_WITH_HELP_LIMIT = 3500; // «реплика нехватки + пустая строка + блок concern», с запасом до 4096
+
+export function loadHelp(file = HELP_FILE) {
   const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
-  const contacts = [cfg.emergency, ...(cfg.contacts || [])].filter((c) => c && c.verified && c.phone);
-  return { region: cfg.region, contacts };
+  // Только явно подтверждённые контакты: verified строго true («"false"», «"no"» не проходят).
+  const contacts = [cfg.emergency, ...(Array.isArray(cfg.contacts) ? cfg.contacts : [])].filter((c) => c && c.verified === true && c.phone);
+  return { region: typeof cfg.region === 'string' ? cfg.region.trim().toUpperCase() : cfg.region, contacts };
+}
+
+// Контакты помощи в памяти процесса (решение владельца по PR 11, 11.11 11:05): файл читается и проверяется
+// один раз — при старте бота и монтажной (prepareHelp) — и во время работы не перечитывается.
+let preparedHelp = null;
+let helpFailure = null; // ленивая проверка без старта (тесты, скрипты) не повторяется при каждом вызове
+
+/**
+ * Прочитать и проверить help.json один раз. Ошибка — исключение с кодом help_config (вызывающий не стартует):
+ * файл не читается, нет ни одного проверенного контакта с номером, текст блока помощи пуст или длиннее
+ * одного сообщения Telegram (делить блок посреди контакта нельзя).
+ */
+export function prepareHelp(file = HELP_FILE) {
+  const fail = () => Object.assign(new Error('help'), { code: 'help_config' });
+  preparedHelp = null; // неудачная проверка не оставляет прежние контакты
+  let help;
+  try { help = loadHelp(file); } catch { throw fail(); }
+  if (typeof help.region !== 'string' || !/^[a-z]{2}$/i.test(help.region.trim())) throw fail(); // код страны: RU, KZ…
+  if (!Array.isArray(help.contacts) || !help.contacts.length) throw fail();
+  // Подпись и часы — одна строка без переводов строк (иначе контакт разъезжается в блоке); номер — с цифрами.
+  // Перевод строки — любой: \r, \n, U+0085, U+2028, U+2029 (Telegram может показать их как разрыв строки).
+  const line = (v) => typeof v === 'string' && v.trim().length > 0 && !/[\r\n\u0085\u2028\u2029]/.test(v);
+  // Номер — только цифры, «+», пробелы, скобки и дефисы, не меньше трёх цифр (короткие: 112).
+  const phoneOk = (v) => /^\+?[\d\s()-]+$/.test(v.trim()) && (v.match(/\d/g) || []).length >= 3;
+  if (help.contacts.some((c) => !line(c.label) || !line(c.phone) || !phoneOk(c.phone)
+    || (c.hours !== undefined && c.hours !== '' && !line(c.hours)))) throw fail(); // часы: нет, '' или одна строка
+  // Тексты не пусты по построению (постоянные фразы + непустой список); проверяется лимит одного сообщения.
+  for (const level of ['concern', 'urgent']) if (helpMessage(level, help).length > TELEGRAM_TEXT_LIMIT) throw fail();
+  // Реплика нехватки идёт одним сообщением с блоком concern (бот): «реплика + пустая строка + блок» ≤ 3500,
+  // с запасом до лимита Telegram (решение владельца 11.11 11:05). urgent с репликой не соединяется.
+  if (INSUFFICIENT_TEXT.length + 2 + INSUFFICIENT_INVITE_TEXT.length + 2 + helpMessage('concern', help).length > INSUFFICIENT_WITH_HELP_LIMIT) throw fail();
+  preparedHelp = help;
+  helpFailure = null;
+  return help;
+}
+
+/**
+ * Проверенные при старте контакты. Рабочие входы (бот, монтажная) вызывают prepareHelp при старте и при ошибке не
+ * запускаются, поэтому ветка ниже в работе не встречается. Без старта (тесты, скрипты) — ленивая проверка при первом
+ * обращении. Её неудача запоминается до перезапуска процесса СОЗНАТЕЛЬНО: файл не перечитывается при каждом вызове,
+ * а каждый следующий вызов снова получает ту же ошибку help_config (тихого «без помощи» нет). Успешный явный
+ * prepareHelp снимает запомненную неудачу.
+ */
+export function currentHelp() {
+  if (preparedHelp) return preparedHelp;
+  if (helpFailure) throw helpFailure;
+  try { return prepareHelp(); } catch (e) { helpFailure = e; throw e; }
 }
 
 /** Текст экрана помощи. Без обещаний «мы всегда заметим» и без давления. */
-export function helpMessage(level, help = loadHelp()) {
+export function helpMessage(level, help = currentHelp()) {
   const list = help.contacts.map((c) => `• ${c.label}: ${c.phone}${c.hours ? ` (${c.hours})` : ''}`).join('\n');
   if (level === 'urgent') {
     return [

@@ -347,7 +347,9 @@ test('V01: правка строки после разрешения → нов�
   const seen = [];
   await withApp({ check: (t) => { seen.push(t); return seen.length >= 2; } }, async ({ render, counters }) => {
     assert.equal((await render()).status, 200);
-    const edited = ep(); edited.rows[0].value = edited.rows[0].value + ' еще';
+    // правка из слов той же цитаты (новое правило 11.11: чужое слово не прошло бы проверку строки)
+    const edited = ep(); edited.rows[0].value = edited.rows[0].value.split(' ').slice(1).join(' ');
+    assert.notEqual(edited.rows[0].value, ep().rows[0].value);
     assert.ok(isSafety(await render(STORY, edited)), 'новая версия проверена и остановлена');
     assert.notEqual(seen[0], seen[1]);
     assert.equal(counters.render, 1);
