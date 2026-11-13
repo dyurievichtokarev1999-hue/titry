@@ -585,13 +585,14 @@ export function createBot({
   // echo — эхо расшифровки (только при безопасном исходе, после проверки); media — сообщение с нераспознаваемым
   // вложением (кружок, аудио, видео): подпись проверяется, но ролик всё равно не отправляется («неизвестно»).
   async function duringRender(chatId, s, text, { echo, media } = {}) {
+    const mediaWhy = typeof media === 'string' ? media : 'unsupported';
     let body = String(text || '').trim();
     if (body.startsWith('/')) {
       const m = /^\/([A-Za-z]+)(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(body);
       const known = m && KNOWN_COMMANDS.has(m[1].toLowerCase());
       body = known ? (m[2] || '').trim() : body.replace(/^\/+/, '').trim();
     }
-    if (!body) return sendSafe(chatId, media ? unknownMsg('unsupported') : TEXT.rendering);
+    if (!body) return sendSafe(chatId, media ? unknownMsg(mediaWhy) : TEXT.rendering);
     const epoch = s.deliveryEpoch || 0;
     const hold = decide(s, body);
     holdDelivery(s, hold); // синхронно, до первого await
@@ -605,14 +606,14 @@ export function createBot({
     }
     if (r.kind === 'concern') {
       await sendSafe(chatId, helpMessage('concern'));
-      if (media) await sendSafe(chatId, unknownMsg('unsupported'));
+      if (media) await sendSafe(chatId, unknownMsg(mediaWhy));
       return logSafety({ level: 'concern', at: 'rendering' });
     }
     if (r.kind === 'unknown') {
       logError('check', { code: r.code });
-      return sendSafe(chatId, unknownMsg(media ? 'unsupported' : 'check'));
+      return sendSafe(chatId, unknownMsg(media ? mediaWhy : 'check'));
     }
-    if (media) return sendSafe(chatId, unknownMsg('unsupported')); // подпись безопасна, но вложение не проверено
+    if (media) return sendSafe(chatId, unknownMsg(mediaWhy)); // подпись безопасна, но вложение не проверено
     // «Собираю ролик» (и эхо) — только если ролик ещё может уйти: доставка ждёт, предел не истёк, не было
     // остановки и «неизвестно» по другому сообщению этой же доставки. Иначе — ничего: противоречивых обещаний нет.
     const stillDelivering = () => s.delivering && (s.deliveryEpoch || 0) === epoch && !s.veto && s.verdict !== 'blocked';
@@ -656,7 +657,8 @@ export function createBot({
         if (s.delivering) {
           s.veto = true;
           const cap = typeof msg.caption === 'string' ? msg.caption.trim() : '';
-          if (cap && assessRisk(cap).level !== 'none') return duringRender(chatId, s, cap, { media: true }); // опасная подпись
+          // Подпись — тем же путём, что подпись к видео: локальный фильтр и вторая проверка (решение Claude 13.11 п. 2).
+          if (cap) return duringRender(chatId, s, cap, { media: voiceRefused === TEXT.voiceOff ? 'voiceOff' : 'voiceLong' });
           return sendSafe(chatId, unknownMsg(voiceRefused === TEXT.voiceOff ? 'voiceOff' : 'voiceLong'));
         }
         return tg.send(chatId, voiceRefused);
@@ -676,12 +678,17 @@ export function createBot({
           const caption = typeof msg.caption === 'string' ? msg.caption.trim() : ''; // подпись к голосовому — тоже текст
           if (!story) {
             s.veto = true; // содержание голоса неизвестно — ролик не отправляется
+            releaseVoice(); // результат («неизвестно») применён — ожидание доставки больше не держим
             if (!alive(chatId, s)) return;
-            if (caption) return await duringRender(chatId, s, caption, { media: true }); // опасная подпись → остановка
+            if (caption) { const p = duringRender(chatId, s, caption, { media: 'voiceEmpty' }); releaseVoice(); return await p; }
             return await sendSafe(chatId, unknownMsg('voiceEmpty'));
           }
           const body = caption ? `${story}\n${caption}` : story;
-          return await duringRender(chatId, s, body, { echo: `Расшифровка:\n«${story}»` }); // своё удержание — синхронно
+          // duringRender ставит своё удержание синхронно; внешнее снимаем сразу — эхо и typing ожидание не держат
+          // (решение Claude 13.11 п. 1: ожидание проверки заканчивается, когда применён её результат).
+          const p = duringRender(chatId, s, body, { echo: `Расшифровка:\n«${story}»` });
+          releaseVoice();
+          return await p;
         } finally { releaseVoice(); }
       }
       await tg.action(chatId, 'typing');

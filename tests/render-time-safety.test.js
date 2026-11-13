@@ -448,3 +448,44 @@ test('отклонённое голосовое (слишком длинное) 
   assert.equal(b.counters.video, 0);
   assert.match(b.sent.at(-1), URGENT_CARD);
 });
+
+// Решение Claude 13.11 п. 1: ожидание проверки заканчивается, когда применён результат; эхо его не держит.
+test('безопасный голос + незавершённое эхо, предел 30 мс → ровно один ролик, без сообщения о таймауте', async () => {
+  const r = deferred();
+  const b = setup({ transcribe: async () => 'Пила чай', render: () => r.promise, holdWaitMs: 30 });
+  await b.say(ex.story);
+  const p = b.play();
+  await waitFor(() => b.counters.render === 1);
+  b.hangOn = (t) => t.startsWith('Расшифровка');
+  b.voice(); for (let i = 0; i < 10; i++) await tick();
+  r.resolve(); await p;
+  assert.equal(b.counters.video, 1);
+  assert.ok(!b.sent.includes(unknownMsg('timeout')), 'нет ложного сообщения о таймауте');
+});
+
+// П. 2: подпись отклонённого голосового — тем же путём, что подпись видео (локальный фильтр и вторая проверка).
+test('отклонённое голосовое: подпись без признаков, вторая проверка — опасно → экран остановки, ролика нет', async () => {
+  const r = deferred();
+  let checked = 0;
+  const b = setup({ transcribe: async () => 'Пила чай', render: () => r.promise, second: (t) => { checked++; return t === 'Сдохну'; } });
+  await b.say(ex.story);
+  const p = b.play();
+  await waitFor(() => b.counters.render === 1);
+  await b.bot.handleUpdate({ message: { chat, voice: { file_id: 'f', duration: 100000 }, caption: 'Сдохну' } });
+  r.resolve(); await p;
+  assert.equal(checked, 1, 'подпись прошла вторую проверку');
+  assert.equal(b.counters.video, 0);
+  assert.match(b.sent.at(-1), URGENT_CARD);
+});
+
+test('отклонённое голосовое с безопасной подписью → причина отказа распознавания и контакты, ролика нет', async () => {
+  const r = deferred();
+  const b = setup({ transcribe: async () => 'Пила чай', render: () => r.promise });
+  await b.say(ex.story);
+  const p = b.play();
+  await waitFor(() => b.counters.render === 1);
+  await b.bot.handleUpdate({ message: { chat, voice: { file_id: 'f', duration: 100000 }, caption: 'Пила чай' } });
+  r.resolve(); await p;
+  assert.equal(b.counters.video, 0);
+  assert.equal(b.sent.at(-1), unknownMsg('voiceLong'));
+});
