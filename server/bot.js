@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS, episodeToText, EDIT_SEP, cleanInput, joinEdits } from '../engine/episode.js';
 import { makeDraft, draftRuleBased, modelSafetyCheck, hasClaudeCredentials, pairFromSentence } from './draft.js';
 import { makeGate } from './gate.js';
-import { helpMessage, prepareHelp, assessRisk, assessEpisodeRisk, validateSafeEpisode, threatErrors, threatPronounFilter, INSUFFICIENT_TEXT, INSUFFICIENT_INVITE_TEXT, INSUFFICIENT_AFTER_EXCLUSION, INSUFFICIENT_MATERIAL, EDIT_NOT_IN_TITLES_TEXT, editNotInTitlesText, TELEGRAM_TEXT_LIMIT } from './safety.js';
+import { helpMessage, helpContacts, prepareHelp, assessRisk, assessEpisodeRisk, validateSafeEpisode, threatErrors, threatPronounFilter, INSUFFICIENT_TEXT, INSUFFICIENT_INVITE_TEXT, INSUFFICIENT_AFTER_EXCLUSION, INSUFFICIENT_MATERIAL, EDIT_NOT_IN_TITLES_TEXT, editNotInTitlesText, TELEGRAM_TEXT_LIMIT } from './safety.js';
 import { renderEpisode, ROOT } from './render.js';
 import { logError, safeCode } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS, cleanupVoiceOrphans } from './stt.js';
@@ -18,6 +18,13 @@ const MOOD_ORDER = ['warm', 'sad', 'anger', 'quiet'];
 const MUSIC_ORDER = ['warm', 'sad', 'anger', 'quiet', 'none'];
 const SESSION_TTL_MS = 3 * 60 * 60 * 1000;
 const WATERMARK = process.env.BOT_WATERMARK ?? 'сделано в титрах';
+
+// Команды бота (setMyCommands): точное совпадение обрабатывается до разбора текста.
+const KNOWN_COMMANDS = new Set(['start', 'year', 'delete', 'help']);
+// Сколько доставка ролика ждёт проверок сообщений, пришедших во время подготовки (как ожидание соседей в шлюзе).
+export const HOLD_WAIT_MS = 120 * 1000;
+// Предел ожидания одного вызова Telegram API (кроме длинного опроса и загрузки видео).
+export const TELEGRAM_CALL_MS = 10 * 1000;
 
 export const TEXT = {
   start: [
@@ -61,6 +68,18 @@ export const TEXT = {
   keptTechnical: 'Служебная запись о технической приостановке сохранена по правилу теста. В ней нет текста рассказа. [срок не утверждён]',
   recordUnknown: 'Проверить состояние служебной записи не получилось. Полное удаление не подтверждено.',
   // ИР-02: проверка недоступна — текст редактора повествования (PM-01, 9.11) дословно. Без срока и без карточки помощи.
+  more: 'Расскажи чуть подробнее: что было, что запомнилось.',
+  // Неизвестный исход проверки сообщения во время подготовки ролика (решение Claude 12.11 20:00 блокер 2):
+  // строка причины + «проверка не завершилась» + блок контактов. ВРЕМЕННЫЕ формулировки — утверждает редактор.
+  unknownWhy: {
+    check: 'Сервис не завершил проверку сообщения.',
+    voiceLong: 'Это голосовое слишком длинное — разобрать его не получилось.',
+    voiceOff: 'Голосовые сейчас не распознаются.',
+    voiceEmpty: 'Голосовое разобрать не получилось.',
+    unsupported: 'Такие сообщения пока не получается проверить.',
+    timeout: 'Проверка сообщения заняла слишком много времени.',
+  },
+  unknownTail: 'Проверка не завершилась, поэтому ролик не отправлю.',
   checkUnavailable: 'Ролик задерживается: сервис не завершил проверку. Сейчас отправить его не получится. Ждать в чате и отвечать на это сообщение не нужно.',
   // Техническая приостановка — редактор повествования 14:42, принято владельцем 15:08, дословно.
   checkPaused: 'Сервис дважды не смог завершить проверку рассказа. Сейчас ролик не создаётся. Ждать в чате и отвечать на это сообщение не нужно.',
@@ -402,6 +421,7 @@ export function createBot({
   safetyCheck, hasKey = safetyCheck ? () => true : hasClaudeCredentials, monoNow, wallNow,
   ledger = null, // хранилище запретов (server/ledger.js); область — участник, производная HMAC на диске
   gate = makeGate({ check: safetyCheck || ((text) => modelSafetyCheck(text)), hasKey, monoNow, wallNow, ledger }),
+  holdWaitMs = HOLD_WAIT_MS, // предел ожидания проверок сообщений, пришедших во время подготовки ролика
 } = {}) {
   const sessions = new Map();
   // Незавершённые черновики и отдельные проверки участника: их результат может создать запрет уже после /delete.
@@ -438,19 +458,24 @@ export function createBot({
   }
 
   // Остановка по безопасности: прежний черновик уничтожается, рассказ запоминается как запрещённый.
-  async function stopForSafety(chatId, s, level, extra = {}) {
+  // Состояние остановки применяется синхронно, до любых отправок: сбой отправки не отменяет остановку.
+  function applyStop(s) {
     s.episode = null;
     s.skeleton = null;
     s.verdict = 'blocked';
-    s.draftId = (s.draftId || 0) + 1; // кнопки всех прежних черновиков перестают работать
+    s.draftId = (s.draftId || 0) + 1; // кнопки всех прежних черновиков перестают работать; ролик не уходит
     s.stage = 'help';
     if (s.story) {
       s.blocked = s.blocked || new Set();
       s.blocked.add(storyKey(s.originalStory || s.story));
       gate.markSafety(s.scope, s.originalStory || s.story);
     }
-    await metrics.log(chatId, 'safety', { level, ...extra });
-    await tg.send(chatId, helpMessage('urgent'));
+  }
+  async function stopForSafety(chatId, s, level, extra = {}) {
+    applyStop(s);
+    // Экран остановки — до записи в журнал: сбой или зависание журнала не задерживает помощь.
+    try { await tg.send(chatId, helpMessage('urgent')); }
+    finally { try { await metrics.log(chatId, 'safety', { level, ...extra }); } catch (e) { logError('metrics', e); } }
   }
 
   // Сессия ещё та же: не удалена через /delete и не заменена новой после истечения срока.
@@ -603,6 +628,10 @@ export function createBot({
     const story = s.story;
     // Отдельная проверка именно этой версии (рассказ + строки + пост + название/жанр) перед очередью.
     s.stage = 'rendering';
+    // Доставка идёт: сообщения до её конца проверяются первыми (duringRender), даже если /start сменил стадию.
+    if (!s.delivering) s.veto = false; // «неизвестно» по прежней доставке на новую не переносится
+    s.delivering = (s.delivering || 0) + 1;
+    try {
     const g = await track(chatId, gate.verify(s.scope, original, ep, `${joinEdits(story)}\n${episodeToText(ep)}`));
     if (!alive(chatId, s) || s.draftId !== gen) return; // удалённая или заменённая сессия не оживает
     if (g.kind === 'safety') return stopForSafety(chatId, s, 'urgent', { at: 'check', byModel: true });
@@ -615,6 +644,8 @@ export function createBot({
     if (waiting >= 1 + MAX_RENDER_WAITING) { s.stage = 'draft'; return tg.send(chatId, TEXT.busy); }
     const ahead = waiting;
     waiting++;
+    let released = false;
+    const release = () => { if (!released) { released = true; waiting--; } }; // место в очереди — до ожидания проверок
     const out = path.join(botTmpDir(), `${metrics.hash(chatId)}-${Date.now()}.mp4`);
     const STALE = Symbol('stale');
     let job;
@@ -632,6 +663,20 @@ export function createBot({
       const r = await job;
       // После рендера: если черновик остановлен или сессия удалена, видео не отправляется (файл удалится ниже).
       if (r === STALE || !current()) return;
+      // Доставка ждёт проверки всех сообщений, пришедших во время подготовки (решение Claude 12.11 11:05 п. 1).
+      release();
+      if (!(await waitHolds(s))) {
+        // Проверка сообщения не завершилась за предел: исход неизвестен — ролик не отправляется (не «безопасно»).
+        // Поздний ответ «безопасно» после этого «Собираю ролик» не отправит (deliveryEpoch).
+        s.deliveryEpoch = (s.deliveryEpoch || 0) + 1;
+        s.veto = true;
+        logError('check', { code: 'timeout' });
+        if (current()) { s.stage = 'draft'; await sendSafe(chatId, unknownMsg('timeout')); }
+        return;
+      }
+      // Исход «неизвестно» по сообщению во время подготовки — ролик не отправляется (решение Claude 12.11 15:10 п. 2).
+      if (s.veto) { if (current()) s.stage = 'draft'; return; }
+      if (!current()) return;
       await tg.sendVideo(chatId, r.outPath, { caption: 'Конец сцены.', width: 720, height: 1280, duration: Math.round(r.duration), reply_markup: FEEDBACK_KB });
       // /delete во время отправки: после metrics.forget новая запись о человеке не появляется.
       if (!alive(chatId, s)) return;
@@ -644,9 +689,95 @@ export function createBot({
         await tg.send(chatId, TEXT.renderFail);
       }
     } finally {
-      waiting--;
+      release();
       await fs.rm(out, { force: true });
     }
+    } finally { s.delivering--; }
+  }
+
+  // Сообщение, пришедшее во время подготовки ролика (КОД-РЕВЬЮ QA PR 15, решение Claude 12.11 11:05 п. 1).
+  // Сначала — та же проверка, что у короткого текста и «/текст» (локальный фильтр, затем разовая модельная);
+  // доставка прежнего ролика ждёт завершения этих проверок (holdDelivery / waitHolds в doRender).
+  //  urgent (локально или моделью) → экран остановки; прежний ролик отменяется и не отправляется никогда;
+  //  concern → блок помощи concern, прежний ролик не отменяется (он сделан из проверенного рассказа);
+  //  безопасно → «Собираю ролик…», ролик доставляется; исход неизвестен → текст неизвестного исхода и контакты.
+  // Текст сообщения не пишется в журнал и метрики.
+  const holdDelivery = (s, p) => {
+    s.holds = s.holds || new Set();
+    s.holds.add(p);
+    p.finally(() => s.holds.delete(p)).catch(() => {});
+  };
+  // true — все проверки завершены; false — предел holdWaitMs истёк (исход неизвестен).
+  const waitHolds = async (s) => {
+    let timer;
+    const limit = new Promise((r) => { timer = setTimeout(() => r(false), holdWaitMs); });
+    const all = (async () => { while (s.holds && s.holds.size) await Promise.allSettled([...s.holds]); return true; })();
+    try { return await Promise.race([all, limit]); } finally { clearTimeout(timer); }
+  };
+  // Отправка, сбой которой не влияет на безопасность: в журнал — только код.
+  const sendSafe = async (chatId, text, extra) => { try { await tg.send(chatId, text, extra); } catch (e) { logError('send', e); } };
+  // Неизвестный исход во время подготовки: одно сообщение — причина, «проверка не завершилась», блок контактов.
+  const unknownMsg = (why) => `${TEXT.unknownWhy[why] || TEXT.unknownWhy.check}\n${TEXT.unknownTail}\n\n${helpContacts()}`;
+
+  // Принцип (решение Claude 12.11 15:10 п. 1): удержание доставки снимается только после ПРИМЕНЕНИЯ результата проверки.
+  // decide() возвращает промис удержания: проверка → синхронное применение (остановка / запрет ролика) → готово.
+  // Он никогда не отклоняется; любой сбой без результата = «неизвестно» (ролик не отправляется). Отправки в чат —
+  // после применения, их сбой ничего не меняет.
+  function decide(s, body) {
+    return (async () => {
+      let r;
+      try {
+        const level = assessRisk(body).level;
+        if (level !== 'none') r = { kind: level };
+        else {
+          const g = await gate.probe(s.scope, body, body);
+          r = g.ok ? { kind: 'safe' } : g.kind === 'safety' ? { kind: 'urgent', byModel: true } : { kind: 'unknown', code: g.code };
+        }
+      } catch (e) { r = { kind: 'unknown', code: 'error' }; }
+      if (r.kind === 'urgent') { s.story = body; s.originalStory = body; applyStop(s); } // запрет — на это сообщение
+      else if (r.kind === 'unknown') s.veto = true;
+      return r;
+    })();
+  }
+
+  // echo — эхо расшифровки (только при безопасном исходе, после проверки); media — сообщение с нераспознаваемым
+  // вложением (кружок, аудио, видео): подпись проверяется, но ролик всё равно не отправляется («неизвестно»).
+  async function duringRender(chatId, s, text, { echo, media } = {}) {
+    const mediaWhy = typeof media === 'string' ? media : 'unsupported';
+    let body = String(text || '').trim();
+    if (body.startsWith('/')) {
+      const m = /^\/([A-Za-z]+)(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(body);
+      const known = m && KNOWN_COMMANDS.has(m[1].toLowerCase());
+      body = known ? (m[2] || '').trim() : body.replace(/^\/+/, '').trim();
+    }
+    if (!body) return sendSafe(chatId, media ? unknownMsg(mediaWhy) : TEXT.rendering);
+    const epoch = s.deliveryEpoch || 0;
+    const hold = decide(s, body);
+    holdDelivery(s, hold); // синхронно, до первого await
+    const r = await track(chatId, hold);
+    if (!alive(chatId, s)) return; // /delete во время проверки: ничего не отвечаем (запрет, если был, остаётся)
+    const logSafety = (extra) => Promise.resolve().then(() => metrics.log(chatId, 'safety', extra)).catch((e) => logError('metrics', e));
+    if (r.kind === 'urgent') {
+      // Экран остановки — первым и ни от чего не зависит: эха нет (повторять опасную фразу незачем), метрики — после.
+      await sendSafe(chatId, helpMessage('urgent'));
+      return logSafety({ level: 'urgent', at: 'rendering', byModel: !!r.byModel });
+    }
+    if (r.kind === 'concern') {
+      await sendSafe(chatId, helpMessage('concern'));
+      if (media) await sendSafe(chatId, unknownMsg(mediaWhy));
+      return logSafety({ level: 'concern', at: 'rendering' });
+    }
+    if (r.kind === 'unknown') {
+      logError('check', { code: r.code });
+      return sendSafe(chatId, unknownMsg(media ? mediaWhy : 'check'));
+    }
+    if (media) return sendSafe(chatId, unknownMsg(mediaWhy)); // подпись безопасна, но вложение не проверено
+    // «Собираю ролик» (и эхо) — только если ролик ещё может уйти: доставка ждёт, предел не истёк, не было
+    // остановки и «неизвестно» по другому сообщению этой же доставки. Иначе — ничего: противоречивых обещаний нет.
+    const stillDelivering = () => s.delivering && (s.deliveryEpoch || 0) === epoch && !s.veto && s.verdict !== 'blocked';
+    if (!stillDelivering()) return;
+    if (echo) await sendSafe(chatId, echo); // эхо расшифровки — только при безопасном исходе и необязательно
+    if (stillDelivering()) return sendSafe(chatId, TEXT.rendering);
   }
 
   async function onMessage(msg) {
@@ -677,11 +808,47 @@ export function createBot({
     }
     if (text === '/help') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });
 
-    if (s.stage === 'rendering') return tg.send(chatId, TEXT.rendering);
-
     if (msg.voice) {
-      if (!sttAvailable() && transcribe === transcribeOgg) return tg.send(chatId, TEXT.voiceOff);
-      if (msg.voice.duration > MAX_VOICE_SECONDS) return tg.send(chatId, TEXT.voiceLong);
+      const voiceRefused = !sttAvailable() && transcribe === transcribeOgg ? TEXT.voiceOff : msg.voice.duration > MAX_VOICE_SECONDS ? TEXT.voiceLong : null;
+      if (voiceRefused) {
+        // Голос не распознаётся — содержание неизвестно: во время подготовки ролика нет, причина и контакты.
+        if (s.delivering) {
+          s.veto = true;
+          const cap = typeof msg.caption === 'string' ? msg.caption.trim() : '';
+          // Подпись — тем же путём, что подпись к видео: локальный фильтр и вторая проверка (решение Claude 13.11 п. 2).
+          if (cap) return duringRender(chatId, s, cap, { media: voiceRefused === TEXT.voiceOff ? 'voiceOff' : 'voiceLong' });
+          return sendSafe(chatId, unknownMsg(voiceRefused === TEXT.voiceOff ? 'voiceOff' : 'voiceLong'));
+        }
+        return tg.send(chatId, voiceRefused);
+      }
+      if (s.delivering) {
+        // Голос во время подготовки ролика держит доставку с начала распознавания. Расшифровка проверяется и результат
+        // применяется ДО эха в чат. Нет расшифровки (сбой распознавания, typing, файла) = исход «неизвестно».
+        let releaseVoice;
+        holdDelivery(s, new Promise((r) => { releaseVoice = r; }));
+        try {
+          let story = '';
+          try {
+            Promise.resolve().then(() => tg.action(chatId, 'typing')).catch((e) => logError('send', e)); // не ждём
+            story = await transcribe(await tg.fileBuffer(msg.voice.file_id), { duration: msg.voice.duration });
+          } catch (e) { logError('stt', e); }
+          story = String(story || '').trim();
+          const caption = typeof msg.caption === 'string' ? msg.caption.trim() : ''; // подпись к голосовому — тоже текст
+          if (!story) {
+            s.veto = true; // содержание голоса неизвестно — ролик не отправляется
+            releaseVoice(); // результат («неизвестно») применён — ожидание доставки больше не держим
+            if (!alive(chatId, s)) return;
+            if (caption) { const p = duringRender(chatId, s, caption, { media: 'voiceEmpty' }); releaseVoice(); return await p; }
+            return await sendSafe(chatId, unknownMsg('voiceEmpty'));
+          }
+          const body = caption ? `${story}\n${caption}` : story;
+          // duringRender ставит своё удержание синхронно; внешнее снимаем сразу — эхо и typing ожидание не держат
+          // (решение Claude 13.11 п. 1: ожидание проверки заканчивается, когда применён её результат).
+          const p = duringRender(chatId, s, body, { echo: `Расшифровка:\n«${story}»` });
+          releaseVoice();
+          return await p;
+        } finally { releaseVoice(); }
+      }
       await tg.action(chatId, 'typing');
       let story = '';
       try { story = cleanInput(await transcribe(await tg.fileBuffer(msg.voice.file_id), { duration: msg.voice.duration })); }
@@ -692,7 +859,19 @@ export function createBot({
       return handleStory(chatId, s, story, 'voice');
     }
 
+    if (s.delivering && !text) {
+      // Кружок, аудиофайл, видео не распознаются — исход «неизвестно»: ролика нет, причина и контакты.
+      // Подпись проверяется как текст (при опасности — экран остановки). Прочие сообщения без текста и подписи
+      // (стикер, фото, файл) — тоже «неизвестно».
+      const media = !!(msg.video_note || msg.audio || msg.video);
+      const caption = typeof msg.caption === 'string' ? msg.caption.trim() : '';
+      if (media) s.veto = true;
+      if (caption) return duringRender(chatId, s, caption, { media });
+      s.veto = true;
+      return sendSafe(chatId, unknownMsg('unsupported'));
+    }
     if (!text) return;
+    if (s.delivering) return duringRender(chatId, s, text);
     // Пустая заготовка после нехватки: первая правка открывает черновик (рассказ уже прошёл ту же проверку,
     // что перед репликой нехватки: остановка → технические исходы → нехватка).
     if (s.stage === 'compose' && s.skeleton && !s.episode && parseEdit(text)) {
@@ -754,9 +933,36 @@ export function createBot({
         return showDraft(chatId, s);
       }
     }
-    if (text.startsWith('/')) return tg.send(chatId, TEXT.start);
-    if (text.length < 12) return tg.send(chatId, 'Расскажи чуть подробнее: что было, что запомнилось.');
-    return handleStory(chatId, s, text, 'text');
+    // «/текст» (решение Claude 11.11 15:05 п. 1): известная команда без хвоста обработана выше; у известной команды
+    // с хвостом проверяется хвост, любой другой текст на «/» — путь рассказа (проверка безопасности первой).
+    let body = text;
+    if (text.startsWith('/')) {
+      const m = /^\/([A-Za-z]+)(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(text);
+      const known = m && KNOWN_COMMANDS.has(m[1].toLowerCase());
+      if (known && !(m[2] || '').trim()) return tg.send(chatId, TEXT.start);
+      body = known ? m[2].trim() : text.replace(/^\/+/, '').trim();
+      if (!body) return tg.send(chatId, TEXT.start);
+    }
+    if (body.length < 12) return shortText(chatId, s, body);
+    return handleStory(chatId, s, body, 'text');
+  }
+
+  // Короткий текст (< 12 знаков; решение Claude 11.11 15:05 п. 1). «Подробнее» — только после полной проверки:
+  //  1) локальный фильтр ≠ none → путь рассказа (остановка и помощь);
+  //  2) none → разовая модельная проверка до любого ответа (gate.probe: без технической паузы для коротких слов):
+  //     опасно → остановка; безопасно → «подробнее»; неизвестно (сбой, нет ключа, хранилище) → никакого
+  //     «подробнее»: текст неизвестного исхода и контакты помощи. Текст в журнал и метрики не пишется.
+  async function shortText(chatId, s, text) {
+    if (assessRisk(text).level !== 'none') return handleStory(chatId, s, text, 'text');
+    const g = await track(chatId, gate.probe(s.scope, text, text));
+    if (!alive(chatId, s)) return; // /delete во время проверки: в чат ничего не уходит (запрет, если был, остаётся)
+    if (g.ok) return tg.send(chatId, TEXT.more);
+    if (g.kind === 'safety') {
+      s.story = text; s.originalStory = text; // запрет — на этот текст; прежний черновик уничтожается остановкой
+      return stopForSafety(chatId, s, 'urgent', { at: 'short', byModel: !!g.byModel });
+    }
+    logError('check', { code: g.code });
+    return tg.send(chatId, `${TEXT.checkUnavailable}\n\n${helpContacts()}`);
   }
 
   async function onCallback(q) {
@@ -794,13 +1000,17 @@ export function createBot({
 
 // ── Транспорт Telegram Bot API ───────────────────────────────────────────────
 
-export function telegram(token) {
+export function telegram(token, { callMs = TELEGRAM_CALL_MS } = {}) {
   const base = `https://api.telegram.org/bot${token}`;
+  // Предел ожидания приложения для каждого вызова API (решение Claude 12.11 20:00): зависший вызов не держит ветку.
+  // getUpdates — длинный опрос (30 с) с запасом; sendVideo — загрузка файла; остальное — TELEGRAM_CALL_MS.
+  const limitFor = (method) => (method === 'getUpdates' ? 45_000 : method === 'sendVideo' ? 120_000 : callMs);
   async function call(method, body) {
     const res = await fetch(`${base}/${method}`, {
       method: 'POST',
       headers: body instanceof FormData ? undefined : { 'Content-Type': 'application/json' },
       body: body instanceof FormData ? body : JSON.stringify(body || {}),
+      signal: AbortSignal.timeout(limitFor(method)),
     });
     const data = await res.json().catch(() => ({}));
     // status — код Telegram (401/403/429…): по нему оператор различает причину в обезличенном журнале.
@@ -814,7 +1024,7 @@ export function telegram(token) {
     answer: (id) => call('answerCallbackQuery', { callback_query_id: id }).catch(() => {}),
     async fileBuffer(file_id) {
       const f = await call('getFile', { file_id });
-      const res = await fetch(`https://api.telegram.org/file/bot${token}/${f.file_path}`);
+      const res = await fetch(`https://api.telegram.org/file/bot${token}/${f.file_path}`, { signal: AbortSignal.timeout(30_000) });
       if (!res.ok) throw new Error(`Telegram file ${res.status}`);
       return Buffer.from(await res.arrayBuffer());
     },
@@ -834,7 +1044,6 @@ export function telegram(token) {
  * хранилища запретов. Любая ошибка — исключение: вызывающий не начинает опрос Telegram (fail closed).
  * Нет ключа хранилища — тоже отказ запуска, а не тихий режим.
  */
-<<<<<<< HEAD
 /**
  * Стартовая очистка data/tmp: ролики бота (*.mp4) прежнего процесса — в их имени хэш человека, в кадре титры
  * по рассказу. Вызывается до приёма задач, поэтому все такие файлы старше запуска. Каталог-ссылка или не каталог —
@@ -859,16 +1068,13 @@ export async function purgeBotTmp(dir = botTmpDir()) {
   return removed;
 }
 
-export async function prepareBot({ cleanup = cleanupVoiceOrphans, cleanupTmp = purgeBotTmp, ledger, env = process.env, log = console.error } = {}) {
+export async function prepareBot({ cleanup = cleanupVoiceOrphans, cleanupTmp = purgeBotTmp, ledger, helpFile, env = process.env, log = console.error } = {}) {
   if (!env.METRICS_SALT || String(env.METRICS_SALT).trim().length < METRICS_SALT_MIN) {
     logError('metrics.salt', { code: 'metrics_salt' });
     throw Object.assign(new Error('startup'), { code: 'metrics_salt', stage: 'metrics.salt' });
   }
-=======
-export async function prepareBot({ cleanup = cleanupVoiceOrphans, ledger, helpFile } = {}) {
-  // Контакты помощи — до всего остального: без проверенного блока помощи бот не стартует (решение владельца 11:05).
+  // Контакты помощи: без проверенного блока помощи бот не стартует (решение владельца 11:05).
   try { prepareHelp(helpFile); } catch (e) { logError('help.load', e); throw Object.assign(new Error('startup'), { code: 'help_config', stage: 'help.load' }); }
->>>>>>> origin/claude/edits-same-filter
   try { await cleanup(); } catch (e) { logError('voice.cleanup', e); throw Object.assign(new Error('startup'), { code: safeCode(e), stage: 'voice.cleanup' }); }
   try {
     const removed = await cleanupTmp();
@@ -885,11 +1091,7 @@ async function main() {
   if (!token) { console.error('Задайте TELEGRAM_BOT_TOKEN (выдаёт @BotFather).'); process.exit(2); }
   let ledger;
   try { ledger = await prepareBot(); } catch {
-<<<<<<< HEAD
-    console.error(`Запуск остановлен: не задана METRICS_SALT (не короче ${METRICS_SALT_MIN} знаков), не подтверждена очистка временных файлов или хранилище запретов (${KEY_ENV}, ${KEY_VERSION_ENV}). Задачи не принимаются. Остатки tmp и файл хранилища не удаляйте вручную без владельца кода.`);
-=======
-    console.error(`Запуск остановлен: не проверены контакты помощи (config/help.json), не подтверждена очистка временных файлов или хранилище запретов (${KEY_ENV}, ${KEY_VERSION_ENV}). Задачи не принимаются. Остатки tmp и файл хранилища не удаляйте вручную без владельца кода.`);
->>>>>>> origin/claude/edits-same-filter
+    console.error(`Запуск остановлен: не задана METRICS_SALT (не короче ${METRICS_SALT_MIN} знаков), не проверены контакты помощи (config/help.json), не подтверждена очистка временных файлов или хранилище запретов (${KEY_ENV}, ${KEY_VERSION_ENV}). Задачи не принимаются. Остатки tmp и файл хранилища не удаляйте вручную без владельца кода.`);
     process.exit(3);
   }
   const tg = telegram(token);
