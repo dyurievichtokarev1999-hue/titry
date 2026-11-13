@@ -230,7 +230,9 @@ export const EDIT_SEP = '\n\u0000\n';
 /** Символ разделителя вырезается из любого входящего текста: рассказ не может сам снять признаки (разбор 3689eb93). */
 export const cleanInput = (t) => String(t ?? '').replace(/\u0000/g, '');
 /** Текст для проверки безопасности: правки читаются как продолжение рассказа, через обычный перевод строки. */
-export const joinEdits = (t) => String(t ?? '').split(EDIT_SEP).join('\n');
+// Каждая правка — с заглавной буквы: перенос строки между рассказом и правкой — граница предложения для бытовых форм
+// фильтра безопасности (КРИТИКА PR 16, п. 4); фильтр сам приводит текст к нижнему регистру.
+export const joinEdits = (t) => String(t ?? '').split(EDIT_SEP).map((b, i) => (i ? b.charAt(0).toUpperCase() + b.slice(1) : b)).join('\n');
 
 function sentencesOf(text, homo = true) {
   const blocks = String(text || '').split(EDIT_SEP);
