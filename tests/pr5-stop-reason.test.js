@@ -76,17 +76,20 @@ test('modelSafetyCheck: «нет риска» только из полного �
   assert.equal(await modelSafetyCheck('день', { client: client({ stop_reason: 'end_turn', content: [text(safetyJson(false))] }) }), false, 'контроль');
 });
 
-test('/api/render: неполный ответ проверки — 503 без вызова render; true — 422; контроль end_turn+false — рендер', async () => {
+// Решение владельца кода 13.11 15:00, условие 3: неполный ответ — «неизвестно», один повтор; рассказ локально чистый —
+// ролик делается (раньше 503 без рендера). true — 422 без рендера.
+test('/api/render: неполный ответ проверки — повтор, локально чисто — рендер; true — 422; контроль end_turn+false — рендер', async () => {
   const cases = { ...INCOMPLETE(safetyJson), 'max_tokens + true': { stop_reason: 'max_tokens', content: [text(safetyJson(true))] }, 'контроль': { stop_reason: 'end_turn', content: [text(safetyJson(false))] } };
   for (const [name, resp] of Object.entries(cases)) {
     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-sr-app-'));
     let renders = 0;
-    const server = createApp({ dataDir, render: async (ep, o) => { renders++; return { seconds: 1, outPath: o.outPath }; }, safetyCheck: (s) => modelSafetyCheck(s, { client: client(resp) }) });
+    let calls = 0;
+    const server = createApp({ dataDir, checkRetryMs: 0, render: async (ep, o) => { renders++; return { seconds: 1, outPath: o.outPath }; }, safetyCheck: (s) => { calls++; return modelSafetyCheck(s, { client: client(resp) }); } });
     await new Promise((r) => server.listen(0, '127.0.0.1', r));
     try {
       const res = await fetch(`http://127.0.0.1:${server.address().port}/api/render`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ episode: example.episode, story: example.story }) });
-      if (name === 'контроль') { assert.equal(res.status, 200, name); assert.equal(renders, 1, name); }
-      else { assert.equal(res.status, name === 'max_tokens + true' ? 422 : 503, name); assert.equal(renders, 0, name); }
+      if (name === 'max_tokens + true') { assert.equal(res.status, 422, name); assert.equal(renders, 0, name); assert.equal(calls, 1, name); }
+      else { assert.equal(res.status, 200, name); assert.equal(renders, 1, name); assert.equal(calls, name === 'контроль' ? 1 : 2, name); }
     } finally { server.close(); await fs.rm(dataDir, { recursive: true, force: true }); }
   }
 });

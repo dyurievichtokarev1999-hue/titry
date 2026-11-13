@@ -422,7 +422,7 @@ async function withBot(fn) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-vr-v1-'));
   const rendered = [];
   const render = async (ep, opts) => { rendered.push({ ep, opts }); await fs.mkdir(path.dirname(opts.outPath), { recursive: true }); await fs.writeFile(opts.outPath, 'x'); return { outPath: opts.outPath, duration: 24, seconds: 1 }; };
-  const bot = createBot({ safetyCheck: async () => false, tg, metrics: makeMetrics(path.join(dir, 'm.jsonl')), render, draft: (st, o) => makeDraft(st, { ...o, provider: 'manual' }) });
+  const bot = createBot({ safetyCheck: async () => false, tg, metrics: makeMetrics(path.join(dir, 'm.jsonl'), 'test-salt-fictional-0001'), render, draft: (st, o) => makeDraft(st, { ...o, provider: 'manual' }) });
   const chat = { id: 91, type: 'private' };
   const say = (text) => bot.handleUpdate({ message: { chat, text } });
   const play = (id) => bot.handleUpdate({ callback_query: { id, data: `play:${playId(tg)}`, message: { chat } } });

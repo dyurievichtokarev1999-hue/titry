@@ -151,7 +151,7 @@ test('QH/QC/QF через настоящий /api/render (вариант QA: б�
   const run = async (extra, safetyCheck) => {
     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-qh-'));
     let renders = 0;
-    const server = createApp({ dataDir, safetyCheck, render: async (e, o) => { renders++; return { seconds: 1, outPath: o.outPath }; } });
+    const server = createApp({ dataDir, safetyCheck, checkRetryMs: 0, render: async (e, o) => { renders++; return { seconds: 1, outPath: o.outPath }; } });
     await new Promise((r) => server.listen(0, '127.0.0.1', r));
     try {
       const res = await fetch(`http://127.0.0.1:${server.address().port}/api/render`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ story: `${story0} ${extra}`, episode }) });
@@ -173,7 +173,8 @@ test('QH/QC/QF через настоящий /api/render (вариант QA: б�
   const qf01 = await run(QH[0], async () => { throw Object.assign(new Error('x'), { code: 'timeout' }); });
   assert.ok([422, 503].includes(qf01.status), 'QF01: без выдачи'); assert.equal(qf01.renders, 0);
   const qf01b = await run('Вечером пила чай.', async () => { throw Object.assign(new Error('x'), { code: 'timeout' }); });
-  assert.equal(qf01b.status, 503, 'недоступность проверки — 503'); assert.equal(qf01b.renders, 0);
+  // Решение 13.11 15:00, условие 3: «неизвестно» при локально чистом рассказе — ролик делается.
+  assert.equal(qf01b.status, 200, 'недоступность проверки, локально чисто — ролик'); assert.equal(qf01b.renders, 1);
 });
 
 // Девятый независимый разбор 2fa5e376: исключение гиперболы — только отдельное предложение при безобидном остальном.

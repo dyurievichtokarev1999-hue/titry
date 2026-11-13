@@ -28,6 +28,8 @@ const BAD = {
   'номер из двух цифр': { region: 'RU', emergency: { label: 'Экстренные', phone: '12', verified: true }, contacts: [] },
   'U+2028 в подписи': { region: 'RU', emergency: { label: 'Экстренные\u2028службы', phone: '112', verified: true }, contacts: [] },
   'U+2029 в номере': { region: 'RU', emergency: { label: 'Экстренные', phone: '11\u20292', verified: true }, contacts: [] },
+  // Решение владельца кода 13.11 15:00 по PR 11: без контактов «Россия» (регион RU) сервис не стартует.
+  'регион не Россия': { region: 'KZ', emergency: { label: 'Экстренные', phone: '112', verified: true }, contacts: [] },
   'нет кода региона': { emergency: { label: 'Экстренные', phone: '112', verified: true }, contacts: [] },
   'реплика с блоком concern длиннее 3500': { region: 'RU', emergency: { label: 'Ж'.repeat(3400), phone: '112', verified: true }, contacts: [] },
   'блок помощи длиннее одного сообщения': { region: 'RU', emergency: { label: 'Ж'.repeat(TELEGRAM_TEXT_LIMIT), phone: '112', verified: true }, contacts: [] },
@@ -58,7 +60,7 @@ test('prepareBot: плохой help.json — отказ на этапе help.loa
   try {
     let cleaned = 0, loaded = 0;
     const ledger = { load: async () => { loaded++; } };
-    await assert.rejects(prepareBot({ helpFile: await helpFile(dir, BAD['нет проверенных контактов']), cleanup: async () => { cleaned++; }, ledger }), { stage: 'help.load', code: 'help_config' });
+    await assert.rejects(prepareBot({ helpFile: await helpFile(dir, BAD['нет проверенных контактов']), cleanup: async () => { cleaned++; }, ledger, env: { METRICS_SALT: 'test-salt-fictional-0001', ANTHROPIC_API_KEY: 'test-dummy' } }), { stage: 'help.load', code: 'help_config' });
     assert.equal(cleaned, 0); assert.equal(loaded, 0);
     prepareHelp(); // вернуть проверенные контакты репозитория для остальных тестов процесса
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
@@ -78,7 +80,7 @@ async function tree(helpValue) {
 function run(dir, entry, env, preload) {
   return new Promise((resolve) => {
     const args = preload ? ['--import', preload, path.join(dir, entry)] : [path.join(dir, entry)];
-    const p = spawn(process.execPath, args, { env: { ...process.env, TITRY_BLOCKED_HMAC_KEY: 'test-only-key-not-a-secret', TITRY_BLOCKED_KEY_VERSION: 'v-help-test', ...env }, cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] });
+    const p = spawn(process.execPath, args, { env: { ...process.env, METRICS_SALT: 'test-salt-fictional-0001', TITRY_BLOCKED_HMAC_KEY: 'test-only-key-not-a-secret', TITRY_BLOCKED_KEY_VERSION: 'v-help-test', ...env }, cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '', err = '';
     p.stdout.on('data', (d) => { out += d; }); p.stderr.on('data', (d) => { err += d; });
     const timer = setTimeout(() => p.kill('SIGKILL'), 20000);

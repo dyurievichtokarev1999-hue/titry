@@ -1,37 +1,32 @@
-// Шлюз выдачи: отдельная проверка безопасности и состояния остановки (особая зона).
-// Контракт владельца 10.11 12:05 п. 3 и 13:05 п. 1; матрица QA 13:29 (S/U/T/V/L).
+// Шлюз выдачи: одна модельная проверка перед рендером и состояние остановки (особая зона).
+// Решение владельца кода (Claude) 13.11 15:00:
+//  - модельная проверка одна: перед рендером, на всём, что попадает в ролик; локальный фильтр (server/safety.js)
+//    работает всегда и держит минимум, модель ловит неявное сверх минимума;
+//  - «неизвестно» (таймаут или ошибка модели): один повтор через несколько секунд; дальше решает вызывающий
+//    по локальному уровню (чисто — ролик делается; есть concern — ролика нет, «не получилось» и контакты);
+//  - нет ключа API: режим «только локальный фильтр», проверка не вызывается и «не завершилась» не говорит.
 //
-// Три состояния рассказа в одной области (монтажная — общая область, бот — сессия участника):
-//  - safety    — подтверждённая опасность любого слоя. Ничем не снимается.
-//  - technical — вторая подряд неполная отдельная проверка одной проверяемой версии
-//                (reason check_incomplete_twice). Не вывод о содержании: без помощи и без urgent.
-//                Снимается только полной успешной проверкой, запущенной явным действием организатора
-//                не раньше retryNotBefore. Само истечение времени ничего не снимает.
-//  - нет состояния — выдача возможна только после полной проверки этой версии (end_turn + строгий false).
-//
-// Первый неполный ответ — unavailable (503) без записи в blocked; счётчик в памяти процесса.
-// Время паузы считается по монотонным часам; UTC-момент хранится для отображения и будущего журнала.
+// Состояние рассказа в области (монтажная — общая область 'studio', бот — участник 'chat:<id>'):
+//  - safety — подтверждённая опасность любого слоя. Ничем не снимается, хранится в хранилище запретов;
+//  - нет состояния — выдача после проверки.
+// Техническая пауза второй проверки (technical, повтор организатора) и объединение проверок одного рассказа убраны.
 import crypto from 'node:crypto';
 import { safeCode } from './errlog.js';
 
-export const RETRY_AFTER_MS = 15 * 60 * 1000;
+/** Пауза перед единственным повтором модельной проверки при «неизвестно». */
+export const RETRY_DELAY_MS = 3000;
 
 /** Действующая нормализация запрета (как storyKey): строка, нижний регистр, ё→е, сжатые пробелы. */
 export function normStory(story) {
   return String(story ?? '').toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim();
 }
-// Ключ рассказа в памяти процесса (решение владельца 11.11 13:05 п. 2): HMAC с секретной солью процесса —
-// по нему нельзя подобрать короткий рассказ словарём. Соль создаётся при запуске и нигде не хранится;
-// ключ живёт только в памяти, не пишется в журнал, метрики и тексты ошибок (даже усечённым).
+// Ключ рассказа в памяти процесса. Живёт только в памяти, не пишется в журнал, метрики и тексты ошибок.
 // Переживающие перезапуск записи хранилища считаются отдельно (server/ledger.js, свой HMAC).
-const PROCESS_SALT = crypto.randomBytes(32);
-export const storyDigest = (story) => crypto.createHmac('sha256', PROCESS_SALT).update(`story\0${normStory(story)}`).digest('hex');
+export const storyDigest = (story) => crypto.createHash('sha256').update(`story\0${normStory(story)}`).digest('hex');
 
-// versionDigest соль процесса НЕ получает сознательно: хранилище пишет его как hmac('episode', …) и сравнивает
-// после перезапуска (server/ledger.js). Сам он живёт только в памяти и, как ключ рассказа, не пишется в журнал.
 /**
  * Проверяемая версия: рассказ (как прислан) + явно перечисленные поля эпизода. Порядок строк сохраняется.
- * Плёнка, музыка, род и дата в версию не входят: они не меняют текст; safety по рассказу они не снимают (V02).
+ * Плёнка, музыка, род и дата в версию не входят: они не меняют текст. Хранилище пишет её как hmac('episode', …).
  */
 export function versionDigest(story, ep) {
   const e = ep && typeof ep === 'object' ? ep : {};
@@ -41,36 +36,25 @@ export function versionDigest(story, ep) {
   return crypto.createHash('sha256').update(`episode\0${canon}`).digest('hex');
 }
 
-const monotonic = () => performance.now();
+const wait = (ms) => new Promise((r) => { setTimeout(r, ms); });
 
 /**
- * check(text) — отдельная проверка: true — опасно, false — полное разрешение;
- * исключение с кодом — неполная проверка. hasKey() — есть ли доступ к модели.
+ * check(text) — модельная проверка: true — опасно, false — безопасно; исключение с кодом — «неизвестно».
+ * hasKey() — есть ли доступ к модели. ledger — хранилище запретов (server/ledger.js), необязательно.
+ * Остановка ставится в памяти сразу, затем подтверждается запись на диск; пока запись не подтверждена
+ * или хранилище неисправно, выдачи нет (код ledger).
  */
-// ledger — хранилище запретов (server/ledger.js), необязательно. Сохраняются области-строки:
-// монтажная 'studio', бот — участник 'chat:<id>' (на диск — только HMAC области).
-// Сначала остановка ставится в памяти и выдача запрещается, затем подтверждается запись на диск;
-// пока запись не подтверждена или хранилище неисправно, выдачи нет (503, код ledger).
-// Сколько «безопасно» ждёт незавершённые решения (проверки и черновики) того же рассказа. Принято владельцем 11.11 14:02.
-// Почему не меньше времени отдельной проверки: сосед — это обычная проверка модели (ответ модели с повторами SDK)
-// или черновик; при меньшем пределе ожидание чаще обрывалось бы раньше обычного ответа, и человек получал бы
-// «проверка не завершена» вместо результата. Безопасность от числа не зависит: по истечении — не «безопасно»,
-// а unavailable/check_pending, реплики нехватки нет (тест «сосед завис дольше предела» в insufficient-after-exclusion).
-export const NEIGHBOR_WAIT_MS = 120 * 1000;
-
-export function makeGate({ check, hasKey = () => true, monoNow = monotonic, wallNow = () => Date.now(), retryMs = RETRY_AFTER_MS, ledger = null, neighborWaitMs = NEIGHBOR_WAIT_MS } = {}) {
+export function makeGate({ check, hasKey = () => true, ledger = null, retryDelayMs = RETRY_DELAY_MS, sleep = wait } = {}) {
   const durable = (scope) => ledger && typeof scope === 'string';
   const persist = (p) => { p.catch(() => { /* хранилище само переходит в failed; выдача закрыта */ }); return p; };
   const scopes = new Map();
   const area = (scope) => {
     let a = scopes.get(scope);
-    // failures: storyDigest → { vd, n } — подряд идущие неполные ответы одной версии; epoch — номер «эпохи» рассказа:
-    // меняется при новой паузе и при ручном повторе; ответы, начатые в прежней эпохе, не учитываются в счётчике.
-    // decisions: storyDigest → Set незавершённых решений отдельной проверки этого рассказа (см. runCheck).
-    if (!a) { a = { safety: new Set(), technical: new Map(), failures: new Map(), epochs: new Map(), decisions: new Map() }; scopes.set(scope, a); }
+    if (!a) { a = { safety: new Set() }; scopes.set(scope, a); }
     return a;
   };
 
+  /** { kind: 'safety' } | { kind: 'unavailable', code: 'ledger' } | { kind: null }. */
   function status(scope, story) {
     const a = area(scope);
     const sd = storyDigest(story);
@@ -78,197 +62,66 @@ export function makeGate({ check, hasKey = () => true, monoNow = monotonic, wall
     if (durable(scope)) {
       const l = ledger.lookup(scope, story);
       if (l.failed) return { kind: 'unavailable', code: 'ledger' };
-      if (l.kind === 'safety') { a.safety.add(sd); a.technical.delete(sd); return { kind: 'safety' }; }
-      if (l.kind === 'technical' && !a.technical.has(sd)) {
-        // После перезапуска монотонное время прежнего процесса недоступно: отсчёт заново, полные 15 минут
-        // от загрузки (никогда не раньше сохранённого UTC-момента). Перезапуск не даёт раннего повтора.
-        const at = Math.max(Date.parse(l.retryNotBeforeAt) || 0, wallNow() + retryMs);
-        bumpEpoch(a, sd);
-        a.technical.set(sd, { retryNotBefore: monoNow() + retryMs, retryNotBeforeAt: new Date(at).toISOString(), epoch: Symbol('technical'), retrying: false });
-      }
+      // Записи technical прежних версий больше ничего не запрещают: паузы второй проверки нет.
+      if (l.kind === 'safety') { a.safety.add(sd); return { kind: 'safety' }; }
     }
-    const t = a.technical.get(sd);
-    if (t) return { kind: 'technical', reason: 'check_incomplete_twice', retryNotBeforeAt: t.retryNotBeforeAt, retryAllowed: monoNow() >= t.retryNotBefore };
     return { kind: null };
   }
 
   function markSafety(scope, story) {
-    const a = area(scope);
-    const sd = storyDigest(story);
-    a.safety.add(sd);
-    a.technical.delete(sd); // safety сильнее; technical больше не нужен
+    area(scope).safety.add(storyDigest(story));
     if (durable(scope)) persist(ledger.put({ scope, story, kind: 'safety', reason: 'safety' }));
   }
 
-  const epochOf = (a, sd) => a.epochs.get(sd) || 0;
-  const bumpEpoch = (a, sd) => { a.epochs.set(sd, epochOf(a, sd) + 1); a.failures.delete(sd); };
-
-  function setTechnical(scope, story, a, sd, vd) {
-    bumpEpoch(a, sd);
-    const t = { retryNotBefore: monoNow() + retryMs, retryNotBeforeAt: new Date(wallNow() + retryMs).toISOString(), epoch: Symbol('technical'), retrying: false };
-    a.technical.set(sd, t);
-    if (durable(scope)) persist(ledger.put({ scope, story, episodeDigest: vd, kind: 'technical', reason: 'check_incomplete_twice', retryNotBeforeAt: t.retryNotBeforeAt }));
-    return t;
-  }
   const ledgerOk = async (scope) => !durable(scope) || ledger.flush();
 
-  // Одна полная отдельная проверка версии. Возвращает { ok } | { kind: 'safety' } | { unavailable, code } |
-  // { kind: 'technical', code: 'check_incomplete_twice' }.
-  // Незавершённые «решения» по рассказу в области (сверка 5cffcd11 и разбор afaf073; требование владельца:
-  // остановленный текст НИКОГДА не получает «можно»). Решение — то, что может поставить safety этому рассказу:
-  // отдельная проверка (с самого входа в verify, включая ожидание хранилища) и черновик (holdDraft: генератор может
-  // вернуть остановку). Слот закрывается, когда решение принято и safety (если есть) уже поставлен, — до того, как его
-  // владелец сам начнёт ждать соседей, поэтому взаимной блокировки нет.
-  function reserve(a, sd, kind = 'check') {
-    let set = a.decisions.get(sd);
-    if (!set) { set = new Set(); a.decisions.set(sd, set); }
-    let done;
-    const slot = { kind, promise: new Promise((r) => { done = r; }), closed: false };
-    slot.close = () => {
-      if (slot.closed) return;
-      slot.closed = true; done();
-      set.delete(slot);
-      if (!set.size && a.decisions.get(sd) === set) a.decisions.delete(sd);
-    };
-    set.add(slot);
-    return slot;
-  }
-
-  // «Безопасно» выдаётся, только когда решены все решения этого рассказа, открытые к моменту собственного ответа
-  // (снимок: непрерывный поток повторов не задерживает ответ бесконечно; решения, открытые позже, перекрываются
-  // проверкой status() в verify и у вызывающего). Ожидание ограничено neighborWaitMs: по истечении — unavailable
-  // (check_pending), а не «можно».
-  // Черновики соседей (kind 'draft') ждёт только путь реплики нехватки (includeDrafts): рендер и перепроверка
-  // ведут себя как раньше, их защищает проверка состояния после рендера (R1/R2).
-  async function awaitNeighbors(a, sd, own, includeDrafts = false) {
-    const others = [...(a.decisions.get(sd) || [])].filter((x) => x !== own && !x.closed && (x.kind === 'check' || includeDrafts));
-    if (!others.length) return true;
-    let timer;
-    const timeout = new Promise((r) => { timer = setTimeout(() => r(false), neighborWaitMs); });
-    const all = Promise.all(others.map((x) => x.promise)).then(() => true);
-    try { return await Promise.race([all, timeout]); } finally { clearTimeout(timer); }
-  }
-
-  async function runCheck(scope, story, ep, text, slot, includeDrafts = false) {
-    const a = area(scope);
-    const sd = storyDigest(story);
-    const own = slot || reserve(a, sd);
-    let r;
-    try { r = await decide(scope, story, ep, text, a, sd); } finally { own.close(); }
-    if (!r.ok) return r;
-    if (!(await awaitNeighbors(a, sd, own, includeDrafts))) return a.safety.has(sd) ? { kind: 'safety' } : { unavailable: true, code: 'check_pending' };
-    if (a.safety.has(sd)) return { kind: 'safety' };
-    return r;
-  }
-
-  /**
-   * Черновик того же рассказа — тоже незавершённое решение: генератор может вернуть остановку (S03). Возвращает
-   * тот же результат. Остановка (нет эпизода, не unavailable и не insufficient) ставится здесь, до закрытия слота,
-   * чтобы ожидающая проверка соседа её увидела.
-   */
-  function holdDraft(scope, story, promise) {
-    const a = area(scope);
-    const slot = reserve(a, storyDigest(story), 'draft');
-    return Promise.resolve(promise).then((r) => {
-      // Остановка — только явный urgent (как в монтажной); иной исход без эпизода сюда не записывается.
-      if (r && !r.unavailable && !r.insufficient && !r.episode && r.risk && r.risk.level === 'urgent') markSafety(scope, story);
-      return r;
-    }).finally(() => slot.close());
-  }
-
-  async function decide(scope, story, ep, text, a, sd) {
-    const vd = versionDigest(story, ep);
-    if (!hasKey()) return { unavailable: true, code: 'no_key' };
-    const epoch = epochOf(a, sd);
-    let flagged, err;
-    try { flagged = await check(text); } catch (e) { err = e; }
-    // После ожидания: остановка могла прийти из параллельного запроса — она сильнее любого ответа.
-    if (a.safety.has(sd)) return { kind: 'safety' };
-    if (!err && flagged === true) { markSafety(scope, story); return { kind: 'safety' }; }
-    const stale = epochOf(a, sd) !== epoch; // ответ начат до новой паузы или до ручного повтора
-    if (!err && flagged === false) { if (!stale) a.failures.delete(sd); return { ok: true, stale }; }
-    const code = err ? safeCode(err) : 'bad_response';
-    if (stale) return { unavailable: true, code }; // поздний сбой прежней попытки счётчик не двигает
-    // Неполная проверка: «подряд» — для одной версии; сбой другой версии начинает счёт заново.
-    const prev = a.failures.get(sd);
-    const n = prev && prev.vd === vd ? prev.n + 1 : 1;
-    if (n >= 2) {
-      const t = setTechnical(scope, story, a, sd, vd);
-      return { kind: 'technical', code: 'check_incomplete_twice', retryNotBeforeAt: t.retryNotBeforeAt };
+  // Один вызов модели и не больше одного повтора: true | false | { unknown: code }.
+  async function ask(text) {
+    let code;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (attempt) await sleep(retryDelayMs);
+      try {
+        const flagged = await check(text);
+        if (flagged === true || flagged === false) return flagged;
+        code = 'bad_response';
+      } catch (e) { code = safeCode(e); }
     }
-    a.failures.set(sd, { vd, n });
-    return { unavailable: true, code };
+    return { unknown: code };
   }
 
   /**
-   * Проверка перед выдачей: состояние → отдельная проверка версии. technical без действия организатора не проверяется.
-   * includeDrafts — ждать и черновики того же рассказа (путь реплики нехватки: остановленный текст её не получает).
+   * Проверка перед выдачей. Возвращает:
+   *  { ok: true } — безопасно; { ok: true, localOnly: true } — ключа нет, решает только локальный фильтр;
+   *  { kind: 'safety', byModel } — опасно (запрет записан); { unknown: true, code } — модель не ответила и после
+   *  повтора; { unavailable: true, code: 'ledger' } — хранилище запретов недоступно (выдачи нет).
+   * text — всё, что попадёт в ролик; story — ключ запрета.
    */
-  async function verify(scope, story, ep, text, { includeDrafts = false } = {}) {
-    const fromStatus = (st) => (st.kind === 'safety' ? { kind: 'safety' } : st.kind === 'unavailable' ? { unavailable: true, code: st.code }
-      : { kind: 'technical', code: 'check_incomplete_twice', retryNotBeforeAt: st.retryNotBeforeAt });
+  async function verify(scope, story, ep, text) {
     const st = status(scope, story);
-    if (st.kind) return fromStatus(st);
-    const slot = reserve(area(scope), storyDigest(story)); // решение открыто с входа: ожидание хранилища тоже внутри
-    let r;
-    try {
-      if (!(await ledgerOk(scope))) return { unavailable: true, code: 'ledger' };
-      r = await runCheck(scope, story, ep, text, slot, includeDrafts);
-    } finally { slot.close(); }
-    // Пока шла проверка, другой запрос мог поставить technical — тогда это разрешение не действует.
-    // Разрешение выдаётся только при подтверждённой записи всех начатых остановок.
-    if (r.ok) {
-      if (!(await ledgerOk(scope))) return status(scope, story).kind === 'safety' ? { kind: 'safety' } : { unavailable: true, code: 'ledger' };
-      const after = status(scope, story);
-      if (after.kind === 'unavailable') return fromStatus(after);
-      if (after.kind === 'safety') return { kind: 'safety' };
-      if (after.kind === 'technical') return { kind: 'technical', code: 'check_incomplete_twice', retryNotBeforeAt: after.retryNotBeforeAt };
-    }
-    return r;
+    if (st.kind === 'safety') return { kind: 'safety', byModel: false };
+    if (st.kind) return { unavailable: true, code: st.code };
+    if (!hasKey()) return { ok: true, localOnly: true };
+    if (!(await ledgerOk(scope))) return { unavailable: true, code: 'ledger' };
+    const res = await ask(text);
+    // Остановка, пришедшая из параллельного запроса за время проверки, сильнее любого ответа.
+    if (area(scope).safety.has(storyDigest(story))) return { kind: 'safety', byModel: false };
+    if (res === true) { markSafety(scope, story); return { kind: 'safety', byModel: true }; }
+    if (res !== false) return { unknown: true, code: res.unknown };
+    if (!(await ledgerOk(scope))) return status(scope, story).kind === 'safety' ? { kind: 'safety', byModel: false } : { unavailable: true, code: 'ledger' };
+    const after = status(scope, story);
+    if (after.kind === 'safety') return { kind: 'safety', byModel: false };
+    if (after.kind) return { unavailable: true, code: after.code };
+    return { ok: true };
   }
 
   /**
-   * Явное действие организатора «повторить проверку». Только для technical, не раньше retryNotBefore,
-   * не более одного одновременно. Полная проверка заново; false снимает technical именно этой эпохи.
-   */
-  async function organizerRetry(scope, story, ep, text) {
-    const a = area(scope);
-    const sd = storyDigest(story);
-    const st = status(scope, story); // подтягивает запись хранилища после перезапуска
-    if (st.kind === 'safety') return { kind: 'safety' };
-    if (st.kind === 'unavailable') return { unavailable: true, code: st.code };
-    const t = a.technical.get(sd);
-    if (!t) return { notPaused: true };
-    if (monoNow() < t.retryNotBefore) return { early: true, retryNotBeforeAt: t.retryNotBeforeAt };
-    if (t.retrying) return { inProgress: true };
-    t.retrying = true;
-    try {
-      bumpEpoch(a, sd); // ответы прежних попыток больше не влияют на счёт
-      a.failures.set(sd, { vd: versionDigest(story, ep), n: 1 }); // повтор после паузы: неполный ответ сразу возвращает technical
-      const r = await runCheck(scope, story, ep, text);
-      if (r.ok) {
-        if (a.technical.get(sd) !== t) return status(scope, story).kind === 'safety' ? { kind: 'safety' } : { kind: 'technical', code: 'check_incomplete_twice' };
-        if (durable(scope)) {
-          // Снятие — только с подтверждённой записью; иначе пауза остаётся.
-          try { await ledger.clearTechnical(scope, story); } catch { return { unavailable: true, code: 'ledger' }; }
-          if (a.technical.get(sd) !== t) return status(scope, story).kind === 'safety' ? { kind: 'safety' } : { kind: 'technical', code: 'check_incomplete_twice' };
-        }
-        a.technical.delete(sd);
-        return { ok: true };
-      }
-      return r;
-    } finally { t.retrying = false; }
-  }
-
-  /**
-   * Какие запреты сохранены в области: Set из 'safety' / 'technical' (пустой — нет записей);
-   * null — хранилище недоступно, состояние неизвестно.
+   * Какие запреты сохранены в области: Set из 'safety' / 'technical' (technical — только старые записи хранилища);
+   * пустой — нет записей; null — хранилище недоступно, состояние неизвестно.
    */
   function recordsFor(scope) {
     const a = scopes.get(scope);
     const kinds = new Set();
     if (a && a.safety.size) kinds.add('safety');
-    if (a && a.technical.size) kinds.add('technical');
     if (durable(scope)) {
       const l = ledger.scopeKinds(scope);
       if (l === null) return null;
@@ -277,29 +130,21 @@ export function makeGate({ check, hasKey = () => true, monoNow = monotonic, wall
     return kinds;
   }
 
-  // Разовая проверка короткого текста в боте (PR 15, решение Claude 11.11 15:05 п. 1): без счётчика неполных ответов
-  // и без технической паузы — иначе два сбоя на «Привет» навсегда закрыли бы это слово участнику (в боте нет ручного
-  // повтора организатора). Опасность ставит обычную остановку. Неполный ответ — unavailable: «подробнее» не будет.
-  async function probe(scope, story, text) {
-    const a = area(scope);
-    const sd = storyDigest(story);
-    const st = status(scope, story);
-    if (st.kind === 'safety') return { kind: 'safety', byModel: false };
-    if (st.kind) return { unavailable: true, code: st.kind === 'technical' ? 'check_incomplete_twice' : st.code };
-    if (!hasKey()) return { unavailable: true, code: 'no_key' };
-    if (!(await ledgerOk(scope))) return { unavailable: true, code: 'ledger' }; // как verify: хранилище до проверки
-    let flagged;
-    try { flagged = await check(text); } catch (e) { return a.safety.has(sd) ? { kind: 'safety', byModel: false } : { unavailable: true, code: safeCode(e) }; }
-    if (a.safety.has(sd)) return { kind: 'safety', byModel: false }; // остановка из параллельного запроса сильнее
-    if (flagged === true) { markSafety(scope, story); return { kind: 'safety', byModel: true }; }
-    if (flagged !== false) return { unavailable: true, code: 'bad_response' };
-    // «Безопасно» — только при подтверждённом хранилище и без состояния, пришедшего за время проверки (как verify).
-    if (!(await ledgerOk(scope))) return status(scope, story).kind === 'safety' ? { kind: 'safety', byModel: false } : { unavailable: true, code: 'ledger' };
-    const after = status(scope, story);
-    if (after.kind === 'safety') return { kind: 'safety', byModel: false };
-    if (after.kind) return { unavailable: true, code: after.kind === 'technical' ? 'check_incomplete_twice' : after.code };
-    return { ok: true };
-  }
+  return { status, markSafety, verify, recordsFor, versionDigest, storyDigest };
+}
 
-  return { status, markSafety, verify, probe, organizerRetry, holdDraft, recordsFor, versionDigest, storyDigest };
+/** Есть ли доступ к модели по переменным окружения (как hasClaudeCredentials в server/draft.js). */
+export const keyInEnv = (env = process.env) => Boolean(env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN || env.ANTHROPIC_PROFILE);
+
+/**
+ * Режим проверки при старте бота и монтажной (условие 4). Нет ключа API:
+ *  - при TITRY_RELEASE_REAL_DATA=1 — исключение с кодом no_key (вызывающий не стартует);
+ *  - иначе одна строка-предупреждение в журнал и режим «только локальный фильтр».
+ * В строке — только этап и код, без текстов.
+ */
+export function modelModeAtStart({ env = process.env, log = console.error } = {}) {
+  if (keyInEnv(env)) return 'model';
+  if (env.TITRY_RELEASE_REAL_DATA === '1') throw Object.assign(new Error('startup'), { code: 'no_key', stage: 'model.key' });
+  log(JSON.stringify({ at: new Date().toISOString(), level: 'warn', stage: 'model.key', code: 'no_key', mode: 'local_only' }));
+  return 'local_only';
 }

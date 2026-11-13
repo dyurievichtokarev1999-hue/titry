@@ -11,8 +11,6 @@ import { makeDraft, draftRuleBased } from '../server/draft.js';
 import { INSUFFICIENT_INVITE_TEXT, insufficientAfterExclusion, INSUFFICIENT_AFTER_EXCLUSION, validateSafeEpisode, assessRisk, helpMessage, loadHelp } from '../server/safety.js';
 import { createBot, TEXT, insufficientMessages, TELEGRAM_TEXT_LIMIT } from '../server/bot.js';
 import { createApp, INSUFFICIENT_TEXT } from '../server/app.js';
-import crypto from 'node:crypto';
-import { storyDigest, normStory } from '../server/gate.js';
 import { LIMITS } from '../engine/episode.js';
 
 const OI = JSON.parse(await fs.readFile(new URL('./fixtures/oi-intent.json', import.meta.url), 'utf8')).cases;
@@ -202,7 +200,7 @@ test('бот: нехватка после concern → ровно одна отп
     assert.equal(after[0].extra.parse_mode, undefined, `${id}: без HTML-разметки — контакты не экранируются`);
     assert.equal(after[0].text, `${BOT_REPLY}\n\n${helpMessage('concern')}`, `${id}: порядок «реплика (с приглашением) → блок», без переходной фразы`);
     for (const m of after) assert.equal(m.extra.reply_markup, undefined, `${id}: без кнопок`);
-    assert.doesNotMatch(b.texts().join('\n'), /Сейчас важнее не титры/, `${id}: не карточка urgent`);
+    assert.doesNotMatch(b.texts().join('\n'), /Титры для этого рассказа не будут собраны/, `${id}: не карточка urgent`);
     assert.deepEqual(b.events, [{ event: 'insufficient_after_exclusion' }], `${id}: метрика без текста и номеров`);
     // Кнопки прежних черновиков ничего не запускают, ролика нет.
     for (let n = 0; n <= 3; n++) await b.press(`play:${n}`);
@@ -257,7 +255,7 @@ test('бот: нехватка без concern → ровно одна репли
   const after = b.sent.slice(b.texts().indexOf(TEXT.working) + 1);
   assert.deepEqual(after.map((m) => m.text), [BOT_REPLY]);
   assert.doesNotMatch(b.texts().join('\n'), HELP);
-  assert.equal(b.counters.check, 1, 'отдельная проверка до реплики');
+  assert.equal(b.counters.check, 0, 'модельной проверки перед репликой нет (решение 13.11 15:00)');
 });
 
 test('бот: две пары — обычный черновик, реплики нехватки нет', async () => {
@@ -267,55 +265,10 @@ test('бот: две пары — обычный черновик, реплик�
   assert.ok(b.bot.sessions.get(chat.id).episode);
 });
 
-test('бот: отдельная проверка true → остановка, а не нехватка', async () => {
-  const b = botSetup({ check: () => true });
-  await b.say(byId.OI10);
-  assert.ok(!b.texts().some((t) => t.startsWith(REPLY))); assert.match(b.texts().at(-1), HELP);
-  // Повтор того же рассказа — снова остановка.
-  await b.say(byId.OI10);
-  assert.ok(!b.texts().some((t) => t.startsWith(REPLY))); assert.match(b.texts().at(-1), HELP);
-});
-
-test('бот: незавершённая проверка или нет ключа → технический ответ, а не нехватка', async () => {
-  const fail = () => { throw Object.assign(new Error('сбой'), { code: 'incomplete_response' }); };
-  const b = botSetup({ check: fail });
-  await b.say(byId.OI10);
-  assert.equal(b.texts().at(-1), TEXT.checkUnavailable);
-  await b.say(byId.OI10);
-  assert.equal(b.texts().at(-1), TEXT.checkPaused, 'второй неполный ответ — техническая пауза');
-  await b.say(byId.OI10);
-  assert.equal(b.texts().at(-1), TEXT.checkPaused, 'пауза держится, нехватка её не подменяет');
-  assert.ok(!b.texts().some((t) => t.startsWith(REPLY)));
-  const k = botSetup({ hasKey: () => false });
-  await k.say(byId.OI10);
-  assert.equal(k.texts().at(-1), TEXT.checkUnavailable); assert.ok(!k.texts().some((t) => t.startsWith(REPLY)));
-});
-
-test('бот: /delete во время отдельной проверки → реплики нет, запрет по ответу true сохраняется', async () => {
-  let release;
-  const b = botSetup({ check: () => new Promise((r) => { release = r; }) });
-  const p = b.say(byId.OI10);
-  while (!release) await new Promise((r) => setImmediate(r));
-  await b.say('/delete');
-  release(true);
-  await p;
-  assert.ok(!b.texts().some((t) => t.startsWith(REPLY)));
-  assert.ok(!b.events.some((e) => e.event === 'insufficient_after_exclusion'), 'после /delete метрика не пишется');
-  await b.say(byId.OI10);
-  assert.match(b.texts().at(-1), HELP, 'тот же рассказ после /delete — остановка');
-});
-
-test('бот: новый рассказ во время проверки → устаревшая реплика нехватки не отправляется', async () => {
-  let release;
-  const b = botSetup({ check: (t, n) => (n === 1 ? new Promise((r) => { release = r; }) : false) });
-  const p = b.say(byId.OI10);
-  while (!release) await new Promise((r) => setImmediate(r));
-  await b.say(SAFE);
-  release(false);
-  await p;
-  assert.ok(!b.texts().some((t) => t.startsWith(REPLY)));
-  assert.ok(b.bot.sessions.get(chat.id).episode, 'черновик нового рассказа на месте');
-});
+// Удалено (решение владельца кода 13.11 15:00): модельной проверки перед репликой нехватки больше нет — модельная
+// проверка одна, перед рендером. Технической паузы и объединения проверок одного рассказа (ожидание соседей) тоже нет.
+// Тесты «проверка true → остановка, а не нехватка», «незавершённая проверка или нет ключа → технический ответ»,
+// «/delete во время отдельной проверки», «новый рассказ во время проверки».
 
 test('бот: местный urgent → помощь без отдельной проверки и без нехватки', async () => {
   const b = botSetup();
@@ -392,31 +345,19 @@ test('монтажная: нехватка без concern → 422 { kind: insuff
     const r = await post('/api/draft', { story: SAFE });
     assert.equal(r.status, 422);
     assert.deepEqual(r.body, { kind: 'insufficient', error: REPLY });
-    assert.equal(counters.check, 1, 'отдельная проверка до реплики');
+    assert.equal(counters.check, 0, 'модельной проверки перед репликой нет (решение 13.11 15:00)');
   });
 });
 
-test('монтажная: проверка true → safety; неполная → 503, затем technical; нет ключа → 503 — не нехватка', async () => {
-  await withApp({ check: () => true }, async ({ post }) => {
-    const r = await post('/api/draft', { story: byId.OI10 });
-    assert.equal(r.status, 422); assert.equal(r.body.kind, 'safety');
-  });
-  const fail = () => { throw Object.assign(new Error('сбой'), { code: 'incomplete_response' }); };
-  await withApp({ check: fail }, async ({ post }) => {
-    const a = await post('/api/draft', { story: byId.OI10 });
-    assert.equal(a.status, 503); assert.equal(a.body.unavailable, true);
-    const b = await post('/api/draft', { story: byId.OI10 });
-    assert.equal(b.body.kind, 'technical');
-    const c = await post('/api/draft', { story: byId.OI10 });
-    assert.equal(c.body.kind, 'technical');
-  });
-  await withApp({ hasKey: () => false }, async ({ post }) => {
-    const r = await post('/api/draft', { story: byId.OI10 });
-    assert.equal(r.status, 503); assert.notEqual(r.body.kind, 'insufficient');
-  });
+// Удалено (решение владельца кода 13.11 15:00): модельной проверки перед репликой нехватки больше нет — модельная
+test('монтажная: местный urgent → safety без модельной проверки; нет ключа — нехватка без «проверка не завершилась»', async () => {
   await withApp({}, async ({ post, counters }) => {
     const r = await post('/api/draft', { story: URGENT });
     assert.equal(r.body.kind, 'safety'); assert.equal(counters.check, 0);
+  });
+  await withApp({ hasKey: () => false }, async ({ post }) => {
+    const r = await post('/api/draft', { story: byId.OI10 });
+    assert.equal(r.status, 422); assert.equal(r.body.kind, 'insufficient');
   });
 });
 
@@ -445,41 +386,9 @@ test('монтажная: ручная правка организатора н�
   });
 });
 
-// ── Сверка основной сессии (f2da5268): поздняя остановка того же рассказа ────
-// Тот же рассказ отправлен дважды; отдельная проверка первой отправки вернула true; черновик второй пришёл позже.
-// Раньше оба ответа молча выходили — человек не получал ни карточки помощи, ни ответа.
-async function twiceSameStory(order) {
-  let checkTrue, draft2;
-  let drafts = 0;
-  const draft = (story, o) => (++drafts === 1 ? manual(story, o) : new Promise((r) => { draft2 = () => r(manual(story, o)); }));
-  const b = botSetup({ draft, check: (t, n) => (n === 1 ? new Promise((r) => { checkTrue = () => r(true); }) : false) });
-  const tick = () => new Promise((r) => setImmediate(r));
-  const p1 = b.say(byId.OI10);
-  while (!checkTrue) await tick();
-  const p2 = b.say(byId.OI10);
-  while (!draft2) await tick();
-  if (order === 'check-first') { checkTrue(); await p1; draft2(); await p2; }
-  else { draft2(); await tick(); checkTrue(); await p1; await p2; }
-  await tick();
-  return b;
-}
-
-for (const order of ['check-first', 'draft-first']) {
-  test(`бот: тот же рассказ дважды, проверка первого вернула true (${order}) → одна карточка помощи, без реплики нехватки`, async () => {
-    const b = await twiceSameStory(order);
-    const urgent = b.texts().filter((t) => /Сейчас важнее не титры/.test(t));
-    assert.equal(urgent.length, 1, `карточек помощи: ${urgent.length}; сообщения: ${JSON.stringify(b.texts())}`);
-    // Оба порядка (сверка 5cffcd11): остановленный текст НИКОГДА не получает реплику нехватки. Во втором порядке
-    // вторая проверка сказала «безопасно» раньше, но gate ждёт решения первой проверки того же рассказа.
-    assert.ok(!b.texts().some((t) => t.startsWith(REPLY)), 'реплики нехватки нет');
-    assert.match(b.texts().at(-1), /Сейчас важнее не титры/, 'последним — карточка помощи');
-    assert.equal(b.bot.sessions.get(chat.id).verdict, 'blocked');
-    assert.equal(b.counters.render, 0);
-    // Повтор — сразу остановка.
-    await b.say(byId.OI10);
-    assert.match(b.texts().at(-1), /Сейчас важнее не титры/);
-  });
-}
+// Удалено (решение владельца кода 13.11 15:00): модельной проверки перед репликой нехватки больше нет — модельная
+// проверка одна, перед рендером. Технической паузы и объединения проверок одного рассказа (ожидание соседей) тоже нет.
+// Тесты «тот же рассказ дважды, проверка первого вернула true» (оба порядка).
 
 test('нехватка: журнал ошибок и консоль не содержат текста рассказа (бот и монтажная)', async () => {
   const out = [];
@@ -517,155 +426,11 @@ test('заметка организатору при переходе на за�
   }
 });
 
-// Ветка «остановка на входе»: проверка прежней сессии (до /delete) вернула true уже после того, как тот же
-// рассказ отправлен снова. Прежняя сессия молчит (она удалена), новая останавливается при своём ответе.
-for (const kind of ['insufficient', 'episode']) {
-  test(`бот: /delete, тот же рассказ снова, проверка прежней сессии true → новая сессия получает карточку помощи (${kind})`, async () => {
-    let checkTrue, draft2;
-    let drafts = 0;
-    const story = kind === 'insufficient' ? byId.OI10 : MIX;
-    const draft = (st, o) => (++drafts === 1 ? manual(byId.OI10, o) : new Promise((r) => { draft2 = () => r(manual(st, o)); }));
-    const b = botSetup({ draft, check: (t, n) => (n === 1 ? new Promise((r) => { checkTrue = () => r(true); }) : false) });
-    const tick = () => new Promise((r) => setImmediate(r));
-    const p1 = b.say(story);
-    while (!checkTrue) await tick();
-    await b.say('/delete');
-    const p2 = b.say(story);
-    while (!draft2) await tick();
-    checkTrue(); await p1; await tick();
-    draft2(); await p2; await tick();
-    const urgent = b.texts().filter((t) => /Сейчас важнее не титры/.test(t));
-    assert.equal(urgent.length, 1, JSON.stringify(b.texts()));
-    assert.match(b.texts().at(-1), /Сейчас важнее не титры/);
-    assert.ok(!b.texts().some((t) => t.startsWith(REPLY)));
-    assert.equal(b.bot.sessions.get(chat.id).episode, null, 'черновика нет');
-  });
-}
+// Удалено (решение владельца кода 13.11 15:00): модельной проверки перед репликой нехватки больше нет — модельная
+// проверка одна, перед рендером. Технической паузы и объединения проверок одного рассказа (ожидание соседей) тоже нет.
+// Тесты «/delete, тот же рассказ снова, проверка прежней сессии true», «две вкладки одновременно», «вкладка A ещё пишет
+// черновик», «первый черновик ещё пишется», «сосед завис дольше предела».
 
-test('монтажная: две вкладки одновременно, тот же рассказ; первая проверка «опасно», вторая «безопасно» раньше → обе safety, реплики нехватки нет', async () => {
-  let release;
-  await withApp({ check: (t, n) => (n === 1 ? new Promise((r) => { release = () => r(true); }) : false) }, async ({ post, counters }) => {
-    const first = post('/api/draft', { story: byId.OI10 });
-    while (!release) await new Promise((r) => setTimeout(r, 5));
-    const second = post('/api/draft', { story: byId.OI10 });
-    while (counters.check < 2) await new Promise((r) => setTimeout(r, 5));
-    await new Promise((r) => setTimeout(r, 20)); // вторая проверка уже ответила «безопасно» и ждёт первую
-    release();
-    const [a, b] = await Promise.all([first, second]);
-    for (const r of [a, b]) {
-      assert.equal(r.body.kind, 'safety', JSON.stringify(r.body));
-      assert.notEqual(r.body.error, REPLY);
-    }
-    const again = await post('/api/draft', { story: byId.OI10 });
-    assert.equal(again.body.kind, 'safety');
-  });
-});
+// Удалено: соль ключа объединения проверок (решение 13.11 15:00). Тексты рассказов в журнале — tests/safety-consolidated.test.js.
 
-test('монтажная: вкладка A ещё пишет черновик (генератор вернёт остановку), вкладка B получила нехватку → B без реплики', async () => {
-  let finishA; let n = 0;
-  const draft = (story, o) => (++n === 1
-    ? new Promise((r) => { finishA = () => r({ risk: { level: 'urgent', byModel: true, matches: [] }, episode: null, provider: 'claude' }); })
-    : manual(story, o));
-  await withApp({ draft }, async ({ post, counters }) => {
-    const a = post('/api/draft', { story: byId.OI10 });
-    while (!finishA) await new Promise((r) => setTimeout(r, 5));
-    const b = post('/api/draft', { story: byId.OI10 });
-    while (counters.check < 1) await new Promise((r) => setTimeout(r, 5)); // B дошла до проверки
-    await new Promise((r) => setTimeout(r, 20)); // и получила «безопасно», ждёт черновик A
-    finishA();
-    const [ra, rb] = await Promise.all([a, b]);
-    assert.equal(ra.body.kind, 'safety');
-    assert.equal(rb.body.kind, 'safety', JSON.stringify(rb.body));
-  });
-});
-
-test('бот: тот же рассказ дважды, первый черновик ещё пишется и вернёт остановку → вторая отправка без реплики, карточка одна', async () => {
-  let finish; let n = 0;
-  const draft = (story, o) => (++n === 1
-    ? new Promise((r) => { finish = () => r({ risk: { level: 'urgent', byModel: true, matches: [] }, episode: null, provider: 'claude' }); })
-    : manual(story, o));
-  const b = botSetup({ draft });
-  const tick = () => new Promise((r) => setImmediate(r));
-  const p1 = b.say(byId.OI10);
-  while (!finish) await tick();
-  const p2 = b.say(byId.OI10);
-  while (b.counters.check < 1) await tick(); // вторая отправка дошла до отдельной проверки и ждёт черновик первой
-  for (let i = 0; i < 5; i++) await tick();
-  finish(); await p1; await p2; await tick();
-  assert.ok(!b.texts().some((t) => t.startsWith(REPLY)), JSON.stringify(b.texts()));
-  assert.equal(b.texts().filter((t) => /Сейчас важнее не титры/.test(t)).length, 1, JSON.stringify(b.texts()));
-});
-
-test('бот и монтажная: сосед завис дольше предела → «проверка недоступна» (check_pending), а не реплика', async () => {
-  const { makeGate } = await import('../server/gate.js');
-  let n = 0;
-  const check = () => (++n === 1 ? new Promise(() => {}) : false); // первая проверка никогда не отвечает
-  // Бот: свой gate с коротким пределом.
-  const sent = [];
-  const tg = { send: async (c, text) => { sent.push(text); }, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''), sendVideo: async () => {} };
-  const metrics = { hash: () => 'f', log: async () => {}, forget: async () => {} };
-  const gate = makeGate({ check, neighborWaitMs: 30 });
-  const bot = createBot({ tg, metrics, draft: manual, gate, safetyCheck: check });
-  const other = { chat, text: byId.OI10 };
-  gate.verify(`chat:${chat.id}`, byId.OI10, null, byId.OI10); // зависшая проверка того же рассказа
-  await bot.handleUpdate({ message: other });
-  assert.equal(sent.at(-1), TEXT.checkUnavailable);
-  assert.ok(!sent.some((t) => t.startsWith(REPLY)));
-});
-
-// Решение владельца 11.11 13:05 п. 2: ключ объединения проверок — HMAC с секретной солью процесса, только в памяти;
-// после двух ПАРАЛЛЕЛЬНЫХ отправок одного рассказа в журнале нет ни текста, ни ключа (даже усечённого).
-test('ключ объединения проверок: соль процесса; параллельные отправки — в журнале нет ни текста, ни ключа', async () => {
-  const story = byId.OI10;
-  const plain = crypto.createHash('sha256').update(`story\0${normStory(story)}`).digest('hex');
-  assert.notEqual(storyDigest(story), plain, 'ключ не совпадает с несолёным SHA-256 (словарный подбор невозможен)');
-  assert.equal(storyDigest(story), storyDigest(story), 'в пределах процесса ключ устойчив');
-  const keys = [storyDigest(story), plain];
-  const out = [];
-  const saved = { error: console.error, log: console.log, warn: console.warn, info: console.info };
-  for (const k of Object.keys(saved)) console[k] = (...a) => out.push(a.map(String).join(' '));
-  const sent = [];
-  try {
-    const fail = () => { throw Object.assign(new Error('сбой'), { code: 'incomplete_response' }); };
-    for (const check of [() => false, () => true, fail]) {
-      const slow = (t, n) => new Promise((r) => setTimeout(r, 5)).then(() => check(t, n));
-      const b = botSetup({ check: slow });
-      await Promise.all([b.say(story), b.say(story)]);
-      // В одном чате вторая отправка вытесняет первую (поколение черновика), поэтому до проверки доходит хотя бы одна;
-      // объединение проверок соседних сессий бота — в тестах «/delete, тот же рассказ снова» выше.
-      assert.ok(b.counters.check >= 1, 'бот: отправка дошла до отдельной проверки');
-      sent.push(...b.texts(), ...b.events.map((e) => JSON.stringify(e)));
-      await withApp({ check: slow }, async ({ post, counters }) => {
-        const rs = await Promise.all([post('/api/draft', { story }), post('/api/draft', { story })]);
-        assert.ok(counters.check >= 2, 'монтажная: обе вкладки дошли до отдельной проверки');
-        sent.push(...rs.map((r) => JSON.stringify(r.body)));
-      });
-    }
-  } finally { Object.assign(console, saved); }
-  const all = out.join('\n').toLowerCase();
-  for (const frag of ['злюсь', 'ударить', 'коллег', 'отчёт', 'соседа']) assert.ok(!all.includes(frag), `в журнале нет «${frag}»`);
-  const visible = `${all}\n${sent.join('\n')}`.toLowerCase();
-  for (const key of keys) for (let i = 0; i + 8 <= key.length; i += 4) {
-    assert.ok(!visible.includes(key.slice(i, i + 8)), 'ни ключ, ни его часть не попадают в журнал, метрики и ответы');
-  }
-});
-
-// Решение владельца 11.11 14:02 п. 1 (б): отправка, открытая после снимка соседей, — следующая отправка, а не гонка;
-// но остановка «липкая»: после неё никакой исход того же рассказа (нехватка, черновик, ролик) больше не показывается.
-test('монтажная: A → нехватка показана; B того же рассказа → остановка; дальше только остановка, следа A нет', async () => {
-  const story = byId.OI10;
-  await withApp({ check: (t, n) => n >= 2 }, async ({ post, counters }) => {
-    const a = await post('/api/draft', { story });
-    assert.equal(a.status, 422); assert.equal(a.body.kind, 'insufficient', 'A: показана реплика нехватки');
-    const b = await post('/api/draft', { story });
-    assert.equal(b.status, 422); assert.equal(b.body.kind, 'safety', 'B: остановка');
-    for (let i = 0; i < 3; i++) {
-      const c = await post('/api/draft', { story });
-      assert.equal(c.body.kind, 'safety', 'после остановки — снова только остановка');
-      assert.ok(!JSON.stringify(c.body).includes(REPLY), 'реплики нехватки после остановки нет');
-    }
-    // Ролик после остановки рассказа не собирается — инвариант рендера, покрыт тестами S02/V02 монтажной
-    // (tests/separate-check-studio.test.js, tests/qa-races.test.js). Здесь — что ни один черновик и ни одна реплика нехватки не показаны.
-    assert.equal(counters.render, 0);
-  });
-});
+// Удалено: «A → нехватка, B того же рассказа → остановка по модельной проверке перед репликой» — такой проверки нет.

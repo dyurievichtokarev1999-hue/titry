@@ -194,16 +194,12 @@ async function requestDraft() {
 }
 $('draftBtn').addEventListener('click', requestDraft);
 
-// Три состояния остановки (контракт владельца 10.11 12:05 / 13:05): safety — карточка помощи;
-// первый сбой проверки (503) и техническая приостановка (kind=technical) — только технический текст, без помощи.
+// Исходы без ролика: safety — карточка помощи; «неизвестно» при локальном concern (условие 3 решения 13.11 15:00) —
+// короткий текст и контакты; сбой черновика или хранилища (503) — только технический текст, без помощи.
 function stopText(e, safetyNote) {
   const d = e.data || {};
   if (d.kind === 'safety') { if (d.help) showHelp(d.help); return safetyNote; }
-  if (d.kind === 'technical') {
-    const when = d.retryNotBeforeAt ? ` Не раньше ${new Date(d.retryNotBeforeAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}.` : '';
-    $('recheckBtn').hidden = false;
-    return `${d.error}. ${d.message} ${d.next}${when}`;
-  }
+  if (d.unknown) { if (d.help) showHelp(d.help); return d.error; }
   if (d.unavailable) return `${d.error}. ${d.message} ${d.next}`;
   // Нехватка материала после исключения опасных частей: реплика дословно; при concern сразу за ней — блок помощи.
   // Окно помощи модальное и закрывает экран, поэтому реплика стоит и в окне — сразу над тем же блоком помощи.
@@ -212,7 +208,7 @@ function stopText(e, safetyNote) {
 }
 
 // Нехватка материала (решение владельца по PR 11): прежний ролик не играет, блок результата, ссылка скачивания
-// и кнопки повтора (в том числе перепроверки после технической паузы) скрыты, черновик очищен, рендер выключен
+// и кнопки повтора скрыты, черновик очищен, рендер выключен
 // до нового проверенного черновика. Файлы на сервере не трогаются: их сохраняет и удаляет действующий маршрут.
 function enterInsufficient() {
   state.insufficient = true;
@@ -225,7 +221,6 @@ function enterInsufficient() {
   video.removeAttribute('src'); video.load();
   $('download').removeAttribute('href'); $('download').removeAttribute('download');
   $('result').hidden = true;
-  $('recheckBtn').hidden = true;
   $('renderNote').textContent = '';
   state.t = 0;
   state.episode = blankEpisode({ date: $('date').value || undefined, period: $('period').value || 'day' });
@@ -265,23 +260,6 @@ $('renderBtn').addEventListener('click', async () => {
     if (screen !== state.screen) return;
     $('renderNote').textContent = stopText(e, 'Ролик не собирается: сработал фильтр безопасности.');
   } finally { showChecks(); }
-});
-
-// Явное действие организатора после технической приостановки: полная проверка заново, не раньше срока.
-$('recheckBtn').addEventListener('click', async () => {
-  if (state.insufficient) return;
-  const screen = state.screen;
-  $('recheckBtn').disabled = true;
-  try {
-    await api('/api/recheck', { episode: state.episode, story: $('story').value.trim() || undefined });
-    if (screen !== state.screen) return;
-    $('recheckBtn').hidden = true;
-    $('renderNote').textContent = 'Проверка пройдена заново. Можно собрать ролик.';
-  } catch (e) {
-    if (screen !== state.screen) return;
-    $('renderNote').textContent = stopText(e, 'Ролик не собирается: сработал фильтр безопасности.');
-    if (e.data && e.data.kind === 'safety') $('recheckBtn').hidden = true;
-  } finally { $('recheckBtn').disabled = false; }
 });
 
 $('sentBtn').addEventListener('click', async () => {

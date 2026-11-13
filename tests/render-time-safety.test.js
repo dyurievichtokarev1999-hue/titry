@@ -1,21 +1,22 @@
-// Сообщение во время подготовки ролика (КОД-РЕВЬЮ QA PR 15 12.11; решение Claude 12.11 11:05 п. 1).
+// Сообщение во время подготовки ролика (КОД-РЕВЬЮ QA PR 15 12.11; решение владельца кода 13.11 15:00, условия 2 и 3).
 // Настоящий createBot; подставные: черновик (вымышленный examples/day-quiet.json), отдельная проверка, рендер, Telegram.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import { createBot, TEXT, telegram } from '../server/bot.js';
 import { makeGate } from '../server/gate.js';
-import { helpMessage, helpContacts, assessRisk } from '../server/safety.js';
+import { helpMessage, tryLaterMessage, NOT_HEARD_TEXT, assessRisk } from '../server/safety.js';
 
 const ex = JSON.parse(await fs.readFile(new URL('../examples/day-quiet.json', import.meta.url), 'utf8'));
 const chat = { id: 77901, type: 'private' };
-const URGENT_CARD = /Сейчас важнее не титры/;
+const URGENT_CARD = /Титры для этого рассказа не будут собраны/;
 // Как makeDraft: при urgent черновика нет (остановка), иначе — вымышленный эпизод.
 const good = async (st) => (assessRisk(st).level === 'urgent' ? { risk: assessRisk(st), episode: null, provider: null }
   : { episode: structuredClone(ex.episode), risk: { level: 'none' }, provider: 'claude', dropped: [] });
 const deferred = () => { let resolve; const promise = new Promise((r) => { resolve = r; }); return { promise, resolve }; };
 const tick = () => new Promise((r) => setImmediate(r));
-const unknownMsg = (why) => `${TEXT.unknownWhy[why]}\n${TEXT.unknownTail}\n\n${helpContacts()}`;
+const TRY = tryLaterMessage(); // «не получилось, попробуй позже» и контакты (условие 3)
+const failCheck = () => { throw Object.assign(new Error('сбой'), { code: 'incomplete_response' }); };
 
 // check(text): для текста ролика (содержит рассказ) — prior(), для второго сообщения — second(text).
 function setup({ prior = () => false, second = () => false, render, transcribe, holdWaitMs, chatId = chat.id, gateWrap } = {}) {
@@ -28,9 +29,9 @@ function setup({ prior = () => false, second = () => false, render, transcribe, 
   };
   const metrics = { hash: () => 'fictional', log: async (id, ev, extra = {}) => { events.push({ ev, ...extra }); }, forget: async () => {} };
   const bot = createBot({
-    tg, metrics, draft: good, ...(transcribe ? { transcribe } : {}), ...(holdWaitMs ? { holdWaitMs } : {}),
+    tg, metrics, draft: good, checkRetryMs: 0, ...(transcribe ? { transcribe } : {}), ...(holdWaitMs ? { holdWaitMs } : {}),
     safetyCheck: async (t) => (t.includes(ex.story.slice(0, 20)) ? prior(t) : second(t)),
-    ...(gateWrap ? { gate: gateWrap(makeGate({ check: async (t) => (t.includes(ex.story.slice(0, 20)) ? prior(t) : second(t)) })) } : {}),
+    ...(gateWrap ? { gate: gateWrap(makeGate({ check: async (t) => (t.includes(ex.story.slice(0, 20)) ? prior(t) : second(t)), retryDelayMs: 0 })) } : {}),
     render: async (e, o) => { counters.render++; if (render) await render(); return { seconds: 1, duration: 24, outPath: o.outPath }; },
   });
   const c = { ...chat, id: chatId };
@@ -91,15 +92,26 @@ test('рендер завершён, доставка ждёт проверку 
   assert.match(b.sent.at(-1), URGENT_CARD);
 });
 
-test('проверка второго сообщения не завершена → текст неизвестного исхода и контакты; ролик НЕ отправляется (решение 12.11 15:10)', async () => {
-  const d = deferred();
-  const b = setup({ prior: () => d.promise, second: () => { throw Object.assign(new Error('сбой'), { code: 'incomplete_response' }); } });
+test('проверка второго сообщения не завершена и после повтора: локально чисто → ролик уходит; concern → «не получилось» и контакты, ролика нет', async () => {
+  let d = deferred();
+  let checks = 0;
+  const b = setup({ prior: () => d.promise, second: () => { checks++; failCheck(); } });
   await b.say(ex.story);
-  const p = b.play(); await tick();
+  let p = b.play(); await tick();
   await b.say('Пила чай');
-  assert.equal(b.sent.at(-1), unknownMsg('check'));
+  assert.equal(checks, 2, 'один повтор');
+  assert.equal(b.sent.at(-1), TEXT.rendering);
   d.resolve(false); await p;
-  assert.equal(b.counters.video, 0);
+  assert.equal(b.counters.video, 1, 'локально чисто — ролик');
+  assert.ok(!b.sent.some((t) => /не завершил|не завершилась/.test(t)));
+  d = deferred();
+  const c = setup({ prior: () => d.promise, second: failCheck, chatId: 77903 });
+  await c.say(ex.story);
+  p = c.play(); await tick();
+  await c.say('Убью брата'); // локально concern
+  assert.equal(c.sent.at(-1), TRY);
+  d.resolve(false); await p;
+  assert.equal(c.counters.video, 0, 'concern + «неизвестно» — ролика нет');
 });
 
 test('urgent уже после отправки ролика → экран остановки всё равно показан', async () => {
@@ -163,16 +175,18 @@ test('«/start» во время подготовки не снимает про
   assert.match(b.sent.at(-1), URGENT_CARD);
 });
 
-test('проверка сообщения зависла дольше предела → ролик не отправляется, текст неизвестного исхода и контакты', async () => {
-  const d = deferred();
-  const b = setup({ prior: () => d.promise, second: () => new Promise(() => {}), holdWaitMs: 30 });
-  await b.say(ex.story);
-  const p = b.play(); await tick();
-  b.say('Пила чай'); await tick();
-  d.resolve(false);
-  await p;
-  assert.equal(b.counters.video, 0);
-  assert.equal(b.sent.at(-1), unknownMsg('timeout'));
+test('проверка сообщения зависла дольше предела: локально чисто → ролик уходит; concern → ролика нет, «не получилось»', async () => {
+  for (const [text, video] of [['Пила чай', 1], ['Убью брата', 0]]) {
+    const d = deferred();
+    const b = setup({ prior: () => d.promise, second: () => new Promise(() => {}), holdWaitMs: 30 });
+    await b.say(ex.story);
+    const p = b.play(); await tick();
+    b.say(text); await tick();
+    d.resolve(false);
+    await p;
+    assert.equal(b.counters.video, video, text);
+    if (!video) assert.equal(b.sent.at(-1), TRY, text);
+  }
 });
 
 test('второе сообщение приходит, пока доставка уже ждёт первое: ждём оба; второе опасно → ролика нет', async () => {
@@ -262,13 +276,13 @@ test('после предела ожидания поздний ответ «б�
   const p = b.play(); await tick();
   const q = b.say('Пила чай'); await tick();
   d.resolve(false); await p;
+  assert.equal(b.counters.video, 1, 'локально чисто — ролик ушёл по истечении предела');
   const n = b.sent.length;
   m.resolve(false); await q;
-  assert.equal(b.sent.length, n, 'после истечения предела обещания ролика нет');
-  assert.equal(b.counters.video, 0);
+  assert.equal(b.sent.length, n, 'доставка закончена — обещания ролика нет');
 });
 
-test('голос во время подготовки: расшифровки нет (сбой распознавания) → «неизвестно», ролик не отправляется', async () => {
+test('голос во время подготовки: расшифровки нет (сбой распознавания) → «не расслышал», ролик не отменяется', async () => {
   const r = deferred();
   const b = setup({ transcribe: async () => { throw new Error('stt'); }, render: () => r.promise });
   await b.say(ex.story);
@@ -276,11 +290,11 @@ test('голос во время подготовки: расшифровки н
   await waitFor(() => b.counters.render === 1);
   await b.voice();
   r.resolve(); await p;
-  assert.equal(b.counters.video, 0);
-  assert.equal(b.sent.at(-1), unknownMsg('voiceEmpty'));
+  assert.equal(b.counters.video, 1);
+  assert.ok(b.sent.includes(NOT_HEARD_TEXT));
 });
 
-test('голос во время подготовки длиннее предела (не распознаётся) → ролик не отправляется', async () => {
+test('голос во время подготовки длиннее предела (не распознаётся) → «не расслышал», ролик не отменяется', async () => {
   const r = deferred();
   const b = setup({ transcribe: async () => 'Пила чай', render: () => r.promise });
   await b.say(ex.story);
@@ -288,34 +302,35 @@ test('голос во время подготовки длиннее преде�
   await waitFor(() => b.counters.render === 1);
   await b.voice(100000);
   r.resolve(); await p;
-  assert.equal(b.counters.video, 0);
+  assert.equal(b.counters.video, 1);
+  assert.ok(b.sent.includes(NOT_HEARD_TEXT));
 });
 
-test('исключение в самой проверке (gate.probe) → «неизвестно», ролик не отправляется', async () => {
+test('исключение в самой проверке сообщения → «неизвестно»: локально чисто — ролик уходит', async () => {
   const r = deferred();
-  const b = setup({ render: () => r.promise, gateWrap: (g) => ({ ...g, probe: async () => { throw new Error('хранилище'); } }) });
+  const b = setup({ render: () => r.promise, gateWrap: (g) => ({ ...g, verify: async (scope, story, ep, text) => (ep ? g.verify(scope, story, ep, text) : Promise.reject(new Error('хранилище'))) }) });
   await b.say(ex.story);
   const p = b.play();
   await waitFor(() => b.counters.render === 1);
   await b.say('Пила чай');
   r.resolve(); await p;
-  assert.equal(b.counters.video, 0);
+  assert.equal(b.counters.video, 1);
 });
 
-test('«неизвестно» прежней доставки не запрещает следующую; подпись к фото проверяется', async () => {
+test('отмена прежней доставки (concern + «неизвестно») не запрещает следующую; подпись к фото проверяется', async () => {
   const d = deferred();
   let fail = true;
-  const b = setup({ prior: () => d.promise, second: () => { if (fail) throw Object.assign(new Error('x'), { code: 'incomplete_response' }); return false; } });
+  const b = setup({ prior: () => d.promise, second: () => { if (fail) failCheck(); return false; } });
   await b.say(ex.story);
   let p = b.play(); await tick();
-  await b.say('Пила чай');
+  await b.say('Убью брата');
   d.resolve(false); await p;
   assert.equal(b.counters.video, 0);
   fail = false;
   await b.say(ex.story);
   p = b.bot.handleUpdate({ callback_query: { id: 'q', data: 'play:2', message: { chat } } });
   await p;
-  assert.equal(b.counters.video, 1, 'новая доставка без «неизвестно» — ролик уходит');
+  assert.equal(b.counters.video, 1, 'новая доставка — ролик уходит');
   const r = deferred();
   const c = setup({ render: () => r.promise, chatId: 77902 });
   await c.say(ex.story);
@@ -327,7 +342,7 @@ test('«неизвестно» прежней доставки не запрещ
   assert.match(c.sent.at(-1), URGENT_CARD);
 });
 
-test('кружок или аудиофайл во время подготовки — содержание неизвестно, ролик не отправляется', async () => {
+test('кружок или аудиофайл во время подготовки — «не расслышал», ролик не отменяется', async () => {
   for (const extra of [{ video_note: { file_id: 'v' } }, { audio: { file_id: 'a' } }]) {
     const r = deferred();
     const b = setup({ render: () => r.promise });
@@ -336,11 +351,11 @@ test('кружок или аудиофайл во время подготовк�
     await waitFor(() => b.counters.render === 1);
     await b.bot.handleUpdate({ message: { chat, ...extra } });
     r.resolve(); await p;
-    assert.equal(b.counters.video, 0, JSON.stringify(Object.keys(extra)));
+    assert.equal(b.counters.video, 1, JSON.stringify(Object.keys(extra)));
+    assert.ok(b.sent.includes(NOT_HEARD_TEXT));
   }
 });
 
-// Решение Claude 12.11 20:00, блокер 1: экран остановки не ждёт ни эха, ни typing, ни метрик.
 test('эхо расшифровки или typing никогда не завершаются → экран остановки отправлен, эха при urgent нет, ролика нет', async () => {
   for (const mode of ['echo', 'typing']) {
     const r = deferred();
@@ -369,19 +384,19 @@ test('отказ отправки экрана остановки не лома�
   assert.ok(b.events.some((e) => e.ev === 'safety' && e.at === 'rendering'), 'после отказа отправки обработчик дошёл до метрики');
 });
 
-// Блокер 2: для каждого входа с неизвестным исходом — ролика нет, причина, «проверка не завершилась», контакты.
-test('неизвестный исход любого входа во время подготовки — ролик 0, объяснение и контакты', async () => {
+// Условие 2 (решение 13.11 15:00): нераспознаваемый вход в окне до отправки ролик не отменяет.
+test('нераспознаваемый вход во время подготовки — ролик уходит, без «проверка не завершилась»', async () => {
   const cases = [
-    ['длинное голосовое', (b) => b.voice(100000), 'voiceLong', { transcribe: async () => 'Пила чай' }],
-    ['распознавание выключено', (b) => b.voice(), 'voiceOff', {}],
-    ['пустая расшифровка', (b) => b.voice(), 'voiceEmpty', { transcribe: async () => '' }],
-    ['кружок', (b) => b.bot.handleUpdate({ message: { chat, video_note: { file_id: 'v' } } }), 'unsupported', {}],
-    ['аудиофайл', (b) => b.bot.handleUpdate({ message: { chat, audio: { file_id: 'a' } } }), 'unsupported', {}],
-    ['видео без подписи', (b) => b.bot.handleUpdate({ message: { chat, video: { file_id: 'w' } } }), 'unsupported', {}],
-    ['видео с безопасной подписью', (b) => b.bot.handleUpdate({ message: { chat, video: { file_id: 'w' }, caption: 'Пила чай' } }), 'unsupported', {}],
-    ['стикер', (b) => b.bot.handleUpdate({ message: { chat, sticker: { file_id: 's' } } }), 'unsupported', {}],
+    ['длинное голосовое', (b) => b.voice(100000), NOT_HEARD_TEXT, { transcribe: async () => 'Пила чай' }],
+    ['распознавание выключено', (b) => b.voice(), NOT_HEARD_TEXT, {}],
+    ['пустая расшифровка', (b) => b.voice(), NOT_HEARD_TEXT, { transcribe: async () => '' }],
+    ['кружок', (b) => b.bot.handleUpdate({ message: { chat, video_note: { file_id: 'v' } } }), NOT_HEARD_TEXT, {}],
+    ['аудиофайл', (b) => b.bot.handleUpdate({ message: { chat, audio: { file_id: 'a' } } }), NOT_HEARD_TEXT, {}],
+    ['видео без подписи', (b) => b.bot.handleUpdate({ message: { chat, video: { file_id: 'w' } } }), NOT_HEARD_TEXT, {}],
+    ['видео с безопасной подписью', (b) => b.bot.handleUpdate({ message: { chat, video: { file_id: 'w' }, caption: 'Пила чай' } }), TEXT.rendering, {}],
+    ['стикер', (b) => b.bot.handleUpdate({ message: { chat, sticker: { file_id: 's' } } }), TEXT.rendering, {}],
   ];
-  for (const [name, act, why, opts] of cases) {
+  for (const [name, act, reply, opts] of cases) {
     const r = deferred();
     const b = setup({ render: () => r.promise, ...opts });
     await b.say(ex.story);
@@ -389,8 +404,9 @@ test('неизвестный исход любого входа во время 
     await waitFor(() => b.counters.render === 1);
     await act(b);
     r.resolve(); await p;
-    assert.equal(b.counters.video, 0, name);
-    assert.equal(b.sent.at(-1), unknownMsg(why), name);
+    assert.equal(b.counters.video, 1, name);
+    assert.ok(b.sent.includes(reply), name);
+    assert.ok(!b.sent.some((t) => /не завершил|не завершилась/.test(t)), name);
   }
 });
 
@@ -408,7 +424,7 @@ test('адаптер Telegram: у вызова API есть предел ожи�
 });
 
 test('после экрана остановки или «не отправлю» поздний «безопасно» по другому сообщению не шлёт «Собираю ролик»', async () => {
-  for (const second of ['Убить себя', 'unknown']) {
+  for (const second of ['Убить себя', 'Убью брата']) { // urgent; concern + «неизвестно» (ролика нет)
     const slow = deferred(); const r = deferred();
     const failOther = () => { throw Object.assign(new Error('x'), { code: 'incomplete_response' }); };
     const bb = setup({ render: () => r.promise, second: (t) => (t === 'Пила чай' ? slow.promise : failOther()) });
@@ -416,7 +432,7 @@ test('после экрана остановки или «не отправлю�
     const p = bb.play();
     await waitFor(() => bb.counters.render === 1);
     const qa = bb.say('Пила чай'); await tick();
-    await bb.say(second === 'unknown' ? 'Хожу кругами' : second);
+    await bb.say(second);
     const n = bb.sent.length;
     slow.resolve(false); await qa;
     assert.equal(bb.sent.length, n, `${second}: после остановки/«не отправлю» обещаний ролика нет`);
@@ -460,10 +476,10 @@ test('безопасный голос + незавершённое эхо, пр�
   b.voice(); for (let i = 0; i < 10; i++) await tick();
   r.resolve(); await p;
   assert.equal(b.counters.video, 1);
-  assert.ok(!b.sent.includes(unknownMsg('timeout')), 'нет ложного сообщения о таймауте');
+  assert.ok(!b.sent.includes(TRY), 'нет ложного сообщения о таймауте');
 });
 
-// П. 2: подпись отклонённого голосового — тем же путём, что подпись видео (локальный фильтр и вторая проверка).
+// Подпись отклонённого голосового — тем же путём, что подпись видео (локальный фильтр и модельная проверка).
 test('отклонённое голосовое: подпись без признаков, вторая проверка — опасно → экран остановки, ролика нет', async () => {
   const r = deferred();
   let checked = 0;
@@ -478,7 +494,7 @@ test('отклонённое голосовое: подпись без приз�
   assert.match(b.sent.at(-1), URGENT_CARD);
 });
 
-test('отклонённое голосовое с безопасной подписью → причина отказа распознавания и контакты, ролика нет', async () => {
+test('отклонённое голосовое с безопасной подписью → «не расслышал», подпись проверена, ролик уходит', async () => {
   const r = deferred();
   const b = setup({ transcribe: async () => 'Пила чай', render: () => r.promise });
   await b.say(ex.story);
@@ -486,6 +502,6 @@ test('отклонённое голосовое с безопасной подп
   await waitFor(() => b.counters.render === 1);
   await b.bot.handleUpdate({ message: { chat, voice: { file_id: 'f', duration: 100000 }, caption: 'Пила чай' } });
   r.resolve(); await p;
-  assert.equal(b.counters.video, 0);
-  assert.equal(b.sent.at(-1), unknownMsg('voiceLong'));
+  assert.equal(b.counters.video, 1);
+  assert.ok(b.sent.includes(NOT_HEARD_TEXT));
 });

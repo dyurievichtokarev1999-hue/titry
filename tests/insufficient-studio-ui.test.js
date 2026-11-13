@@ -44,7 +44,7 @@ class El {
 function studio(routes) {
   const els = {};
   const el = (id) => (els[id] ||= new El(id));
-  for (const id of ['result', 'recheckBtn', 'help']) el(id).hidden = true; // как в index.html
+  for (const id of ['result', 'help']) el(id).hidden = true; // как в index.html
   el('date').value = '2026-11-11'; el('period').value = 'day'; el('music').value = 'quiet';
   const calls = [];
   const fetch = async (p, opts = {}) => {
@@ -77,7 +77,6 @@ function assertCleared(u) {
   assert.equal(video.getAttribute('src'), null, 'у плеера нет файла A');
   assert.equal(u.el('download').getAttribute('href'), null, 'нет ссылки скачивания A');
   assert.equal(u.el('result').hidden, true, 'блок результата скрыт');
-  assert.equal(u.el('recheckBtn').hidden, true, 'кнопки повтора нет');
   assert.equal(u.el('renderBtn').disabled, true, 'рендер выключен');
   assert.equal(u.el('draftNote').textContent, REPLY, 'реплика дословно');
   assert.equal(u.el('renderNote').textContent, '');
@@ -101,28 +100,23 @@ test('монтажная: ролик A, затем нехватка B → нет
   await u.draft(B);
   assertCleared(u);
   assert.equal(u.el('help').hidden, true, 'без concern — только реплика');
-  await u.click('renderBtn'); await u.click('recheckBtn');
+  await u.click('renderBtn');
   assert.equal(render, 1, 'после нехватки рендер не вызывается');
-  assert.ok(!u.calls.includes('/api/recheck'));
   assert.ok(!u.calls.includes('/api/out/delete'), 'удаление файлов — только действующим маршрутом');
 });
 
-test('монтажная: открытая техническая пауза, затем нехватка с concern → кнопка перепроверки скрыта, блок помощи за репликой', async () => {
+// Техническая пауза и кнопка перепроверки убраны (решение владельца кода 13.11 15:00); остаётся порядок «реплика + помощь».
+test('монтажная: черновик, затем нехватка с concern → блок помощи за репликой', async () => {
   const u = studio(async (p) => {
     if (p === '/api/config') return { provider: 'claude', model: 'm' };
     if (p === '/api/draft') return u.calls.filter((x) => x === '/api/draft').length === 1 ? okDraft() : insufficient(HELP);
-    if (p === '/api/render') return { status: 422, body: { kind: 'technical', reason: 'check_incomplete_twice', error: 'Проверка приостановлена', message: 'm', next: 'n' } };
     return {};
   });
   await u.draft(ex.story);
-  await u.click('renderBtn');
-  assert.equal(u.el('recheckBtn').hidden, false, 'пауза открыта');
   await u.draft(B);
   assertCleared(u);
   assert.equal(u.el('help').hidden, false, 'блок помощи показан');
   assert.equal(u.el('helpText').textContent, `${REPLY}\n\n${HELP}`, 'сначала реплика, сразу за ней тот же блок помощи, без переходной фразы');
-  await u.click('recheckBtn');
-  assert.ok(!u.calls.includes('/api/recheck'));
 });
 
 test('монтажная: рендер A, завершившийся уже после нехватки B, ролик не показывает', async () => {
@@ -167,38 +161,7 @@ test('id элементов из studio.js есть в index.html (подста�
   assert.deepEqual(used.filter((id) => !ids.has(id)), []);
 });
 
-test('монтажная: нехватка, затем технический ответ для нового рассказа → кнопка перепроверки видна и работает', async () => {
-  let n = 0;
-  const u = studio(async (p) => {
-    if (p === '/api/config') return { provider: 'claude', model: 'm' };
-    if (p === '/api/draft') return ++n === 1 ? insufficient() : { status: 422, body: { kind: 'technical', reason: 'check_incomplete_twice', error: 'Проверка приостановлена', message: 'm', next: 'n' } };
-    if (p === '/api/recheck') return { rechecked: true };
-    return {};
-  });
-  await u.draft(B);
-  await u.draft('Вымышленный рассказ C: утром я пила чай. Вечером я пекла пирог.');
-  assert.equal(u.el('recheckBtn').hidden, false);
-  await u.click('recheckBtn');
-  assert.ok(u.calls.includes('/api/recheck'), 'кнопка не мёртвая');
-});
-
-test('монтажная: перепроверка, завершившаяся после нехватки, не меняет экран', async () => {
-  let finish; let n = 0;
-  const u = studio(async (p) => {
-    if (p === '/api/config') return { provider: 'claude', model: 'm' };
-    if (p === '/api/draft') return ++n === 1 ? okDraft() : insufficient();
-    if (p === '/api/render') return { status: 422, body: { kind: 'technical', reason: 'check_incomplete_twice', error: 'e', message: 'm', next: 'n' } };
-    if (p === '/api/recheck') return new Promise((r) => { finish = () => r({ rechecked: true }); });
-    return {};
-  });
-  await u.draft(ex.story);
-  await u.click('renderBtn');
-  const rechecking = u.el('recheckBtn').listeners.click();
-  await u.tick();
-  await u.draft(B);
-  finish(); await rechecking; await u.tick();
-  assertCleared(u);
-});
+// Тесты кнопки перепроверки после технической паузы удалены: паузы и кнопки больше нет.
 
 test('монтажная: открытая помощь прежнего черновика закрывается при нехватке без concern; журнал без прежнего provider', async () => {
   let n = 0; let logged;

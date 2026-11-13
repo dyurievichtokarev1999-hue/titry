@@ -45,7 +45,7 @@ test('бот: остановка показывает дословный тек�
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-stop-'));
   try {
     let renders = 0;
-    const bot = createBot({ safetyCheck: async () => false, tg, metrics: makeMetrics(path.join(dir, 'm.jsonl')), render: async () => { renders++; throw new Error('не должно вызываться'); }, draft: (s, o) => import('../server/draft.js').then((m) => m.makeDraft(s, { ...o, provider: 'manual' })) });
+    const bot = createBot({ safetyCheck: async () => false, tg, metrics: makeMetrics(path.join(dir, 'm.jsonl'), 'test-salt-fictional-0001'), render: async () => { renders++; throw new Error('не должно вызываться'); }, draft: (s, o) => import('../server/draft.js').then((m) => m.makeDraft(s, { ...o, provider: 'manual' })) });
     const chat = { id: 11, type: 'private' };
     await bot.handleUpdate({ message: { chat, text: URGENT } });
     assert.ok(tg.sent.includes(EXPECTED), 'дословный текст в боте');
@@ -82,6 +82,7 @@ test('монтажная: 422 safety несёт дословный текст; �
     const again = await post('/api/draft', { story: URGENT });
     assert.equal(again.body.kind, 'safety'); assert.equal(again.body.help, EXPECTED, 'повтор не снимает остановку');
     const ok = await post('/api/draft', { story: 'Утром кофе, днём работа, вечером прогулка у реки.' });
-    assert.equal(ok.status, 200); assert.equal(ok.body.help, null, 'обычный рассказ — без экрана помощи');
+    // Заготовка без модели строк не предлагает (PR 13, вариант 1): обычный рассказ — реплика нехватки, не остановка.
+    assert.notEqual(ok.body.kind, 'safety'); assert.ok(!ok.body.help, 'обычный рассказ — без экрана помощи');
   } finally { server.close(); await fs.rm(dataDir, { recursive: true, force: true }); }
 });
