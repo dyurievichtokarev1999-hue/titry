@@ -642,7 +642,9 @@ export function createBot({
     if (!current()) { if (alive(chatId, s) && s.stage === 'rendering') s.stage = s.verdict === 'blocked' ? 'help' : 'draft'; return; }
     // Сообщение во время проверки уже отменило эту доставку (ответ отправлен) — рендер не запускается.
     // Начало окна «после проверки — до отправки»: от него считается жёсткий общий предел ожидания доставки.
+    // Время в очереди и рендера в предел не входит (окно ждёт не дольше holdWaitMs сверх подготовки ролика).
     const windowStart = Date.now();
+    let renderMs = 0;
     if (cancelled()) { s.stage = 'draft'; return; }
     if (waiting >= 1 + MAX_RENDER_WAITING) { s.stage = 'draft'; return tg.send(chatId, TEXT.busy); }
     const ahead = waiting;
@@ -663,12 +665,14 @@ export function createBot({
         return render(ep, { story, outPath: out, preset: process.env.BOT_PRESET || 'standard', watermark: WATERMARK || false });
       });
       queue = job.catch(() => {});
+      const renderFrom = Date.now();
       const r = await job;
+      renderMs = Date.now() - renderFrom;
       // После рендера: если черновик остановлен или сессия удалена, видео не отправляется (файл удалится ниже).
       if (r === STALE || !current()) return;
       // Доставка ждёт модельной проверки сообщений, пришедших в окно «после проверки — до отправки» (условие 2).
       release();
-      const pending = await waitHolds(s, windowStart + holdWaitMs);
+      const pending = await waitHolds(s, windowStart + renderMs + holdWaitMs);
       if (pending.length) {
         // Предел ожидания истёк — как «неизвестно» (условие 3): у ждущих сообщений есть concern — ролика нет.
         logError('check', { code: 'timeout' });
@@ -711,9 +715,11 @@ export function createBot({
   // Бюджет ожидания привязан к зарегистрированной проверке (КРИТИКА PR 16, п. 3): один вызов + один повтор
   // (checkBudgetMs от регистрации). Жёсткий общий предел — holdWaitMs от начала окна: позднее сообщение продлевает
   // ожидание в пределах своего бюджета, но не дальше этого предела.
-  const holdDelivery = (s, p, level = 'none') => {
+  // budget: Infinity — удержание на время распознавания голоса: его ограничивает только жёсткий предел, бюджет проверки
+  // начинается с регистрации самой проверки (duringRender).
+  const holdDelivery = (s, p, level = 'none', budget = checkBudgetMs) => {
     s.holds = s.holds || new Map();
-    s.holds.set(p, { level, deadline: Date.now() + checkBudgetMs });
+    s.holds.set(p, { level, deadline: Date.now() + budget });
     p.finally(() => s.holds.delete(p)).catch(() => {});
   };
   // [] — все проверки применены; иначе бюджеты или жёсткий предел исчерпаны — уровни ещё не применённых сообщений
@@ -791,6 +797,8 @@ export function createBot({
       return sendSafe(chatId, TEXT.tryLater());
     }
     if (r.kind === 'concern') {
+      // Доставка уже отменена с «не получилось» (предел ожидания): второго ответа нет.
+      if ((s.veto || 0) >= (s.deliveries || 0) && (s.deliveries || 0) > 0) return logSafety({ level: 'concern', at: 'rendering' });
       await sendSafe(chatId, helpMessage('concern'));
       return logSafety({ level: 'concern', at: 'rendering' });
     }
@@ -844,7 +852,7 @@ export function createBot({
         if (voiceRefused) return caption ? Promise.all([sendSafe(chatId, TEXT.notHeard), duringRender(chatId, s, caption)]) : sendSafe(chatId, TEXT.notHeard);
         let releaseVoice;
         // Уровень удержания — уровень подписи: concern подписи держит «неизвестно» до конца проверки (не none).
-        holdDelivery(s, new Promise((r) => { releaseVoice = r; }), captionLevel);
+        holdDelivery(s, new Promise((r) => { releaseVoice = r; }), captionLevel, Infinity);
         try {
           let story = '';
           try {
