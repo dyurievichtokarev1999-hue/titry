@@ -130,9 +130,9 @@ test('окно до отправки: голос не распознался —
 
 test('условие 5: бытовые дополнения из закрытого списка — none и ролик; голые формы — urgent и остановка', async () => {
   assert.deepEqual([...HOUSEHOLD_IDIOMS], ['отравлюсь шавермой', 'без кофе мне не жить', 'убить готова за кофе']);
-  const idioms = ['Отравлюсь шавермой.', 'Без кофе мне не жить.', 'Убить готова за кофе.', 'ОТРАВЛЮСЬ   ШАВЕРМОЙ!', 'Без кофе мне не жить\nправда', 'Без кофе, мне не жить.', 'Отравлюсь шавермой, честно.'];
+  const idioms = ['Отравлюсь шавермой.', 'Без кофе мне не жить.', 'Убить готова за кофе.', 'ОТРАВЛЮСЬ   ШАВЕРМОЙ!', 'Без кофе, мне не жить.', 'Отравлюсь шавермой 😅'];
   for (const t of idioms) assert.equal(assessRisk(t).level, 'none', t);
-  for (const t of ['Отравлюсь.', 'Отравлюсь', 'Мне не жить.', 'Мне не жить', 'Отравлюсь шавермой. Отравлюсь.', 'Без кофе мне не жить. Мне не жить.', 'Отравлюсь таблетками.', 'Отравлюсь шавермой с крысиным ядом.'])
+  for (const t of ['Отравлюсь.', 'Отравлюсь', 'Мне не жить.', 'Мне не жить', 'Отравлюсь шавермой. Отравлюсь.', 'Без кофе мне не жить. Мне не жить.', 'Отравлюсь таблетками.', 'Отравлюсь шавермой с крысиным ядом.', 'Отравлюсь шавермой, честно.', 'Без кофе мне не жить\nправда'])
     assert.equal(assessRisk(t).level, 'urgent', t);
   for (const t of ['Отравлюсь шавермой', 'Без кофе мне не жить', 'Убить готова за кофе']) {
     const x = bot();
@@ -230,16 +230,16 @@ test('безопасный рассказ: от рассказа до ролик
 
 // ── 6. PR 14: угроза не в титрах; прошедшее время и местоимения по-прежнему останавливают ────────────
 
-test('PR 14: угроза другому — не в титрах (без остановки); насилие и угроза рассказчику в прошедшем времени и через местоимения — остановка', async () => {
+test('PR 14: слабая угроза другому («конец») — не в титрах (без остановки); насилие и угроза рассказчику в прошедшем времени и через местоимения — остановка', async () => {
   for (const t of ['Брату — не жить', 'Соседу — ноги переломаю', 'Ему — конец']) assert.equal(threatPhrase(t), true, t);
-  const story = `${SAFE} Брату не жить.`;
-  const ep = { title: 'Чай', genre: 'драма', lead: 'ты', rows: [{ role: 'Брату', value: 'не жить', source: 'Брату не жить' }], post: { text: '', source: '' } };
+  const story = `${SAFE} Брату конец.`;
+  const ep = { title: 'Чай', genre: 'драма', lead: 'ты', rows: [{ role: 'Брату', value: 'конец', source: 'Брату конец' }], post: { text: '', source: '' } };
   assert.deepEqual(threatErrors(story, ep).map((e) => e.path), ['rows.0']);
   const x = bot();
   await x.say(SAFE);
-  await x.say('+ Брату — не жить');
+  await x.say('+ Брату — конец');
   assert.equal(x.sent.at(-1), TEXT.editExcluded);
-  assert.doesNotMatch(JSON.stringify(x.s().episode), /не жить/);
+  assert.doesNotMatch(JSON.stringify(x.s().episode), /конец/);
   for (const t of ['Вчера меня избили.', 'Он угрожал мне ножом.', 'Она била меня.', 'Меня били в школе.', 'На меня напали у подъезда.', 'Мне угрожали ножом.', 'Он меня избил.']) {
     assert.equal(assessRisk(t).level, 'urgent', t);
     const y = bot();
@@ -332,4 +332,172 @@ test('предел ожидания истёк при concern, затем про
   assert.equal(video, 0);
   m.resolve(Promise.reject(Object.assign(new Error('x'), { code: 'timeout' }))); await q;
   assert.equal(sent.filter((t) => t === tryLaterMessage()).length, 1);
+});
+
+// ── КРИТИКА PR 16 (решение владельца кода 13.11 20:15) ──────────────────────────────────────────────────
+
+const voiceAt = (x, caption) => x.b.handleUpdate({ message: { chat, voice: { file_id: 'f', duration: 3 }, caption } });
+async function inWindow(opts, act) {
+  const r = deferred();
+  const x = bot({ ...opts, render: () => r.promise });
+  await x.say(SAFE);
+  const p = x.play();
+  await waitFor(() => x.c.render === 1);
+  await act(x);
+  r.resolve(); await p;
+  return x;
+}
+
+test('п. 1: явный сигнал в подписи к голосовому — экран остановки без ожидания распознавания (задержка, отказ, пусто)', async () => {
+  for (const [name, transcribe] of [
+    ['распознавание висит', () => new Promise(() => {})],
+    ['распознавание отказало', async () => { throw new Error('stt'); }],
+    ['пустая расшифровка', async () => ''],
+  ]) {
+    const x = await inWindow({ transcribe }, (y) => voiceAt(y, 'Не хочу больше жить.'));
+    assert.equal(x.c.video, 0, name);
+    assert.ok(STOP(x.sent.at(-1)), name);
+  }
+  // Вне окна — тоже без распознавания.
+  const y = bot({ transcribe: () => new Promise(() => {}) });
+  await voiceAt(y, 'Не хочу больше жить.');
+  assert.ok(STOP(y.sent.at(-1)));
+});
+
+test('п. 1: чистая подпись + пустая расшифровка → ролик, «не расслышал»; бытовая фраза из списка в подписи → ролик, 0 остановок', async () => {
+  const x = await inWindow({ transcribe: async () => '' }, (y) => voiceAt(y, 'Вечером пила чай.'));
+  assert.equal(x.c.video, 1);
+  assert.ok(x.sent.includes(NOT_HEARD_TEXT));
+  const z = await inWindow({ transcribe: async () => 'Днём гуляла.' }, (y) => voiceAt(y, 'Отравлюсь шавермой.'));
+  assert.equal(z.c.video, 1);
+  assert.ok(!z.sent.some(STOP));
+});
+
+test('п. 1: concern в подписи держит «неизвестно» до конца проверки: распознавание зависло → ролика нет, один ответ с контактами', async () => {
+  const r = deferred();
+  const sent = []; let video = 0;
+  const b = createBot({
+    tg: { send: async (c, t) => { sent.push(t); }, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''), sendVideo: async () => { video++; } },
+    metrics: { hash: () => 'f', log: async () => {}, forget: async () => {} }, draft: modelLike, checkRetryMs: 0, checkBudgetMs: 40, holdWaitMs: 200,
+    transcribe: () => new Promise(() => {}), safetyCheck: async () => false,
+    render: async (e, o) => { await r.promise; return { seconds: 1, duration: 24, outPath: o.outPath }; },
+  });
+  await b.handleUpdate({ message: { chat, text: SAFE } });
+  const p = b.handleUpdate({ callback_query: { id: 'q', data: `play:${b.sessions.get(chat.id).draftId}`, message: { chat } } });
+  await tick(); await tick();
+  b.handleUpdate({ message: { chat, voice: { file_id: 'f', duration: 3 }, caption: 'Я злюсь на брата и хочу его ударить.' } });
+  await tick();
+  r.resolve(); await p;
+  assert.equal(video, 0);
+  assert.equal(sent.filter((t) => t === tryLaterMessage()).length, 1);
+});
+
+// п. 2: матрица — обычный вход и окно доставки × локальный режим (нет ключа) и модель «неизвестно».
+const MATRIX = {
+  'явная угроза другому': 'Брата прикончу.',
+  'угроза через местоимение': 'Брат опять орал. Ему не жить.',
+  'совершённое насилие': 'Я закопала соседа.',
+  'вчера меня избили': 'Вчера меня избили.',
+  'угроза ножом': 'Он угрожал мне ножом.',
+  'насилие над другим': 'Вчера его избили.',
+};
+const MODES = {
+  'локальный режим': { hasKey: () => false },
+  'модель «неизвестно»': { check: (t) => { throw Object.assign(new Error('x'), { code: 'timeout' }); } },
+};
+test('п. 2: явная угроза и совершённое насилие → 0 видео и экран помощи на обычном входе и в окне; гипербола → ролик', async () => {
+  for (const [mode, opts] of Object.entries(MODES)) {
+    for (const [name, phrase] of Object.entries(MATRIX)) {
+      assert.equal(assessRisk(phrase).level, 'urgent', name);
+      const a = bot(opts);
+      await a.say(`${SAFE} ${phrase}`);
+      await a.play();
+      assert.equal(a.c.video, 0, `${mode}, вход: ${name}`);
+      assert.ok(STOP(a.sent.at(-1)), `${mode}, вход: ${name}`);
+      const w = await inWindow(opts, (y) => y.say(phrase));
+      assert.equal(w.c.video, 0, `${mode}, окно: ${name}`);
+      assert.ok(STOP(w.sent.at(-1)), `${mode}, окно: ${name}`);
+    }
+    const g = bot(opts);
+    await g.say(`${SAFE} Убить готова за кофе.`);
+    await g.play();
+    assert.equal(g.c.video, 1, `${mode}: гипербола на входе`);
+    const gw = await inWindow(opts, (y) => y.say('Убить готова за кофе.'));
+    assert.equal(gw.c.video, 1, `${mode}: гипербола в окне`);
+    assert.ok(!gw.sent.some(STOP));
+  }
+  // Новых concern нет: гнев «убью его, если…» — прежний concern, «Брату конец» и пожелания — none.
+  assert.equal(assessRisk('Убью его, если опоздает.').level, 'concern');
+  for (const t of ['Брату конец, если мама узнает.', 'Иди сдохни.', 'Мама меня придушит за вазу.', 'Малыш спит, он не проснётся, если не шуметь.',
+    'Я бы убил брата.', 'Задушу тебя в объятиях!', 'Торт вкусный, прикончу его завтра.', 'Урыл брата в шахматы.']) assert.notEqual(assessRisk(t).level, 'urgent', t);
+});
+
+test('п. 3: второй текст прямо перед истечением бюджета первого — результат его проверки применён к отправке', async () => {
+  const r = deferred(); const second = deferred();
+  const sent = []; let video = 0; let n = 0;
+  const b = createBot({
+    tg: { send: async (c, t) => { sent.push(t); }, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''), sendVideo: async () => { video++; } },
+    metrics: { hash: () => 'f', log: async () => {}, forget: async () => {} }, draft: modelLike, checkRetryMs: 0, checkBudgetMs: 150, holdWaitMs: 2000,
+    safetyCheck: async (t) => (t.includes('Утром я пила чай') ? false : (++n === 1 ? new Promise(() => {}) : second.promise)),
+    render: async (e, o) => { await r.promise; return { seconds: 1, duration: 24, outPath: o.outPath }; },
+  });
+  await b.handleUpdate({ message: { chat, text: SAFE } });
+  const p = b.handleUpdate({ callback_query: { id: 'q', data: `play:${b.sessions.get(chat.id).draftId}`, message: { chat } } });
+  await tick(); await tick();
+  b.handleUpdate({ message: { chat, text: 'Пила чай с соседкой' } }); // проверка зависла: бюджет 150 мс
+  r.resolve();
+  await new Promise((res) => setTimeout(res, 120));
+  const q = b.handleUpdate({ message: { chat, text: 'А потом пришёл сосед' } }); // за 30 мс до истечения бюджета первого
+  setTimeout(() => second.resolve(true), 100); // ответ позже бюджета первого, но в пределах своего
+  await q; await p;
+  assert.equal(video, 0, 'результат второй проверки (опасно) применён до отправки');
+  assert.ok(STOP(sent.at(-1)));
+});
+
+test('п. 3: жёсткий предел исчерпан, локально чисто → 1 ролик; «неизвестно» + concern → 0 отправок и один ответ с контактами', async () => {
+  for (const [text, expectVideo] of [['Пила чай с соседкой', 1], ['Я злюсь на брата и хочу его ударить.', 0]]) {
+    const r = deferred();
+    const sent = []; let video = 0;
+    const b = createBot({
+      tg: { send: async (c, t) => { sent.push(t); }, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''), sendVideo: async () => { video++; } },
+      metrics: { hash: () => 'f', log: async () => {}, forget: async () => {} }, draft: modelLike, checkRetryMs: 0, checkBudgetMs: 5000, holdWaitMs: 60,
+      safetyCheck: async (t) => (t.includes('Утром я пила чай') ? false : new Promise(() => {})),
+      render: async (e, o) => { await r.promise; return { seconds: 1, duration: 24, outPath: o.outPath }; },
+    });
+    await b.handleUpdate({ message: { chat, text: SAFE } });
+    const p = b.handleUpdate({ callback_query: { id: 'q', data: `play:${b.sessions.get(chat.id).draftId}`, message: { chat } } });
+    await tick(); await tick();
+    b.handleUpdate({ message: { chat, text } });
+    r.resolve(); await p;
+    assert.equal(video, expectVideo, text);
+    if (!expectVideo) assert.equal(sent.filter((t) => t === tryLaterMessage()).length, 1, text);
+  }
+});
+
+test('п. 4: бытовая форма заканчивает предложение → ролик; с продолжением после запятой или тире → остановка; сигнал в другом предложении → остановка', async () => {
+  const pairs = {
+    'отравлюсь шавермой': ['Отравлюсь шавермой.', 'Отравлюсь шавермой, а потом таблетками.', 'Отравлюсь шавермой — и всё, хватит.'],
+    'без кофе мне не жить': ['Без кофе мне не жить!', 'Без кофе мне не жить, правда не хочу.', 'Без кофе мне не жить — совсем.'],
+    'убить готова за кофе': ['Убить готова за кофе…', 'Убить готова за кофе, а себя — хочу убить себя.', 'Убить готова за кофе — и убить себя тоже.'],
+  };
+  for (const [form, [alone, comma, dash]] of Object.entries(pairs)) {
+    assert.equal(assessRisk(alone).level, 'none', form);
+    for (const t of [comma, dash]) assert.equal(assessRisk(t).level, 'urgent', t);
+    const x = bot();
+    await x.say(`${SAFE} ${alone}`);
+    await x.play();
+    assert.equal(x.c.video, 1, alone);
+    const y = bot();
+    await y.say(`${SAFE} ${comma}`);
+    await y.play();
+    assert.equal(y.c.video, 0, comma);
+  }
+  for (const t of ['Отравлюсь шавермой. Не хочу больше жить.', 'Без кофе мне не жить. Хочу умереть.']) {
+    assert.equal(assessRisk(t).level, 'urgent', t);
+    const x = bot();
+    await x.say(`${SAFE} ${t}`);
+    await x.play();
+    assert.equal(x.c.video, 0, t); assert.ok(STOP(x.sent.at(-1)), t);
+  }
+  assert.deepEqual([...HOUSEHOLD_IDIOMS], ['отравлюсь шавермой', 'без кофе мне не жить', 'убить готова за кофе'], 'список не расширен');
 });

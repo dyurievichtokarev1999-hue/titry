@@ -6,7 +6,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS, episodeToText, EDIT_SEP, cleanInput, joinEdits } from '../engine/episode.js';
-import { makeDraft, draftRuleBased, modelSafetyCheck, hasClaudeCredentials, pairFromSentence } from './draft.js';
+import { makeDraft, draftRuleBased, modelSafetyCheck, hasClaudeCredentials, pairFromSentence, SAFETY_TIMEOUT_MS } from './draft.js';
 import { makeGate, modelModeAtStart, RETRY_DELAY_MS } from './gate.js';
 import { helpMessage, tryLaterMessage, NOT_HEARD_TEXT, prepareHelp, assessRisk, assessEpisodeRisk, validateSafeEpisode, threatErrors, threatPronounFilter, INSUFFICIENT_TEXT, INSUFFICIENT_INVITE_TEXT, INSUFFICIENT_AFTER_EXCLUSION, INSUFFICIENT_MATERIAL, EDIT_NOT_IN_TITLES_TEXT, editNotInTitlesText, TELEGRAM_TEXT_LIMIT } from './safety.js';
 import { renderEpisode, ROOT } from './render.js';
@@ -24,6 +24,8 @@ const KNOWN_COMMANDS = new Set(['start', 'year', 'delete', 'help']);
 // Предел, сколько доставка ролика ждёт проверки сообщений, пришедших во время подготовки (страховка от зависания;
 // у самой проверки свой предел и один повтор). По истечении — как «неизвестно» (условие 3).
 export const HOLD_WAIT_MS = 120 * 1000;
+// Бюджет одной проверки сообщения в окне: вызов модели + пауза + повтор, с запасом (server/draft.js, server/gate.js).
+export const CHECK_BUDGET_MS = 2 * SAFETY_TIMEOUT_MS + RETRY_DELAY_MS + 2000;
 // Короткие ответы во время подготовки, которые модельную проверку не ждут (условие 2). Сравниваются без знаков.
 const TRIVIAL_REPLIES = new Set(['ок', 'окей', 'ok', 'okay', 'ага', 'да', 'угу', 'хорошо', 'ладно', 'жду', 'понял', 'поняла', 'спасибо', 'спс', 'благодарю', 'супер', 'класс', 'круто', 'thanks', 'спасибо большое', 'ок спасибо', 'хорошо спасибо']);
 // Предел ожидания одного вызова Telegram API (кроме длинного опроса и загрузки видео).
@@ -416,7 +418,8 @@ export function createBot({
   ledger = null, // хранилище запретов (server/ledger.js); область — участник, производная HMAC на диске
   checkRetryMs = RETRY_DELAY_MS,
   gate = makeGate({ check: safetyCheck || ((text) => modelSafetyCheck(text)), hasKey, ledger, retryDelayMs: checkRetryMs }),
-  holdWaitMs = HOLD_WAIT_MS, // предел ожидания проверок сообщений, пришедших во время подготовки ролика
+  checkBudgetMs = CHECK_BUDGET_MS, // бюджет ожидания одной проверки сообщения в окне (вызов + повтор)
+  holdWaitMs = HOLD_WAIT_MS, // жёсткий общий предел ожидания проверок сообщений, пришедших во время подготовки ролика
 } = {}) {
   const sessions = new Map();
   // Незавершённые черновики и отдельные проверки участника: их результат может создать запрет уже после /delete.
@@ -638,6 +641,8 @@ export function createBot({
     }
     if (!current()) { if (alive(chatId, s) && s.stage === 'rendering') s.stage = s.verdict === 'blocked' ? 'help' : 'draft'; return; }
     // Сообщение во время проверки уже отменило эту доставку (ответ отправлен) — рендер не запускается.
+    // Начало окна «после проверки — до отправки»: от него считается жёсткий общий предел ожидания доставки.
+    const windowStart = Date.now();
     if (cancelled()) { s.stage = 'draft'; return; }
     if (waiting >= 1 + MAX_RENDER_WAITING) { s.stage = 'draft'; return tg.send(chatId, TEXT.busy); }
     const ahead = waiting;
@@ -663,7 +668,7 @@ export function createBot({
       if (r === STALE || !current()) return;
       // Доставка ждёт модельной проверки сообщений, пришедших в окно «после проверки — до отправки» (условие 2).
       release();
-      const pending = await waitHolds(s);
+      const pending = await waitHolds(s, windowStart + holdWaitMs);
       if (pending.length) {
         // Предел ожидания истёк — как «неизвестно» (условие 3): у ждущих сообщений есть concern — ролика нет.
         logError('check', { code: 'timeout' });
@@ -703,17 +708,28 @@ export function createBot({
   //    при локальном concern ролика нет («не получилось» и контакты), при локально чистом — ролик уходит;
   //  - concern без опасности по модели → блок помощи, ролик уходит (он сделан из проверенного рассказа).
   // Удержание: Map промис → локальный уровень сообщения (по нему решается истечение предела ожидания).
+  // Бюджет ожидания привязан к зарегистрированной проверке (КРИТИКА PR 16, п. 3): один вызов + один повтор
+  // (checkBudgetMs от регистрации). Жёсткий общий предел — holdWaitMs от начала окна: позднее сообщение продлевает
+  // ожидание в пределах своего бюджета, но не дальше этого предела.
   const holdDelivery = (s, p, level = 'none') => {
     s.holds = s.holds || new Map();
-    s.holds.set(p, level);
+    s.holds.set(p, { level, deadline: Date.now() + checkBudgetMs });
     p.finally(() => s.holds.delete(p)).catch(() => {});
   };
-  // [] — все проверки применены; иначе предел holdWaitMs истёк — уровни ещё не применённых сообщений.
-  const waitHolds = async (s) => {
-    let timer;
-    const limit = new Promise((r) => { timer = setTimeout(() => r(false), holdWaitMs); });
-    const all = (async () => { while (s.holds && s.holds.size) await Promise.allSettled([...s.holds.keys()]); return true; })();
-    try { return (await Promise.race([all, limit])) ? [] : [...(s.holds || new Map()).values()]; } finally { clearTimeout(timer); }
+  // [] — все проверки применены; иначе бюджеты или жёсткий предел исчерпаны — уровни ещё не применённых сообщений
+  // (незавершённая проверка = «неизвестно»).
+  const waitHolds = async (s, hardDeadline) => {
+    for (;;) {
+      const open = [...(s.holds || new Map()).entries()];
+      if (!open.length) return [];
+      const now = Date.now();
+      const live = open.filter(([, h]) => h.deadline > now).map(([, h]) => h.deadline);
+      const until = Math.min(hardDeadline, live.length ? Math.max(...live) : now);
+      if (now >= until) return open.map(([, h]) => h.level);
+      let timer;
+      const tick = new Promise((r) => { timer = setTimeout(r, until - now); });
+      try { await Promise.race([Promise.allSettled(open.map(([p]) => p)), tick]); } finally { clearTimeout(timer); }
+    }
   };
   // Отправка, сбой которой не влияет на безопасность: в журнал — только код.
   const sendSafe = async (chatId, text, extra) => { try { await tg.send(chatId, text, extra); } catch (e) { logError('send', e); } };
@@ -818,12 +834,17 @@ export function createBot({
     if (msg.voice) {
       const voiceRefused = !sttAvailable() && transcribe === transcribeOgg ? TEXT.voiceOff : msg.voice.duration > MAX_VOICE_SECONDS ? TEXT.voiceLong : null;
       const caption = typeof msg.caption === 'string' ? cleanInput(msg.caption).trim() : ''; // подпись к голосовому — тоже текст
+      // Подпись проходит локальный фильтр синхронно, ДО распознавания (КРИТИКА PR 16, п. 1): явный сигнал — сразу путь
+      // остановки, без ожидания и без зависимости от распознавания.
+      const captionLevel = caption ? assessRisk(caption).level : 'none';
       if (s.delivering) {
         // Голосовое в окне до отправки (условие 2). Не распознано — ролик не отменяется: «не расслышал, напиши текстом»;
         // подпись проверяется как текст. Распознанное держит доставку с начала распознавания (как в PR 15).
+        if (captionLevel === 'urgent') return duringRender(chatId, s, caption); // ролик отменяется сейчас
         if (voiceRefused) return caption ? Promise.all([sendSafe(chatId, TEXT.notHeard), duringRender(chatId, s, caption)]) : sendSafe(chatId, TEXT.notHeard);
         let releaseVoice;
-        holdDelivery(s, new Promise((r) => { releaseVoice = r; }));
+        // Уровень удержания — уровень подписи: concern подписи держит «неизвестно» до конца проверки (не none).
+        holdDelivery(s, new Promise((r) => { releaseVoice = r; }), captionLevel);
         try {
           let story = '';
           try {
@@ -844,6 +865,7 @@ export function createBot({
           return await p;
         } finally { releaseVoice(); }
       }
+      if (captionLevel === 'urgent') return handleStory(chatId, s, caption, 'text'); // остановка без распознавания
       if (voiceRefused) {
         await tg.send(chatId, voiceRefused);
         return caption ? handleStory(chatId, s, caption, 'text') : undefined; // подпись — тот же путь, что текст

@@ -124,6 +124,10 @@ const THREAT_TO_ME = {
   toString: () => 'threat_to_me_past',
 };
 
+// Явная угроза другому человеку и однозначное сообщение о совершённом насилии (КРИТИКА PR 16, решение владельца кода
+// 13.11 20:15, п. 2): узкое urgent-правило из сильных форм словаря угроз — threatOther() ниже. Новых concern нет.
+const THREAT_TO_OTHER = { test: (t) => threatOther(t), toString: () => 'threat_to_other' };
+
 const URGENT = [
   /не\s+хочу\s+(больше\s+)?жить/,
   /не\s+хочется\s+(больше\s+)?жить/,
@@ -215,6 +219,7 @@ const URGENT = [
   // Бытовые «угрожал мне увольнением / штрафом» — не опасность для жизни, если в той же части фразы нет оружия или
   // расправы («угрожал мне судом и ножом» — urgent). Порядок «мне угрожал…» ловит прежнее правило /мне\s+угрожа/ выше.
   THREAT_TO_ME,
+  THREAT_TO_OTHER,
   /(?<![а-я])(?:бил|била|били|избивал|избивала|избивали)\s+меня(?![а-я])(?![\s,]+(?:по\s+плечу|током|дрожь))/,
   /(?<![а-я])меня\s+(?:бил|била|били)(?![а-я])(?!\s+(?:дрожь|озноб|током|ток|колотун|мандраж))/,
   // «На меня напала тоска / лень / жор» — состояние, не нападение.
@@ -269,8 +274,10 @@ export const HOUSEHOLD_IDIOMS = Object.freeze([
   'без кофе мне не жить',
   'убить готова за кофе',
 ]);
-// Между словами — пробелы и запятые; после фразы — конец части предложения: «отравлюсь шавермой с ядом» не исключение.
-const HOUSEHOLD_RE = HOUSEHOLD_IDIOMS.map((p) => new RegExp(String.raw`(?<![а-я])${p.trim().split(/\s+/).join(String.raw`[\s,]+`)}(?=\s*(?:[.!?,;:…)»"“”—–-]|\n|$))`, 'g'));
+// Между словами — пробелы и запятые. Исключение действует, только когда бытовая форма заканчивает предложение или
+// сообщение: точка, «!», «?», многоточие, эмодзи, конец текста (КРИТИКА PR 16, п. 4). После запятой, тире или
+// переноса строки с продолжением — исходная оценка голой формы («Отравлюсь шавермой, а потом таблетками» — urgent).
+const HOUSEHOLD_RE = HOUSEHOLD_IDIOMS.map((p) => new RegExp(String.raw`(?<![а-я])${p.trim().split(/\s+/).join(String.raw`[\s,]+`)}(?=\s*(?:[.!?…]|\p{Extended_Pictographic}|$))`, 'gu'));
 // Перевод строки сохраняется: правилам RAW_URGENT нужен исходный конец строки.
 const stripHousehold = (t) => HOUSEHOLD_RE.reduce((x, re) => x.replace(re, ' · '), t);
 
@@ -493,6 +500,55 @@ const PAST_PRON_TITLES = new RegExp([
   String.raw`(?<![а-я])${LIMB_PAST}\s+(?:${PRON_DAT})\s+${LIMB}(?![а-я])`,
   String.raw`(?<![а-я])(?:${PRON_DAT})\s+${LIMB}\s+${LIMB_PAST}(?![а-я])`,
 ].join('|'));
+// ── Узкое urgent-правило: явная угроза другому и совершённое насилие (п. 2 КРИТИКИ PR 16) ──
+// Только сильные формы. Гнев «убью / прибью его» остаётся concern (CONCERN), «Брату конец», «чтоб он сдох», «Мама меня
+// придушит за вазу» — не urgent: в титры они не попадают (threatPhrase), ролик не останавливают.
+const KILL_STRONG = String.raw`(?:зарежу|прирежу|пристрелю|застрелю|задушу|прикончу|урою|закопаю|изобью|покалечу|отравлю|порешу)`;
+// «Не проснётся», «не доживёт» — чаще о горе или о сне, для остановки не берутся (в титры по-прежнему не попадают).
+const DOOM_URGENT = String.raw`(?:не\s+жить|не\s+жилец|не\s+жильцы|(?:жить\s+не\s+да(?:м|дим)|не\s+да(?:м|дим)\s+жить)|сдохнет|сдохнут|хана|кранты|каюк|капут|кирдык|покойник|покойница|покойники|труп|гроб)`;
+// «Я бы убил брата» — сослагательное: гнев, остаётся concern (harmToOthers).
+const NOT_WOULD = String.raw`(?<!(?:^|\s)бы\s)(?<!(?:^|\s)бы\s\S+\s)`;
+const VIOLENCE_PAST = String.raw`(?:избил|избила|избили|зарезал|зарезала|зарезали|застрелил|застрелила|застрелили|изнасиловал|изнасиловала|изнасиловали|пырнул|пырнула|пырнули)`;
+const OTHER_NOUN = new RegExp([
+  String.raw`(?<![а-я])${KILL_STRONG}(?:\s+\S+)?\s+${PERSON_NOUN}(?![а-я])`,
+  String.raw`(?<![а-я])${PERSON_NOUN}(?![а-я])(?:\s+\S+)?\s+${KILL_STRONG}(?![а-я])`,
+  String.raw`(?<![а-я])${KILL_STRONG}(?:\s+\S+)?\s+(?:тебя|вас)(?![а-я])|(?<![а-я])(?:тебя|вас)\s+(?:\S+\s+)?${KILL_STRONG}(?![а-я])`,
+  String.raw`^\s*(?:я\s+)?(?:${DOOM_ADV}\s+){0,2}${KILL_STRONG}(?:\s+${DOOM_ADV}){0,2}\s*$`,
+  String.raw`${LEAD}${PERSON_ANY}(?![а-я])${ADVS}\s+${DOOM_URGENT}${ADVS}${DOOM_TAIL}`,
+  String.raw`(?<![а-я])${NOT_WOULD}${HARM_PAST}\s+(?:(?:своего|свою|своих|этого|эту|этих|${DOOM_ADV})\s+)?${PAST_OBJ}(?![а-я])${NOT_PLAY}${NOT_GAME}`,
+  String.raw`(?<![а-я])(?<!(?:^|\s)(?:у|для|от|без|до|возле|около|из-за|с|со|к|ко)\s)(?!(?:мать|дочь|свекровь)(?![а-я]))${PAST_OBJ}(?:\s+(?:я|мы|ты|вчера|сегодня|уже|все|таки|же|просто|наконец))?\s+${HARM_PAST}(?![а-я])${NOT_PLAY}${NOT_GAME}`,
+  String.raw`(?<![а-я])${PERSON_DAT}(?![а-я])(?:\s+(?:я|мы|вчера|уже))?\s+${LIMB}\s+переломал[а]?(?![а-я])${NOT_GAME}`,
+  String.raw`(?<![а-я])${LIMB_VERB}\s+(?:${PERSON_NOUN})\s+${LIMB}(?![а-я])`,
+  String.raw`(?<![а-я])${LIMB_VERB}\s+${LIMB}\s+(?:${PERSON_NOUN})(?![а-я])`,
+  String.raw`(?<![а-я])${LIMB}\s+(?:${PERSON_NOUN})\s+${LIMB_VERB}(?![а-я])`,
+  String.raw`(?<![а-я])${LIMB}\s+${LIMB_VERB}\s+(?:${PERSON_NOUN})(?![а-я])`,
+  String.raw`(?<![а-я])${NOT_WOULD}${VIOLENCE_PAST}\s+(?:\S+\s+)?(?:${PAST_OBJ}|его|ее|их|нас)(?![а-я])${NOT_GAME}`,
+  String.raw`(?<![а-я])(?:его|ее|их|нас)\s+(?:\S+\s+)?${VIOLENCE_PAST}(?![а-я])`,
+  String.raw`(?<![а-я])${NOT_WOULD}(?:убил|убила|убили)\s+(?:(?:своего|свою|своих|этого|эту|этих)\s+)?${PAST_OBJ}(?![а-я])${NOT_GAME}`,
+].join('|'));
+// Местоимение 3-го лица — только при человеке в этой или предыдущей фразе («Торт вкусный, прикончу его» — нет).
+const OTHER_PRON = new RegExp([
+  String.raw`(?<![а-я])${KILL_STRONG}(?:\s+\S+)?\s+(?:его|ее|их)(?![а-я])`,
+  String.raw`(?<![а-я])(?:его|ее|их)\s+(?:\S+\s+)?${KILL_STRONG}(?![а-я])`,
+  String.raw`${PRON_START}${PRON_NOM}${ADVS}\s+${DOOM_URGENT}${ADVS}${DOOM_TAIL}`,
+  String.raw`${PRON_START}${PRON_DAT}${ADVS}\s+${DOOM_URGENT}${ADVS}${DOOM_TAIL}`,
+  String.raw`(?<![а-я])переломал[а]?\s+(?:${PRON_DAT})\s+${LIMB}(?![а-я])`,
+  String.raw`(?<![а-я])(?:${PRON_DAT})\s+${LIMB}\s+переломал[а]?(?![а-я])`,
+  String.raw`(?<![а-я])${LIMB_VERB_FUT}\s+(?:${PRON_DAT})\s+${LIMB}(?![а-я])`,
+].join('|'));
+function threatOther(text) {
+  const sents = String(text || '').split(/(?<=[.!?…;])\s+|\n+/).map((x) => x.trim()).filter((x) => x && flat(x));
+  const hasPerson = (x) => new RegExp(PRON_PERSONS.source).test(flat(x));
+  return sents.some((x, i) => {
+    // «Задушу в объятиях», «Зацелую, задушу!» — нежность, не угроза.
+    const hug = /объят|зацел|поцел|обним|обнял|обниму/.test(flat(x));
+    const parts = [x, ...x.split(/[,;:—–]\s+(?!(?:если|когда|пока)(?![а-я]))/).map((y) => y.trim()).filter((y) => y && y !== x)].map(flat).filter(Boolean)
+      .map((p) => (hug ? p.replace(/(?<![а-я])задушу(?![а-я])/g, ' ') : p));
+    if (parts.some((p) => OTHER_NOUN.test(p))) return true;
+    const near = hasPerson(x) || (i > 0 && hasPerson(sents[i - 1]));
+    return near && parts.some((p) => OTHER_PRON.test(p));
+  });
+}
 const DOOM_PERSON = { test: (t) => DOOM_NOUN.test(t) || DOOM_PRON.test(t) || PAST_PRON_TITLES.test(t) };
 // «Мама меня убьёт за…» — гипербола для фильтра остановки (onlyHyperbole), но в титры не берётся. Только при
 // подлежащем-человеке: «Сессия меня прикончит», «Меня убьёт эта жара» — не угроза человеку.
