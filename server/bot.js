@@ -408,6 +408,9 @@ export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), sal
   };
 }
 
+// Подпись — новая строка после расшифровки, с заглавной буквы: перенос — граница предложения (п. 4 КРИТИКИ PR 16).
+const withCaption = (story, caption) => (caption ? `${story}\n${caption.charAt(0).toUpperCase()}${caption.slice(1)}` : story);
+
 // ── Логика бота (транспорт подменяется в тестах) ─────────────────────────────
 
 export function createBot({
@@ -713,7 +716,8 @@ export function createBot({
   //  - concern без опасности по модели → блок помощи, ролик уходит (он сделан из проверенного рассказа).
   // Удержание: Map промис → локальный уровень сообщения (по нему решается истечение предела ожидания).
   // Бюджет ожидания привязан к зарегистрированной проверке (КРИТИКА PR 16, п. 3): один вызов + один повтор
-  // (checkBudgetMs от регистрации). Жёсткий общий предел — holdWaitMs от начала окна: позднее сообщение продлевает
+  // (checkBudgetMs от регистрации). Жёсткий общий предел — holdWaitMs от начала окна, время очереди и рендера не считается
+  // (windowStart + renderMs + holdWaitMs; отступление от буквы решения — в docs/DECISIONS.md): позднее сообщение продлевает
   // ожидание в пределах своего бюджета, но не дальше этого предела.
   // budget: Infinity — удержание на время распознавания голоса: его ограничивает только жёсткий предел, бюджет проверки
   // начинается с регистрации самой проверки (duringRender).
@@ -868,7 +872,7 @@ export function createBot({
             return await p;
           }
           // duringRender ставит своё удержание синхронно; внешнее снимаем сразу — эхо и typing ожидание не держат.
-          const p = duringRender(chatId, s, caption ? `${story}\n${caption}` : story, { echo: `Расшифровка:\n«${story}»` });
+          const p = duringRender(chatId, s, withCaption(story, caption), { echo: `Расшифровка:\n«${story}»` });
           releaseVoice();
           return await p;
         } finally { releaseVoice(); }
@@ -888,7 +892,7 @@ export function createBot({
         return caption ? handleStory(chatId, s, caption, 'text') : undefined;
       }
       // Подпись к голосовому — продолжение рассказа: те же проверки на всём, что может попасть в ролик.
-      const full = caption ? `${story}\n${caption}` : story;
+      const full = withCaption(story, caption);
       await tg.send(chatId, `Расшифровка:\n«${story}»`);
       return handleStory(chatId, s, full, 'voice');
     }

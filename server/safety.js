@@ -278,13 +278,17 @@ export const HOUSEHOLD_IDIOMS = Object.freeze([
 // сообщение: точка, «!», «?», многоточие, эмодзи и текстовые смайлики, закрывающая скобка или кавычка, конец строки
 // или текста (КРИТИКА PR 16, п. 4). После запятой или тире с продолжением — исходная оценка голой формы
 // («Отравлюсь шавермой, а потом таблетками» — urgent). Конец строки — граница: рассказ и поля титров склеиваются через «\n».
-const HOUSEHOLD_RE = HOUSEHOLD_IDIOMS.map((p) => new RegExp(String.raw`(?<![а-я])${p.trim().split(/\s+/).join(String.raw`[\s,]+`)}(?=\s*(?:[.!?…]|\p{Extended_Pictographic}|[:;]-?[)(dр]|[)(]+\s*$|[»"”)]+\s*(?:[.!?…]|$)|\n|$))`, 'gu'));
+// Слова фразы — без учёта регистра вручную (регистр нужен для границы: перенос строки — конец предложения, только если
+// дальше заглавная буква, цифра или конец текста; «…шавермой\nа потом таблетками» — продолжение).
+const ciWord = (w) => [...w].map((c) => (/[а-я]/.test(c) ? `[${c}${c.toUpperCase()}]` : c)).join('');
+const AFTER_END = String.raw`(?=\s*(?:$|[.!?…]|\n\s*(?:\p{Lu}|\d|$)))`;
+const HOUSEHOLD_RE = HOUSEHOLD_IDIOMS.map((p) => new RegExp(String.raw`(?<![а-яА-Я])${p.trim().split(/\s+/).map(ciWord).join(String.raw`[\s,]+`)}(?=\s*(?:[.!?…]|(?:\p{Extended_Pictographic}|[:;]-?[)(dDрР]+|[)(]+|[»"”)]+)${AFTER_END}|\n\s*(?:\p{Lu}|\d|$)|$))`, 'gu'));
 // Перевод строки сохраняется: правилам RAW_URGENT нужен исходный конец строки.
 const stripHousehold = (t) => HOUSEHOLD_RE.reduce((x, re) => x.replace(re, ' · '), t);
 
 /** Убрать из текста устойчивые выражения. Экспортируется для тестов. */
 export function stripIdioms(text) {
-  let t = norm(stripHousehold(String(text || '').toLowerCase().replace(/ё/g, 'е')));
+  let t = norm(stripHousehold(String(text || '').replace(/ё/g, 'е').replace(/Ё/g, 'Е')).toLowerCase());
   for (const re of IDIOMS) t = t.replace(re, ' · ');
   return t;
 }
@@ -314,7 +318,7 @@ const ON_NARRATOR = /(?<![а-я])(?:меня|мной|нас|нами)(?![а-я]
 const RAW_URGENT = [/(?<![а-я])мне\s+(?:(?:так|больше|дальше|уже|теперь)\s+){0,2}не\s+жить[ \t]*\r?\n/];
 
 function riskCore(t, raw, modelFlag) {
-  const rawN = stripHousehold(String(raw || '').toLowerCase().replace(/ё/g, 'е'));
+  const rawN = stripHousehold(String(raw || '').replace(/ё/g, 'е').replace(/Ё/g, 'Е')).toLowerCase();
   const urgent = [...URGENT.filter((re) => re.test(t)), ...RAW_URGENT.filter((re) => re.test(rawN))].map(String);
   const harm = harmToOthers(t, raw);
   if (harm === 'urgent') urgent.push('harm_to_others+intent');
@@ -384,7 +388,8 @@ export function assessEpisodeRisk(story, ep) {
     for (const r of ep.rows || []) parts.push(r.role, r.value);
     if (ep.post) parts.push(ep.post.text);
   }
-  return assessRisk(parts.filter(Boolean).join('\n'));
+  // Каждое поле — с заглавной буквы: перенос строки между полями — граница предложения (бытовые формы, п. 4 КРИТИКИ).
+  return assessRisk(parts.filter(Boolean).map((x) => String(x).charAt(0).toUpperCase() + String(x).slice(1)).join('\n'));
 }
 
 // Части рассказа для правила «угроза не в титрах»: предложения и части через «;», запятую, тире и союзы.
@@ -512,16 +517,18 @@ const DOOM_URGENT = String.raw`(?:не\s+жить|(?:жить\s+не\s+да(?:м
 // «Я бы убил брата» — сослагательное: гнев, остаётся concern (harmToOthers).
 const NOT_WOULD = String.raw`(?<!(?:^|\s)бы\s)(?<!(?:^|\s)бы\s\S+\s)`;
 const NOT_WOULD_AFTER = String.raw`(?!\s+бы(?![а-я]))`;
-const VIOLENCE_PAST = String.raw`(?:избил|избила|избили|зарезал|зарезала|зарезали|застрелил|застрелила|застрелили|изнасиловал|изнасиловала|изнасиловали|пырнул|пырнула|пырнули|задушил|задушила|задушили|отравил|отравила|отравили|убил|убила|убили)`;
-const VIOLENCE_NOW = String.raw`(?:избивает|избивают|насилует|насилуют)`;
+// Однозначное насилие: контексты еды, игр и нежности к нему не применяются («Отец избил маму из-за борща» — urgent).
+const VIOLENCE_CORE = String.raw`(?:избил|избила|избили|зарезал|зарезала|зарезали|застрелил|застрелила|застрелили|изнасиловал|изнасиловала|изнасиловали|пырнул|пырнула|пырнули|избивает|избивают|насилует|насилуют)`;
+// Чаще бывает гиперболой или про еду («Нас убила жара», «Брата отравили шаурмой», «Задушила сына в объятиях»): только
+// с человеком, названным словом, и с контекстными исключениями.
+const VIOLENCE_SOFT = String.raw`(?:убил|убила|убили|отравил|отравила|отравили|задушил|задушила|задушили)`;
 // «Всех», «семью» в угрозе едой и игрой («Отравлю всех своим борщом», «Урою всех на турнире») человеком не считаются.
 const NOT_CROWD = String.raw`(?!(?:всех|семью|всю\s+семью)(?![а-я]))`;
+// «Застрелила подругу снежком», «из водяного пистолета», пейнтбол, «избили их со счётом 5:0» — игра.
+const NOT_TOY = String.raw`(?!(?:\s+\S+){0,3}\s+(?:снежк\S*|водян\S*|пейнтбол\S*|лазертаг\S*|нерф\S*|подушк\S*|шарик\S*|счетом|\d+)(?![а-я]))`;
 const NOT_PREP = String.raw`(?<!(?:^|\s)(?:у|для|от|без|до|возле|около|из-за|с|со|к|ко|про|о|об)\s)`;
-const OTHER_NOUN = new RegExp([
-  String.raw`(?<![а-я])${KILL_STRONG}(?:\s+\S+)?\s+${NOT_CROWD}${PERSON_NOUN}(?![а-я])${NOT_GAME}`,
-  String.raw`(?<![а-я])${NOT_CROWD}${PERSON_NOUN}(?![а-я])(?:\s+\S+)?\s+${KILL_STRONG}(?![а-я])${NOT_GAME}`,
-  String.raw`(?<![а-я])${KILL_STRONG}(?:\s+\S+)?\s+(?:тебя|вас)(?![а-я])${NOT_GAME}|(?<![а-я])(?:тебя|вас)\s+(?:\S+\s+)?${KILL_STRONG}(?![а-я])${NOT_GAME}`,
-  String.raw`^\s*(?:я\s+)?(?:${DOOM_ADV}\s+){0,2}${KILL_STRONG}(?:\s+${DOOM_ADV}){0,2}\s*$`,
+// Ядро: однозначная угроза и насилие — без контекстных исключений (кроме вымысла в той же части фразы).
+const OTHER_CORE = new RegExp([
   String.raw`${LEAD}${PERSON_ANY}(?![а-я])${ADVS}\s+${DOOM_URGENT}${ADVS}${DOOM_TAIL}`,
   // Второе лицо — обращение, человек рядом не нужен: «Тебе не жить», «Ноги тебе переломаю».
   String.raw`${PRON_START}(?:тебе|вам|ты|вы)${ADVS}\s+${DOOM_URGENT}${ADVS}${DOOM_TAIL}`,
@@ -534,13 +541,23 @@ const OTHER_NOUN = new RegExp([
   String.raw`(?<![а-я])${LIMB}\s+(?:${PERSON_NOUN})\s+${LIMB_VERB}(?![а-я])`,
   String.raw`(?<![а-я])${LIMB}\s+${LIMB_VERB}\s+(?:${PERSON_NOUN})(?![а-я])`,
   // Совершённое насилие: глагол → человек или местоимение и обратный порядок («Брата избили», «Маму избил отчим»).
-  String.raw`(?<![а-я])${NOT_WOULD}(?:${VIOLENCE_PAST}|${VIOLENCE_NOW})(?![а-я])${NOT_WOULD_AFTER}\s+(?:\S+\s+)?(?:${PAST_OBJ}|его|ее|их|нас)(?![а-я])${NOT_GAME}`,
-  String.raw`(?<![а-я])${NOT_PREP}(?:${PAST_OBJ}|его|ее|их|нас)(?![а-я])(?:\s+\S+){0,2}\s+${NOT_WOULD}(?:${VIOLENCE_PAST}|${VIOLENCE_NOW})(?![а-я])${NOT_WOULD_AFTER}${NOT_GAME}`,
+  String.raw`(?<![а-я])${NOT_WOULD}${VIOLENCE_CORE}(?![а-я])${NOT_WOULD_AFTER}\s+(?:\S+\s+)?(?:${PAST_OBJ}|его|ее|их|нас)(?![а-я])${NOT_GAME}${NOT_TOY}`,
+  String.raw`(?<![а-я])${NOT_PREP}(?:${PAST_OBJ}|его|ее|их|нас)(?![а-я])(?:\s+\S+){0,2}\s+${NOT_WOULD}${VIOLENCE_CORE}(?![а-я])${NOT_WOULD_AFTER}${NOT_GAME}`,
+].join('|'));
+// Мягкие формы: угроза глаголом расправы и «убил / отравил / задушил» — с контекстными исключениями части фразы.
+const OTHER_SOFT = new RegExp([
+  String.raw`(?<![а-я])${KILL_STRONG}(?:\s+\S+)?\s+${NOT_CROWD}${PERSON_NOUN}(?![а-я])${NOT_GAME}`,
+  String.raw`(?<![а-я])${NOT_CROWD}${PERSON_NOUN}(?![а-я])(?:\s+\S+)?\s+${KILL_STRONG}(?![а-я])${NOT_GAME}`,
+  String.raw`(?<![а-я])${KILL_STRONG}(?:\s+\S+)?\s+(?:тебя|вас)(?![а-я])${NOT_GAME}|(?<![а-я])(?:тебя|вас)\s+(?:\S+\s+)?${KILL_STRONG}(?![а-я])${NOT_GAME}`,
+  String.raw`^\s*(?:я\s+)?(?:${DOOM_ADV}\s+){0,2}${KILL_STRONG}(?:\s+${DOOM_ADV}){0,2}\s*$`,
+  String.raw`(?<![а-я])${NOT_WOULD}${VIOLENCE_SOFT}(?![а-я])${NOT_WOULD_AFTER}\s+(?:(?:своего|свою|своих|этого|эту|этих)\s+)?${PAST_OBJ}(?![а-я])${NOT_GAME}`,
+  String.raw`(?<![а-я])${NOT_PREP}(?!(?:мать|дочь|свекровь)(?![а-я]))${PAST_OBJ}(?![а-я])(?:\s+(?:я|мы|ты|вчера|сегодня|уже))?\s+${NOT_WOULD}${VIOLENCE_SOFT}(?![а-я])${NOT_WOULD_AFTER}${NOT_GAME}`,
+  // С местоимением — только при подлежащем-местоимении человека: «Он убил её», «Я его убил» («Его убила новость» — нет).
+  String.raw`(?<![а-я])(?:я|он|она|они|мы|ты)\s+(?:\S+\s+)?${NOT_WOULD}${VIOLENCE_SOFT}(?![а-я])${NOT_WOULD_AFTER}\s+(?:\S+\s+)?(?:его|ее|их)(?![а-я])${NOT_GAME}`,
+  String.raw`(?<![а-я])(?:я|он|она|они|мы|ты)\s+(?:\S+\s+)?(?:его|ее|их)\s+${NOT_WOULD}${VIOLENCE_SOFT}(?![а-я])${NOT_WOULD_AFTER}${NOT_GAME}`,
 ].join('|'));
 // Местоимение 3-го лица — только при человеке в этой или предыдущей фразе («Телефон старый, он скоро сдохнет» — нет).
-const OTHER_PRON = new RegExp([
-  String.raw`(?<![а-я])${KILL_PRON}(?:\s+\S+)?\s+(?:его|ее|их)(?![а-я])${NOT_GAME}`,
-  String.raw`(?<![а-я])(?:его|ее|их)\s+(?:\S+\s+)?${KILL_PRON}(?![а-я])`,
+const PRON_CORE = new RegExp([
   String.raw`${PRON_START}${PRON_NOM}${ADVS}\s+${DOOM_URGENT}${ADVS}${DOOM_TAIL}`,
   String.raw`${PRON_START}${PRON_DAT}${ADVS}\s+${DOOM_URGENT}${ADVS}${DOOM_TAIL}`,
   String.raw`(?<![а-я])переломал[а]?\s+(?:${PRON_DAT})\s+${LIMB}(?![а-я])`,
@@ -551,24 +568,27 @@ const OTHER_PRON = new RegExp([
   String.raw`(?<![а-я])${NOT_WOULD}(?:закопал[аи]?|грохнул[аи]?|урыл[аи]?)\s+(?:его|ее|их)(?![а-я])${NOT_PLAY}${NOT_GAME}`,
   String.raw`(?<![а-я])(?:его|ее|их)\s+${NOT_WOULD}(?:закопал[аи]?|грохнул[аи]?|урыл[аи]?)(?![а-я])${NOT_PLAY}${NOT_GAME}`,
 ].join('|'));
-// Еда, снежки, счёт, «убила вопросом» в той же части фразы — не угроза («Отравлю всех своим борщом», «Застрелила подругу
-// снежком», «Наши избили их со счётом 5:0»). Игра и спорт — NOT_GAME сразу после объекта («Урою тебя в доту»).
-const NOT_THREAT_CTX = /(?<![а-я])(?:снежк\S*|со\s+счетом|борщ\S*|стряпн\S*|готовк\S*|вопрос\S*)/;
-// Вымысел — на всё предложение («Смотрела кино, там застрелили отца героя»); нежность — только для «задушу»
-// («Так люблю, что задушу тебя»), остальные угрозы в той же фразе остаются.
-const FICTION_CTX = /(?<![а-я])(?:(?:в|во)\s+(?:фильм\S*|сериал\S*|мульт\S*|книг\S*|романе|спектакле|игре)|смотрел\S*\s+(?:кино|фильм\S*|сериал\S*))(?![а-я])/;
-const TENDER_CTX = /(?<![а-я])(?:люблю|любви|объят\S*|зацел\S*|поцел\S*|обним\S*|обниму|нежн\S*)(?![а-я])/;
+const PRON_SOFT = new RegExp([
+  String.raw`(?<![а-я])${KILL_PRON}(?:\s+\S+)?\s+(?:его|ее|их)(?![а-я])${NOT_GAME}`,
+  String.raw`(?<![а-я])(?:его|ее|их)\s+(?:\S+\s+)?${KILL_PRON}(?![а-я])`,
+].join('|'));
+// Контекст мягких форм в той же части фразы: еда, гиперболы, счёт и финал, снежки, «убила вопросом».
+const NOT_THREAT_CTX = /(?<![а-я])(?:снежк\S*|со\s+счетом|\d+\s+\d+|финал\S*|борщ\S*|суп\S*|пирог\S*|стряпн\S*|готовк\S*|вопрос\S*|столов\S*|кафе|ресторан\S*|шаурм\S*|шаверм\S*|ед[аоуы]|едой|новост\S*|экзамен\S*|жар[аеоуы]|пробк\S*|концовк\S*|взгляд\S*|словом|словами|любов\S*|любви|люблю|объят\S*|зацел\S*|поцел\S*|обним\S*|обниму|нежн\S*)(?![а-я])/;
+// Вымысел — по части фразы, где он назван («там застрелили отца героя», «в сериале застрелили мужа героини»).
+const FICTION_CTX = /(?<![а-я])(?:(?:в|во)\s+(?:фильм\S*|сериал\S*|мульт\S*|книг\S*|романе|спектакле|игре)|смотрел\S*\s+(?:кино|фильм\S*|сериал\S*)|геро(?:я|ини|ев|ю|ине)|персонаж\S*)(?![а-я])/;
+const TENDER_CTX = /(?<![а-я])(?:люблю|любви|любовью|объят\S*|зацел\S*|поцел\S*|обним\S*|обниму|нежн\S*)(?![а-я])/;
 function threatOther(text) {
   const sents = String(text || '').split(/(?<=[.!?…;])\s+|\n+/).map((x) => x.trim()).filter((x) => x && flat(x));
   const hasPerson = (x) => new RegExp(PRON_PERSONS.source).test(flat(x));
   return sents.some((x, i) => {
-    if (FICTION_CTX.test(flat(x))) return false;
-    const tender = TENDER_CTX.test(flat(x));
     const parts = [x, ...x.split(/[,;:—–]\s+(?!(?:если|когда|пока)(?![а-я]))/).map((y) => y.trim()).filter((y) => y && y !== x)]
-      .map(flat).filter((p) => p && !NOT_THREAT_CTX.test(p)).map((p) => (tender ? p.replace(/(?<![а-я])задушу(?![а-я])/g, ' ') : p));
-    if (parts.some((p) => OTHER_NOUN.test(p))) return true;
+      .map(flat).filter((p) => p && !FICTION_CTX.test(p));
+    // Нежность во фразе гасит только «задушу / задушил(а)» («Так люблю, что задушу тебя»; «Обниму маму, а потом зарежу брата» — urgent).
+    const tender = TENDER_CTX.test(flat(x));
+    const soft = parts.filter((p) => !NOT_THREAT_CTX.test(p)).map((p) => (tender ? p.replace(/(?<![а-я])(?:задушу|задушил[аи]?)(?![а-я])/g, ' ') : p));
+    if (parts.some((p) => OTHER_CORE.test(p)) || soft.some((p) => OTHER_SOFT.test(p))) return true;
     const near = hasPerson(x) || (i > 0 && hasPerson(sents[i - 1]));
-    return near && parts.some((p) => OTHER_PRON.test(p));
+    return near && (parts.some((p) => PRON_CORE.test(p)) || soft.some((p) => PRON_SOFT.test(p)));
   });
 }
 const DOOM_PERSON = { test: (t) => DOOM_NOUN.test(t) || DOOM_PRON.test(t) || PAST_PRON_TITLES.test(t) };
