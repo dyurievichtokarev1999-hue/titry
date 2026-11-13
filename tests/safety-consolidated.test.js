@@ -130,9 +130,9 @@ test('окно до отправки: голос не распознался —
 
 test('условие 5: бытовые дополнения из закрытого списка — none и ролик; голые формы — urgent и остановка', async () => {
   assert.deepEqual([...HOUSEHOLD_IDIOMS], ['отравлюсь шавермой', 'без кофе мне не жить', 'убить готова за кофе']);
-  const idioms = ['Отравлюсь шавермой.', 'Без кофе мне не жить.', 'Убить готова за кофе.', 'ОТРАВЛЮСЬ   ШАВЕРМОЙ!', 'Без кофе мне не жить\nправда'];
+  const idioms = ['Отравлюсь шавермой.', 'Без кофе мне не жить.', 'Убить готова за кофе.', 'ОТРАВЛЮСЬ   ШАВЕРМОЙ!', 'Без кофе мне не жить\nправда', 'Без кофе, мне не жить.', 'Отравлюсь шавермой, честно.'];
   for (const t of idioms) assert.equal(assessRisk(t).level, 'none', t);
-  for (const t of ['Отравлюсь.', 'Отравлюсь', 'Мне не жить.', 'Мне не жить', 'Отравлюсь шавермой. Отравлюсь.', 'Без кофе мне не жить. Мне не жить.', 'Отравлюсь таблетками.'])
+  for (const t of ['Отравлюсь.', 'Отравлюсь', 'Мне не жить.', 'Мне не жить', 'Отравлюсь шавермой. Отравлюсь.', 'Без кофе мне не жить. Мне не жить.', 'Отравлюсь таблетками.', 'Отравлюсь шавермой с крысиным ядом.'])
     assert.equal(assessRisk(t).level, 'urgent', t);
   for (const t of ['Отравлюсь шавермой', 'Без кофе мне не жить', 'Убить готова за кофе']) {
     const x = bot();
@@ -247,7 +247,9 @@ test('PR 14: угроза другому — не в титрах (без ост
     assert.ok(STOP(y.sent.at(-1)), t);
     assert.equal(y.c.video, 0);
   }
-  for (const t of ['Он угрожал мне увольнением.', 'Меня била дрожь.', 'Дед бил меня по плечу.']) assert.notEqual(assessRisk(t).level, 'urgent', t);
+  for (const t of ['Он угрожал мне увольнением и ножом.', 'Он угрожал мне судом и пистолетом.']) assert.equal(assessRisk(t).level, 'urgent', t);
+  for (const t of ['Он угрожал мне увольнением.', 'Начальник угрожал мне по телефону увольнением.', 'Меня била дрожь.', 'Дед бил меня по плечу.',
+    'На меня напала тоска.', 'На меня напала лень.', 'На меня напал жор.', 'На меня напал сон.', 'На меня тоска напала.']) assert.notEqual(assessRisk(t).level, 'urgent', t);
 });
 
 // ── 7. В журналах и метриках нет текстов рассказов, расшифровок и подписей ──────────────────────────
@@ -281,10 +283,50 @@ test('журнал и метрики: нет текстов рассказа, р
 
 test('help.json без региона RU → отказ старта; экран остановки — 112 и линия помощи', async () => {
   const f = path.join(helpDir, 'kz.json');
-  await fs.writeFile(f, JSON.stringify({ region: 'KZ', emergency: { label: 'Экстренные', phone: '112', verified: true }, contacts: [] }));
+  await fs.writeFile(f, JSON.stringify({ region: 'KZ', emergency: { label: 'Экстренные', phone: '112', verified: true }, contacts: [{ label: 'Линия помощи', phone: '8-800-000-00-00', verified: true }] }));
+  const ru = path.join(helpDir, 'ru.json');
+  await fs.writeFile(ru, JSON.stringify({ region: 'RU', emergency: { label: 'Экстренные', phone: '112', verified: true }, contacts: [{ label: 'Линия помощи', phone: '8-800-000-00-00', verified: true }] }));
+  assert.ok(prepareHelp(ru), 'контроль: тот же файл с регионом RU проходит');
   assert.throws(() => prepareHelp(f), { code: 'help_config' });
   await assert.rejects(prepareBot({ env: { METRICS_SALT: 'test-salt-fictional-0001', ANTHROPIC_API_KEY: 'test-dummy' }, helpFile: f, cleanup: async () => {}, cleanupTmp: async () => 0, ledger: { load: async () => {} }, log: () => {} }), { stage: 'help.load', code: 'help_config' });
   prepareHelp(HELP_FILE);
   assert.ok(STOP(helpMessage('urgent')));
   assert.doesNotMatch(helpMessage('urgent'), /подробнее|всё равно/i, 'без «подробнее» и без «всё равно сделать ролик»');
+});
+
+// ── Разбор: повторное «Смотреть титры» после отмены, рендер после отмены, двойное «не получилось» ────────
+
+test('отмена ролика (concern + «неизвестно») не переносится на новое «Смотреть титры»; рендер отменённой доставки не запускается', async () => {
+  const d = deferred();
+  let n = 0;
+  const x = bot({ check: (t) => (t.includes('Утром я пила чай') ? (++n === 1 ? d.promise : false) : (() => { throw Object.assign(new Error('x'), { code: 'timeout' }); })()) });
+  await x.say(SAFE);
+  const p1 = x.play(); await tick();
+  await x.say('Убью брата'); // concern, модель «неизвестно» — доставка 1 отменена
+  assert.equal(x.sent.at(-1), tryLaterMessage());
+  const p2 = x.play(); // новая доставка, пока первая ещё ждёт проверки
+  d.resolve(false);
+  await p1; await p2;
+  assert.equal(x.c.render, 1, 'отменённая доставка рендер не запускает');
+  assert.equal(x.c.video, 1, 'новая доставка — ролик');
+  assert.equal(x.sent.filter((t) => t === tryLaterMessage()).length, 1);
+});
+
+test('предел ожидания истёк при concern, затем проверка вернула «неизвестно» — «не получилось» один раз', async () => {
+  const r = deferred(); const m = deferred();
+  const sent = []; let video = 0; let renders = 0;
+  const b = createBot({
+    tg: { send: async (c, t) => { sent.push(t); }, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''), sendVideo: async () => { video++; } },
+    metrics: { hash: () => 'f', log: async () => {}, forget: async () => {} }, draft: modelLike, checkRetryMs: 0, holdWaitMs: 30,
+    safetyCheck: async (t) => (t.includes('Утром я пила чай') ? false : m.promise),
+    render: async (e, o) => { renders++; await r.promise; return { seconds: 1, duration: 24, outPath: o.outPath }; },
+  });
+  await b.handleUpdate({ message: { chat, text: SAFE } });
+  const p = b.handleUpdate({ callback_query: { id: 'q', data: `play:${b.sessions.get(chat.id).draftId}`, message: { chat } } });
+  await waitFor(() => renders === 1);
+  const q = b.handleUpdate({ message: { chat, text: 'Убью брата' } });
+  r.resolve(); await p;
+  assert.equal(video, 0);
+  m.resolve(Promise.reject(Object.assign(new Error('x'), { code: 'timeout' }))); await q;
+  assert.equal(sent.filter((t) => t === tryLaterMessage()).length, 1);
 });

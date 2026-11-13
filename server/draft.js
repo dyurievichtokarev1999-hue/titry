@@ -81,8 +81,11 @@ safety_flag = true, если в рассказе есть желание уме�
  * true — опасно; false — полное разрешение; исключение с кодом — проверка не завершена.
  * Ошибки сети и API пробрасываются: вызывающий код не собирает ролик без проверки.
  */
+// Предел одного запроса модельной проверки и без повторов SDK: единственный повтор делает шлюз (server/gate.js,
+// условие 3 решения 13.11 15:00). Таймаут — «неизвестно», а не ожидание по умолчанию SDK (10 минут × 3 попытки).
+export const SAFETY_TIMEOUT_MS = 20_000;
 export async function modelSafetyCheck(story, { client, model = DEFAULT_MODEL } = {}) {
-  const anthropic = client || new Anthropic();
+  const anthropic = client || new Anthropic({ timeout: SAFETY_TIMEOUT_MS, maxRetries: 0 });
   const response = await anthropic.beta.messages.create({
     model,
     max_tokens: 2000,

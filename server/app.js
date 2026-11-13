@@ -10,7 +10,7 @@ import { MOODS, TRACKS, sanitizeEpisode, validateEpisode, episodeToText, cleanIn
 import { makeDraft, hasClaudeCredentials, DEFAULT_MODEL, modelSafetyCheck } from './draft.js';
 import { renderEpisode, ROOT } from './render.js';
 import { logError, safeCode } from './errlog.js';
-import { currentHelp, prepareHelp, helpMessage, assessEpisodeRisk, validateSafeEpisode, INSUFFICIENT_TEXT, TRY_LATER_TEXT, tryLaterMessage } from './safety.js';
+import { currentHelp, prepareHelp, helpMessage, assessEpisodeRisk, validateSafeEpisode, INSUFFICIENT_TEXT, TRY_LATER_TEXT, helpContactList } from './safety.js';
 import { makeGate, modelModeAtStart, RETRY_DELAY_MS } from './gate.js';
 import { makeLedger, KEY_ENV, KEY_VERSION_ENV } from './ledger.js';
 
@@ -252,7 +252,8 @@ export function createApp({
       const g = await gate.verify(SCOPE, story, ep, `${story}\n${episodeToText(ep)}`);
       if (g.unknown) {
         logError('check', { code: g.code });
-        if (risk.level !== 'none') return { status: 503, body: { ...TRY_LATER, code: g.code, help: tryLaterMessage() } };
+        // Отказ проверяющей модели — как локальный concern: ролика нет.
+        if (risk.level !== 'none' || g.refusal) return { status: 503, body: { ...TRY_LATER, code: g.code, help: helpContactList() } };
       } else if (!g.ok) return fromGate(g);
       const stopped = () => gate.status(SCOPE, story).kind !== null;
       const modelStop = () => fromGate(gate.status(SCOPE, story));

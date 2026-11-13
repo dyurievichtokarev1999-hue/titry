@@ -108,7 +108,6 @@ test('S04: true с max_tokens → safety; неразборчивый max_tokens 
 const U = {
   'U01 сеть': coded('ECONNRESET'),
   'U01 timeout': coded('timeout'),
-  'U02 refusal': viaModel({ stop_reason: 'refusal', content: [text(sj(false))] }),
   'U03 max_tokens+false': viaModel({ stop_reason: 'max_tokens', content: [text(sj(false))] }),
   'U04 нет stop_reason': viaModel({ content: [text(sj(false))] }),
   'U04 stop_sequence': viaModel({ stop_reason: 'stop_sequence', content: [text(sj(false))] }),
@@ -161,6 +160,15 @@ test('U08: safety установлен, затем любой U-сбой → saf
     mode = 'fail';
     for (let i = 0; i < 3; i++) assert.ok(isSafety(await render()));
     assert.equal(counters.check, 1, 'после safety проверка не повторяется'); assert.equal(counters.render, 0);
+  });
+});
+
+test('U02 refusal: отказ проверяющей модели — без повтора, как локальный concern: ролика нет, «не получилось» и контакты', async () => {
+  await withApp({ check: viaModel({ stop_reason: 'refusal', content: [text(sj(false))] }) }, async ({ render, counters }) => {
+    const r = await render();
+    assert.ok(isTryLater(r), JSON.stringify(r.body));
+    assert.ok(!r.body.help.includes(r.body.error), 'текст «не получилось» не повторяется в блоке контактов');
+    assert.equal(counters.check, 1, 'без повтора'); assert.equal(counters.render, 0);
   });
 });
 

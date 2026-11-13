@@ -29,7 +29,7 @@ const BAD = {
   'U+2028 в подписи': { region: 'RU', emergency: { label: 'Экстренные\u2028службы', phone: '112', verified: true }, contacts: [] },
   'U+2029 в номере': { region: 'RU', emergency: { label: 'Экстренные', phone: '11\u20292', verified: true }, contacts: [] },
   // Решение владельца кода 13.11 15:00 по PR 11: без контактов «Россия» (регион RU) сервис не стартует.
-  'регион не Россия': { region: 'KZ', emergency: { label: 'Экстренные', phone: '112', verified: true }, contacts: [] },
+  'регион не Россия': { region: 'KZ', emergency: { label: 'Экстренные', phone: '112', verified: true }, contacts: [{ label: 'Линия помощи', phone: '8-800-000-00-00', verified: true }] },
   'нет кода региона': { emergency: { label: 'Экстренные', phone: '112', verified: true }, contacts: [] },
   'реплика с блоком concern длиннее 3500': { region: 'RU', emergency: { label: 'Ж'.repeat(3400), phone: '112', verified: true }, contacts: [] },
   'блок помощи длиннее одного сообщения': { region: 'RU', emergency: { label: 'Ж'.repeat(TELEGRAM_TEXT_LIMIT), phone: '112', verified: true }, contacts: [] },

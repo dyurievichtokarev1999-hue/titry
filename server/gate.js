@@ -85,6 +85,8 @@ export function makeGate({ check, hasKey = () => true, ledger = null, retryDelay
         if (flagged === true || flagged === false) return flagged;
         code = 'bad_response';
       } catch (e) { code = safeCode(e); }
+      // Отказ проверяющей модели — не сбой сети: повтора нет, вызывающий считает его как локальный concern.
+      if (code === 'refusal') return { unknown: code, refusal: true };
     }
     return { unknown: code };
   }
@@ -93,7 +95,7 @@ export function makeGate({ check, hasKey = () => true, ledger = null, retryDelay
    * Проверка перед выдачей. Возвращает:
    *  { ok: true } — безопасно; { ok: true, localOnly: true } — ключа нет, решает только локальный фильтр;
    *  { kind: 'safety', byModel } — опасно (запрет записан); { unknown: true, code } — модель не ответила и после
-   *  повтора; { unavailable: true, code: 'ledger' } — хранилище запретов недоступно (выдачи нет).
+   *  повтора ({ refusal: true } — модель отказалась проверять: без повтора, вызывающий считает как локальный concern); { unavailable: true, code: 'ledger' } — хранилище запретов недоступно (выдачи нет).
    * text — всё, что попадёт в ролик; story — ключ запрета.
    */
   async function verify(scope, story, ep, text) {
@@ -106,7 +108,7 @@ export function makeGate({ check, hasKey = () => true, ledger = null, retryDelay
     // Остановка, пришедшая из параллельного запроса за время проверки, сильнее любого ответа.
     if (area(scope).safety.has(storyDigest(story))) return { kind: 'safety', byModel: false };
     if (res === true) { markSafety(scope, story); return { kind: 'safety', byModel: true }; }
-    if (res !== false) return { unknown: true, code: res.unknown };
+    if (res !== false) return res.refusal ? { unknown: true, code: res.unknown, refusal: true } : { unknown: true, code: res.unknown };
     if (!(await ledgerOk(scope))) return status(scope, story).kind === 'safety' ? { kind: 'safety', byModel: false } : { unavailable: true, code: 'ledger' };
     const after = status(scope, story);
     if (after.kind === 'safety') return { kind: 'safety', byModel: false };

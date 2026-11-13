@@ -70,12 +70,12 @@ export const TEXT = {
   keptSafety: 'Служебная запись об остановке по безопасности сохранена по правилу теста. В ней нет текста рассказа. [срок не утверждён]',
   keptTechnical: 'Служебная запись о технической приостановке сохранена по правилу теста. В ней нет текста рассказа. [срок не утверждён]',
   recordUnknown: 'Проверить состояние служебной записи не получилось. Полное удаление не подтверждено.',
-  // ИР-02: проверка недоступна — текст редактора повествования (PM-01, 9.11) дословно. Без срока и без карточки помощи.
   more: 'Расскажи чуть подробнее: что было, что запомнилось.',
   // Модель не ответила и после повтора, в ролике есть локальный concern (условие 3): текст — в server/safety.js.
   tryLater: () => tryLaterMessage(),
   // Голосовое во время подготовки ролика не распознано (условие 2): ролик не отменяется. Текст — в server/safety.js.
   notHeard: NOT_HEARD_TEXT,
+  // ИР-02: проверка недоступна — текст редактора повествования (PM-01, 9.11) дословно. Без срока и без карточки помощи.
   checkUnavailable: 'Ролик задерживается: сервис не завершил проверку. Сейчас отправить его не получится. Ждать в чате и отвечать на это сообщение не нужно.',
   // Черновик текста, на вычитку редактору повествования: честно, без «всё удалено», без обещаний сроков.
   deleteFailed: 'Сессия удалена, а удаление статистики по тебе подтвердить не получилось. Попробуй /delete ещё раз чуть позже.',
@@ -612,7 +612,10 @@ export function createBot({
     // (расшифровки, подписи, «/текст» уже в нём) и итоговые строки титров. Рендер стартует только после её результата.
     s.stage = 'rendering';
     // Доставка идёт: сообщения до её конца проверяются первыми (duringRender), даже если /start сменил стадию.
-    if (!s.delivering) s.veto = false; // отмена по прежней доставке на новую не переносится
+    // Номер доставки: отмена (s.veto) действует на все доставки с номером не больше своего, начатые до неё;
+    // новое «Смотреть титры» после отмены — новая доставка, отмена на неё не переносится.
+    const myDelivery = s.deliveries = (s.deliveries || 0) + 1;
+    const cancelled = () => (s.veto || 0) >= myDelivery;
     s.delivering = (s.delivering || 0) + 1;
     try {
     const text = `${joinEdits(story)}\n${episodeToText(ep)}`;
@@ -622,7 +625,8 @@ export function createBot({
     if (g.unknown) {
       // «Неизвестно» и после повтора (условие 3): локально чисто — ролик делается; есть concern — ролика нет.
       logError('check', { code: g.code });
-      if (assessEpisodeRisk(joinEdits(story), ep).level !== 'none') {
+      // Отказ проверяющей модели (refusal) — как локальный concern.
+      if (g.refusal || assessEpisodeRisk(joinEdits(story), ep).level !== 'none') {
         s.stage = 'draft';
         return tg.send(chatId, TEXT.tryLater());
       }
@@ -633,6 +637,8 @@ export function createBot({
       return tg.send(chatId, TEXT.checkUnavailable);
     }
     if (!current()) { if (alive(chatId, s) && s.stage === 'rendering') s.stage = s.verdict === 'blocked' ? 'help' : 'draft'; return; }
+    // Сообщение во время проверки уже отменило эту доставку (ответ отправлен) — рендер не запускается.
+    if (cancelled()) { s.stage = 'draft'; return; }
     if (waiting >= 1 + MAX_RENDER_WAITING) { s.stage = 'draft'; return tg.send(chatId, TEXT.busy); }
     const ahead = waiting;
     waiting++;
@@ -663,13 +669,13 @@ export function createBot({
         logError('check', { code: 'timeout' });
         if (pending.includes('concern')) {
           s.deliveryEpoch = (s.deliveryEpoch || 0) + 1;
-          s.veto = true;
+          s.veto = s.deliveries;
           if (current()) { s.stage = 'draft'; await sendSafe(chatId, TEXT.tryLater()); }
           return;
         }
       }
       // Сообщение окна с concern, по которому модель не ответила, отменило ролик (условие 3): ответ уже отправлен.
-      if (s.veto) { if (current()) s.stage = 'draft'; return; }
+      if (cancelled()) { if (current()) s.stage = 'draft'; return; }
       if (!current()) return;
       await tg.sendVideo(chatId, r.outPath, { caption: 'Конец сцены.', width: 720, height: 1280, duration: Math.round(r.duration), reply_markup: FEEDBACK_KB });
       // /delete во время отправки: после metrics.forget новая запись о человеке не появляется.
@@ -728,11 +734,15 @@ export function createBot({
           const g = await track(chatId, gate.verify(s.scope, body, null, body));
           if (g.kind === 'safety') r = { kind: 'urgent', byModel: !!g.byModel };
           else if (g.ok) r = { kind: level };
-          else r = { kind: level === 'concern' ? 'unknown' : 'none', code: g.code }; // условие 3
+          else r = { kind: level === 'concern' || g.refusal ? 'unknown' : 'none', code: g.code }; // условие 3; отказ — как concern
         } catch { r = { kind: level === 'concern' ? 'unknown' : 'none', code: 'error' }; }
       }
       if (r.kind === 'urgent') { s.story = body; s.originalStory = body; applyStop(s); } // запрет — на это сообщение
-      else if (r.kind === 'unknown') s.veto = true; // ролика нет
+      else if (r.kind === 'unknown') {
+        // Ролика нет: отменяются все идущие доставки. fresh — отмена новая (иначе «не получилось» уже отправлено).
+        r.fresh = (s.veto || 0) < (s.deliveries || 0);
+        s.veto = s.deliveries || 0;
+      }
       return r;
     })();
   }
@@ -760,6 +770,7 @@ export function createBot({
     }
     if (r.code) logError('check', { code: r.code });
     if (r.kind === 'unknown') {
+      if (!r.fresh) return; // доставка уже отменена (предел ожидания или другое сообщение): ответ уже отправлен
       if (s.delivering) s.stage = 'draft';
       return sendSafe(chatId, TEXT.tryLater());
     }
@@ -768,7 +779,7 @@ export function createBot({
       return logSafety({ level: 'concern', at: 'rendering' });
     }
     // «Собираю ролик» (и эхо) — только если ролик ещё может уйти: противоречивых обещаний нет.
-    const stillDelivering = () => s.delivering && (s.deliveryEpoch || 0) === epoch && !s.veto && s.verdict !== 'blocked';
+    const stillDelivering = () => s.delivering && (s.deliveryEpoch || 0) === epoch && (s.veto || 0) < (s.deliveries || 0) && s.verdict !== 'blocked';
     if (!stillDelivering()) return;
     if (echo) await sendSafe(chatId, echo); // эхо расшифровки — только при безопасном исходе и необязательно
     if (stillDelivering()) return sendSafe(chatId, TEXT.rendering);
