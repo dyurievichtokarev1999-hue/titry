@@ -5,6 +5,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { TEXT, applyEdit, createBot, draftMessage, makeMetrics, parseEdit } from '../server/bot.js';
 import { draftRuleBased } from '../server/draft.js';
+import { helpMessage } from '../server/safety.js';
+
+// Утверждённый владельцем текст экрана остановки — литералом, независимо от проверяемой функции.
+const STOP_LITERAL = 'Титры для этого рассказа не будут собраны. Если тебе или кому-то рядом прямо сейчас угрожает опасность, позвони по одному из номеров ниже или попроси человека рядом побыть с тобой.\n\n';
 
 // Есть ли значение id среди значений полей журнала (рекурсивно). Подстроку не ищем:
 // «:42» бывает во времени поля at — из-за этого тест падал по часам (QA, 10.11).
@@ -101,7 +105,7 @@ test('бот: срочный риск — без ролика, с экраном
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-test-'));
   const bot = createBot({ safetyCheck: async () => false, tg, metrics: makeMetrics(path.join(dir, 'm.jsonl'), 'test-salt'), render: async () => { throw new Error('не должно вызываться'); }, draft: (s, o) => import('../server/draft.js').then((m) => m.makeDraft(s, { ...o, provider: 'manual' })) });
   await bot.handleUpdate({ message: { chat: { id: 7, type: 'private' }, text: 'Сегодня понял, что не хочу больше жить.' } });
-  assert.ok(tg.sent.some((m) => /Сейчас важнее не титры/.test(m.text)));
+  assert.ok(tg.sent.some((m) => m.text === helpMessage('urgent') && m.text.startsWith(STOP_LITERAL)), 'экран остановки — дословно утверждённый текст');
   assert.ok(!tg.sent.some((m) => /Похоже на твой день/.test(m.text)));
   const before = tg.sent.length;
   await bot.handleUpdate({ message: { chat: { id: 8, type: 'group' }, text: 'Длинная история про день в группе' } });

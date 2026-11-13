@@ -10,6 +10,10 @@ import { makeDraft } from '../server/draft.js';
 import { renderEpisode } from '../server/render.js';
 import { createApp } from '../server/app.js';
 import { createBot, makeMetrics } from '../server/bot.js';
+import { helpMessage } from '../server/safety.js';
+
+// Утверждённый владельцем текст экрана остановки — литералом, независимо от проверяемой функции.
+const STOP_LITERAL = 'Титры для этого рассказа не будут собраны. Если тебе или кому-то рядом прямо сейчас угрожает опасность, позвони по одному из номеров ниже или попроси человека рядом побыть с тобой.\n\n';
 
 const URGENT_STORY = 'Сегодня опять всё валится из рук. Я не хочу больше жить. Вечером позвонила сестра.';
 const UNIQUE = 'фиолетовый жираф Аркадий';
@@ -194,5 +198,5 @@ test('бот: правка от самого человека становитс
   await bot.handleUpdate({ message: { chat, text: '2: не хочу больше жить' } });
   await bot.handleUpdate({ callback_query: { id: 'b', data: `play:${playId(tg)}`, message: { chat } } });
   assert.equal(rendered.length, 1, 'второй рендер не запускался');
-  assert.ok(tg.sent.some((t) => /Сейчас важнее не титры/.test(t)));
+  assert.ok(tg.sent.some((t) => t === helpMessage('urgent') && t.startsWith(STOP_LITERAL)), 'экран остановки — дословно утверждённый текст');
 });
