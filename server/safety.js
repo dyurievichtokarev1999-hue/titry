@@ -593,7 +593,7 @@ function threatOther(text) {
     const tender = TENDER_CTX.test(flat(x));
     const untender = (p) => (tender ? p.replace(/(?<![а-я])(?:задушу|задушил[аи]?)(?![а-я])/g, ' ') : p);
     // «Отравлю маму своим борщом» — готовка, не угроза (только «отравлю» + «свой + блюдо»).
-    const kill = parts.map(untender).filter((p) => !/отравлю(?:\s+\S+)*\s+сво\S+\s+(?:борщ|суп|стряпн|готовк|пирог|блюд|кухн)/.test(p));
+    const kill = parts.map(untender).map((p) => p.replace(/(?<![а-я])отравлю(?:\s+\S+){0,2}?\s+сво\S+\s+(?:борщ|суп|стряпн|готовк|пирог|блюд|кухн)\S*/g, ' '));
     const soft = parts.filter((p) => !NOT_THREAT_CTX.test(p)).map(untender);
     if (parts.some((p) => OTHER_CORE.test(p)) || kill.some((p) => OTHER_KILL.test(p)) || soft.some((p) => OTHER_VSOFT.test(p))) return true;
     const near = hasPerson(x) || (i > 0 && hasPerson(sents[i - 1]));
