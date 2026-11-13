@@ -740,7 +740,7 @@ export function createBot({
       if (r.kind === 'urgent') { s.story = body; s.originalStory = body; applyStop(s); } // запрет — на это сообщение
       else if (r.kind === 'unknown') {
         // Ролика нет: отменяются все идущие доставки. fresh — отмена новая (иначе «не получилось» уже отправлено).
-        r.fresh = (s.veto || 0) < (s.deliveries || 0);
+        r.fresh = !!s.delivering && (s.veto || 0) < (s.deliveries || 0); // ролик уже ушёл — «не получилось» не шлём
         s.veto = s.deliveries || 0;
       }
       return r;
