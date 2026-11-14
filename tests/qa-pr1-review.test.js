@@ -74,7 +74,7 @@ test('B1: монтажная — модельная проверка на пря
   // Решение владельца кода 13.11 15:00, условие 3: «неизвестно» после повтора — при локальном concern ролика нет (503),
   // при локально чистом рассказе ролик делается.
   await run(async () => { throw new Error('сеть'); }, async (post) => {
-    const concernStory = `${ex.story} Убью его, если опоздает.`;
+    const concernStory = `${ex.story} Хочу его ударить.`;
     const r = await post('/api/render', { ...body, story: concernStory });
     assert.equal(r.status, 503, 'локальный concern + «неизвестно» — ролика нет');
     assert.equal((await r.json()).unknown, true);

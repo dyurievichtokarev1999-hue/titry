@@ -152,7 +152,7 @@ test('бот: правка с urgent → остановка как у расск
 test('бот: правка оценивается в контексте всего рассказа — сама по себе concern, вместе с рассказом urgent', async () => {
   const story = 'Утром я наточила нож. Вечером я пекла пирог.';
   assert.equal(assessRisk(story).level, 'none');
-  assert.equal(assessRisk('Брат убью его').level, 'concern');
+  assert.equal(assessRisk('Брат хочу его ударить').level, 'concern');
   const b = botSetup();
   await b.say(story);
   assert.ok(b.s().episode);

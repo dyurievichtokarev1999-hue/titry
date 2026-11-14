@@ -60,7 +60,7 @@ test('проверка ролика задержана; второе сообщ�
   const b = setup({ prior: () => d.promise });
   await b.say(ex.story);
   const p = b.play(); await tick();
-  await b.say('Убью брата');
+  await b.say('Хочу его ударить');
   assert.equal(b.sent.at(-1), helpMessage('concern'));
   d.resolve(false); await p;
   assert.equal(b.counters.video, 1);
@@ -108,7 +108,7 @@ test('проверка второго сообщения не завершена
   const c = setup({ prior: () => d.promise, second: failCheck, chatId: 77903 });
   await c.say(ex.story);
   p = c.play(); await tick();
-  await c.say('Убью брата'); // локально concern
+  await c.say('Хочу его ударить'); // локально concern
   assert.equal(c.sent.at(-1), TRY);
   d.resolve(false); await p;
   assert.equal(c.counters.video, 0, 'concern + «неизвестно» — ролика нет');
@@ -176,7 +176,7 @@ test('«/start» во время подготовки не снимает про
 });
 
 test('проверка сообщения зависла дольше предела: локально чисто → ролик уходит; concern → ролика нет, «не получилось»', async () => {
-  for (const [text, video] of [['Пила чай', 1], ['Убью брата', 0]]) {
+  for (const [text, video] of [['Пила чай', 1], ['Хочу его ударить', 0]]) {
     const d = deferred();
     const b = setup({ prior: () => d.promise, second: () => new Promise(() => {}), holdWaitMs: 30 });
     await b.say(ex.story);
@@ -323,7 +323,7 @@ test('отмена прежней доставки (concern + «неизвест
   const b = setup({ prior: () => d.promise, second: () => { if (fail) failCheck(); return false; } });
   await b.say(ex.story);
   let p = b.play(); await tick();
-  await b.say('Убью брата');
+  await b.say('Хочу его ударить');
   d.resolve(false); await p;
   assert.equal(b.counters.video, 0);
   fail = false;
@@ -424,7 +424,7 @@ test('адаптер Telegram: у вызова API есть предел ожи�
 });
 
 test('после экрана остановки или «не отправлю» поздний «безопасно» по другому сообщению не шлёт «Собираю ролик»', async () => {
-  for (const second of ['Убить себя', 'Убью брата']) { // urgent; concern + «неизвестно» (ролика нет)
+  for (const second of ['Убить себя', 'Хочу его ударить']) { // urgent; concern + «неизвестно» (ролика нет)
     const slow = deferred(); const r = deferred();
     const failOther = () => { throw Object.assign(new Error('x'), { code: 'incomplete_response' }); };
     const bb = setup({ render: () => r.promise, second: (t) => (t === 'Пила чай' ? slow.promise : failOther()) });

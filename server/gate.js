@@ -62,7 +62,6 @@ export function makeGate({ check, hasKey = () => true, ledger = null, retryDelay
     if (durable(scope)) {
       const l = ledger.lookup(scope, story);
       if (l.failed) return { kind: 'unavailable', code: 'ledger' };
-      // Записи technical прежних версий больше ничего не запрещают: паузы второй проверки нет.
       if (l.kind === 'safety') { a.safety.add(sd); return { kind: 'safety' }; }
     }
     return { kind: null };
@@ -117,7 +116,7 @@ export function makeGate({ check, hasKey = () => true, ledger = null, retryDelay
   }
 
   /**
-   * Какие запреты сохранены в области: Set из 'safety' / 'technical' (technical — только старые записи хранилища);
+   * Какие запреты сохранены в области: Set из 'safety';
    * пустой — нет записей; null — хранилище недоступно, состояние неизвестно.
    */
   function recordsFor(scope) {

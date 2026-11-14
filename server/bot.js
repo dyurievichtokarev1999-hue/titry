@@ -70,7 +70,6 @@ export const TEXT = {
   // Исход 2 — ТОЛЬКО вымышленный стенд (TITRY_STAND=fictional; редактор 18:25, решение владельца 17:10).
   // Маркер «[срок не утверждён]» не допускается в сборке для реальных данных (tests/release-guard.test.js).
   keptSafety: 'Служебная запись об остановке по безопасности сохранена по правилу теста. В ней нет текста рассказа. [срок не утверждён]',
-  keptTechnical: 'Служебная запись о технической приостановке сохранена по правилу теста. В ней нет текста рассказа. [срок не утверждён]',
   recordUnknown: 'Проверить состояние служебной записи не получилось. Полное удаление не подтверждено.',
   more: 'Расскажи чуть подробнее: что было, что запомнилось.',
   // Модель не ответила и после повтора, в ролике есть локальный concern (условие 3): текст — в server/safety.js.
@@ -826,7 +825,7 @@ export function createBot({
     if (text === '/delete') {
       sessions.delete(chatId);
       // Честный ответ (редактор 16:24): «удалены» — только если удаление сессии и статистики подтверждено.
-      // Запреты safety/technical по /delete не снимаются; если они есть, полное удаление не подтверждается.
+      // Запрет safety по /delete не снимается; если они есть, полное удаление не подтверждается.
       let forgot = true;
       try { await metrics.forget(chatId); } catch { forgot = false; }
       const kinds = gate.recordsFor(`chat:${chatId}`);
@@ -835,7 +834,6 @@ export function createBot({
       else {
         const fictional = process.env.TITRY_STAND === 'fictional';
         if (fictional && kinds.has('safety')) lines.push(TEXT.keptSafety);
-        if (fictional && kinds.has('technical')) lines.push(TEXT.keptTechnical);
         // Не вымышленный стенд (срок не утверждён) или черновик/проверка ещё идут и могут поставить запрет.
         if ((kinds.size && !fictional) || inFlight.has(chatId)) lines.push(TEXT.deleteKept);
       }
@@ -1012,9 +1010,23 @@ export function createBot({
     if (action === 'music') { s.episode.music = MUSIC_ORDER[(MUSIC_ORDER.indexOf(s.episode.music) + 1) % MUSIC_ORDER.length]; s.stage = 'draft'; return showDraft(chatId, s); }
   }
 
+  // Исправленное сообщение (КРИТИКА 14.11, п. 4): правка проходит локальный фильтр, как новое сообщение. Явная
+  // опасность — ролик отменяется (в окне доставки), черновик уничтожается, экран остановки. В рассказ правка
+  // не попадает и других ответов не даёт: исправленный текст ролик не меняет. Текст в журнал и метрики не пишется.
+  async function onEdited(msg) {
+    if (!msg.chat || msg.chat.type !== 'private') return;
+    const chatId = msg.chat.id;
+    const text = cleanInput(msg.text || msg.caption || '').trim();
+    if (!text || assessRisk(text).level !== 'urgent') return;
+    const s = session(chatId);
+    s.story = text; s.originalStory = text;
+    return stopForSafety(chatId, s, 'urgent', { at: s.delivering ? 'edited_rendering' : 'edited' });
+  }
+
   async function handleUpdate(u) {
     try {
       if (u.message) await onMessage(u.message);
+      else if (u.edited_message) await onEdited(u.edited_message);
       else if (u.callback_query) await onCallback(u.callback_query);
     } catch (e) { logError('update', e); }
   }
@@ -1134,7 +1146,7 @@ async function main() {
   let offset = 0;
   for (;;) {
     try {
-      const updates = await tg.call('getUpdates', { offset, timeout: 30, allowed_updates: ['message', 'callback_query'] });
+      const updates = await tg.call('getUpdates', { offset, timeout: 30, allowed_updates: ['message', 'edited_message', 'callback_query'] });
       for (const u of updates) {
         offset = u.update_id + 1;
         bot.handleUpdate(u); // не ждём: рендер одного пользователя не блокирует ответы другим

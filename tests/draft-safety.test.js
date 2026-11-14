@@ -12,7 +12,7 @@ test('прямые слова о нежелании жить останавли�
   }
   assert.equal(assessRisk('Сегодня просто устал, хочу спать').level, 'none');
   assert.equal(assessRisk('Меня ударил сосед').level, 'urgent', 'опасность для самого человека — остановка');
-  assert.equal(assessRisk('Убью его, если опять опоздает').level, 'concern', 'гнев на других — предупреждение');
+  assert.equal(assessRisk('Злюсь на брата, хочу его ударить').level, 'concern', 'гнев на других — предупреждение');
   assert.equal(assessRisk('обычный день', true).level, 'urgent', 'флаг модели');
 });
 

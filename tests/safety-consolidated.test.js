@@ -305,7 +305,7 @@ test('отмена ролика (concern + «неизвестно») не пер
   const x = bot({ check: (t) => (t.includes('Утром я пила чай') ? (++n === 1 ? d.promise : false) : (() => { throw Object.assign(new Error('x'), { code: 'timeout' }); })()) });
   await x.say(SAFE);
   const p1 = x.play(); await tick();
-  await x.say('Убью брата'); // concern, модель «неизвестно» — доставка 1 отменена
+  await x.say('Хочу его ударить'); // concern, модель «неизвестно» — доставка 1 отменена
   assert.equal(x.sent.at(-1), tryLaterMessage());
   const p2 = x.play(); // новая доставка, пока первая ещё ждёт проверки
   d.resolve(false);
@@ -327,7 +327,7 @@ test('предел ожидания истёк при concern, затем про
   await b.handleUpdate({ message: { chat, text: SAFE } });
   const p = b.handleUpdate({ callback_query: { id: 'q', data: `play:${b.sessions.get(chat.id).draftId}`, message: { chat } } });
   await waitFor(() => renders === 1);
-  const q = b.handleUpdate({ message: { chat, text: 'Убью брата' } });
+  const q = b.handleUpdate({ message: { chat, text: 'Хочу его ударить' } });
   r.resolve(); await p;
   assert.equal(video, 0);
   m.resolve(Promise.reject(Object.assign(new Error('x'), { code: 'timeout' }))); await q;
@@ -426,8 +426,10 @@ test('п. 2: явная угроза и совершённое насилие �
     assert.equal(gw.c.video, 1, `${mode}: гипербола в окне`);
     assert.ok(!gw.sent.some(STOP));
   }
-  // Новых concern нет: гнев «убью его, если…» — прежний concern, «Брату конец» и пожелания — none.
-  assert.equal(assessRisk('Убью его, если опоздает.').level, 'concern');
+  // Новых concern нет: гнев без глагола расправы — concern, «Брату конец» и пожелания — none.
+  // КРИТИКА 14.11: «Убью его, если опоздает» — явная угроза другому (urgent); гнев без глагола расправы — concern.
+  assert.equal(assessRisk('Убью его, если опоздает.').level, 'urgent');
+  assert.equal(assessRisk('Хочу его ударить.').level, 'concern');
   for (const t of ['Брату конец, если мама узнает.', 'Иди сдохни.', 'Мама меня придушит за вазу.', 'Малыш спит, он не проснётся, если не шуметь.',
     'Я бы убил брата.', 'Задушу тебя в объятиях!', 'Торт вкусный, прикончу его завтра.', 'Урыл брата в шахматы.']) assert.notEqual(assessRisk(t).level, 'urgent', t);
 });
@@ -607,4 +609,57 @@ test('п. 2: однозначное насилие с числом и угроз
     'Не люблю соседа и пристрелю его.', 'После новостей пристрелю соседа.', 'Зарежу соседа после экзамена.', 'Отравлю мужа едой.', 'Отравлю своим супом маму и зарежу брата.']) assert.equal(assessRisk(t).level, 'urgent', t);
   for (const t of ['Наши избили их со счётом 5:0.', 'Отравлю маму своим борщом.', 'Урою тебя в доту.', 'Застрелила подругу снежком.', 'Так люблю, что задушу тебя.'])
     assert.notEqual(assessRisk(t).level, 'urgent', t);
+});
+
+// ── Разбор головы 0d7ffed3 (14.11) ──────────────────────────────────────────────────────────────────────
+
+test('14.11 п. 1: явная угроза другому — urgent; бытовые гиперболы и предметы — нет', () => {
+  for (const t of ['Зарежу его.', 'Его зарежу.', 'Пристрелю его.', 'Задушу её.', 'Убью мужа.', 'Соседа убью.', 'Хочу убить брата.',
+    'Сломаю ему челюсть.', 'Застрелю их всех в школе.', 'Порежу её.', 'Подожгу дом соседа.', 'Сожгу его машину вместе с ним.',
+    'Возьму нож и пойду к нему.', 'Убью его, если опоздает.']) assert.equal(assessRisk(t).level, 'urgent', t);
+  for (const t of ['Мама меня убьёт за двойку.', 'Убить готова за кофе.', 'Убью за кофе.', 'Убью время до вечера.', 'Прибью полку.', 'Порежу салат.',
+    'Купила колбасу. Порежу её.', 'Порежу торт маме.', 'Сожгу ужин.', 'Сожгу старую машину.', 'Хочу его ударить.']) assert.notEqual(assessRisk(t).level, 'urgent', t);
+});
+
+test('14.11 п. 2: совершённое насилие — urgent; бытовые «ударил», «сломала» — нет', () => {
+  for (const t of ['Я его ударил ножом.', 'Вчера отец порезал маму.', 'Он сломал мне руку.', 'Я толкнула брата с лестницы, он не двигается.',
+    'Я сломал ему руку вчера.', 'Я ударила маму.']) assert.equal(assessRisk(t).level, 'urgent', t);
+  for (const t of ['Ударил по мячу.', 'Его ударило током.', 'Сломала ноготь.', 'Прыгну в бассейн.', 'Мама задушила меня в объятиях.',
+    'Внук задушил меня поцелуями.', 'Застрелил брата в контре, хаха', 'Застрелила взглядом начальника']) assert.notEqual(assessRisk(t).level, 'urgent', t);
+  assert.equal(assessRisk('Выпрыгну в окно.').level, 'urgent');
+});
+
+test('14.11 п. 3: после «!», «?», «…» исключение действует только перед заглавной буквой, цифрой или концом текста', () => {
+  for (const t of ['Отравлюсь шавермой! а потом таблетками', 'Отравлюсь шавермой… а потом таблетками', 'Отравлюсь шавермой? а потом таблетками',
+    'Без кофе мне не жить. а дальше и вовсе']) assert.equal(assessRisk(t).level, 'urgent', t);
+  for (const t of ['Отравлюсь шавермой! Утром кофе.', 'Отравлюсь шавермой…', 'Без кофе мне не жить? 2 чашки с утра.', 'Убить готова за кофе! «Вечером» дождь.'])
+    assert.equal(assessRisk(t).level, 'none', t);
+});
+
+test('14.11 п. 4: исправленное сообщение проходит локальный фильтр — в окне доставки ролик отменяется, экран остановки', async () => {
+  const r = deferred();
+  const x = bot({ render: () => r.promise });
+  await x.say(SAFE);
+  const p = x.play();
+  await waitFor(() => x.c.render === 1);
+  await x.say('ок');
+  await x.b.handleUpdate({ edited_message: { chat, text: 'ок. Не хочу жить' } });
+  r.resolve(); await p;
+  assert.equal(x.c.video, 0);
+  assert.ok(STOP(x.sent.at(-1)));
+  // Безопасная правка ничего не отправляет и ролик не трогает.
+  const y = bot();
+  await y.say(SAFE);
+  const n = y.sent.length;
+  await y.b.handleUpdate({ edited_message: { chat, text: 'Утром я пила кофе.' } });
+  assert.equal(y.sent.length, n);
+  await y.play();
+  assert.equal(y.c.video, 1);
+  // Вне окна явная опасность в правке — экран остановки, черновик уничтожен.
+  const z = bot();
+  await z.say(SAFE);
+  await z.b.handleUpdate({ edited_message: { chat, text: 'Вчера отец порезал маму.' } });
+  assert.ok(STOP(z.sent.at(-1)));
+  await z.play();
+  assert.equal(z.c.video, 0);
 });

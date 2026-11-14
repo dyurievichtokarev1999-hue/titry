@@ -45,7 +45,7 @@ async function withApp(opts, fn) {
 }
 
 const isSafety = (r) => r.status === 422 && r.body.kind === 'safety' && typeof r.body.help === 'string' && r.body.help.length > 0;
-const CONCERN_STORY = `${STORY} Убью его, если опоздает.`; // локальный concern (гнев на другого), вымышленный
+const CONCERN_STORY = `${STORY} Хочу его ударить.`; // локальный concern (гнев на другого), вымышленный
 const isTryLater = (r) => r.status === 503 && r.body.unknown === true && typeof r.body.help === 'string' && /112/.test(r.body.help) && r.body.kind !== 'safety';
 
 // ── 1. safety ───────────────────────────────────────────────────────────────
