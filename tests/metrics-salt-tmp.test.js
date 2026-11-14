@@ -71,7 +71,8 @@ test('purgeBotTmp: data/tmp — ссылка или файл — ошибка, �
 test('prepareBot: в журнал очистки — только этап и число, без путей и имён файлов', async () => {
   const lines = [];
   await prepareBot({ env: { METRICS_SALT: SALT }, cleanupTmp: async () => 2, cleanup: async () => 0, ledger: okLedger, log: (l) => lines.push(l) });
-  const rows = lines.map((l) => JSON.parse(l));
+  // Строка о режиме «только локальный фильтр» (нет ключа модели) — отдельный этап model.key, см. safety-consolidated.
+  const rows = lines.map((l) => JSON.parse(l)).filter((r) => r.stage !== 'model.key');
   assert.deepEqual(rows.map(({ stage, removed, level }) => ({ stage, removed, level })), [{ stage: 'tmp.cleanup', removed: 2, level: 'info' }]);
   assert.deepEqual(Object.keys(rows[0]).sort(), ['at', 'level', 'removed', 'stage']);
 });

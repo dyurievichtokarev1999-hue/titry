@@ -14,6 +14,8 @@ import { normStory } from './gate.js';
 export const SCHEMA_VERSION = 1;
 export const KEY_ENV = 'TITRY_BLOCKED_HMAC_KEY';
 export const KEY_VERSION_ENV = 'TITRY_BLOCKED_KEY_VERSION';
+// Технической паузы больше нет (решение 13.11 15:00): записи technical прежних версий файла читаются, чтобы старый
+// файл не ломал старт, но ничего не запрещают, не возвращаются и не пишутся; при следующей записи они удаляются.
 const KINDS = new Set(['safety', 'technical']);
 const REASONS = new Set(['safety', 'check_incomplete_twice']);
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -117,50 +119,37 @@ export function makeLedger({ file, key, keyVersion, ttlMs = null, wallNow = () =
     return run;
   }
 
-  function put({ scope, story, episodeDigest = null, kind, reason, retryNotBeforeAt = null }) {
+  function put({ scope, story, episodeDigest = null, kind, reason }) {
+    if (kind !== 'safety') return Promise.reject(ledgerError()); // пишется только запрет по безопасности
     const now = wallNow();
     const rec = {
       schema_version: SCHEMA_VERSION, key_version: keyVersion,
       scope_digest: scopeDigest(scope), story_digest: storyDigest(story),
       episode_digest: episodeDigest ? hmac('episode', episodeDigest) : null,
       kind, reason, created_at: new Date(now).toISOString(),
-      retry_not_before_at: kind === 'technical' ? retryNotBeforeAt : null,
+      retry_not_before_at: null,
       expires_at: ttlMs === null ? null : new Date(now + ttlMs).toISOString(),
     };
     if (!validRecord(rec)) return Promise.reject(ledgerError()); // неверный вызов — не портить файл
-    return mutate((rs) => {
-      const rest = rs.filter((r) => !same(r, rec));
-      // safety сильнее: при safety technical той же пары не нужен; technical не пишется поверх safety.
-      if (kind === 'safety') return [...rest.filter((r) => !(r.scope_digest === rec.scope_digest && r.story_digest === rec.story_digest && r.kind === 'technical')), rec];
-      if (rs.some((r) => r.kind === 'safety' && r.scope_digest === rec.scope_digest && r.story_digest === rec.story_digest)) return rs;
-      return [...rest, rec];
-    });
-  }
-
-  /** Снять technical (только после полной успешной проверки по действию организатора). safety не трогается. */
-  function clearTechnical(scope, story) {
-    const sd = scopeDigest(scope), st = storyDigest(story);
-    return mutate((rs) => rs.filter((r) => !(r.kind === 'technical' && r.scope_digest === sd && r.story_digest === st)));
+    return mutate((rs) => [...rs.filter((r) => r.kind === 'safety' && !same(r, rec)), rec]);
   }
 
   function lookup(scope, story) {
     if (state !== 'ready') return { failed: true };
     const sd = scopeDigest(scope), st = storyDigest(story), now = wallNow();
     const mine = records.filter((r) => r.scope_digest === sd && r.story_digest === st && live(r, now));
-    if (mine.some((r) => r.kind === 'safety')) return { kind: 'safety' };
-    const t = mine.find((r) => r.kind === 'technical');
-    return t ? { kind: 'technical', retryNotBeforeAt: t.retry_not_before_at } : { kind: null };
+    return mine.some((r) => r.kind === 'safety') ? { kind: 'safety' } : { kind: null };
   }
 
-  /** Виды записей области (Set: safety/technical); null — хранилище неисправно (состояние неизвестно). */
+  /** Виды записей области (Set: safety); null — хранилище неисправно (состояние неизвестно). */
   function scopeKinds(scope) {
     if (state !== 'ready') return null;
     const sd = scopeDigest(scope), now = wallNow();
-    return new Set(records.filter((r) => r.scope_digest === sd && live(r, now)).map((r) => r.kind));
+    return new Set(records.filter((r) => r.scope_digest === sd && live(r, now) && r.kind === 'safety').map((r) => r.kind));
   }
 
   /** Дождаться подтверждения всех начатых записей. false — непрерывность не подтверждена. */
   async function flush() { await chain; return state === 'ready'; }
 
-  return { load, put, clearTechnical, lookup, scopeKinds, flush, healthy: () => state === 'ready', get size() { return records.length; } };
+  return { load, put, lookup, scopeKinds, flush, healthy: () => state === 'ready', get size() { return records.length; } };
 }

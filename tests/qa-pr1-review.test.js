@@ -62,7 +62,7 @@ test('B1: монтажная — модельная проверка на пря
   const renders = [];
   const render = async (ep, opts) => { renders.push(opts); return { seconds: 1 }; };
   const run = async (safetyCheck, fn) => {
-    const server = createApp({ render, dataDir, safetyCheck });
+    const server = createApp({ render, dataDir, safetyCheck, checkRetryMs: 0 });
     await new Promise((r) => server.listen(0, '127.0.0.1', r));
     const post = (p, body) => fetch(`http://127.0.0.1:${server.address().port}${p}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     try { await fn(post); } finally { server.close(); }
@@ -71,10 +71,20 @@ test('B1: монтажная — модельная проверка на пря
   await run(async () => true, async (post) => {
     assert.equal((await post('/api/render', body)).status, 422, 'модель сказала «опасно»');
   });
+  // Решение владельца кода 13.11 15:00, условие 3: «неизвестно» после повтора — при локальном concern ролика нет (503),
+  // при локально чистом рассказе ролик делается.
   await run(async () => { throw new Error('сеть'); }, async (post) => {
-    assert.equal((await post('/api/render', body)).status, 503, 'без проверки ролик не собирается');
+    const concernStory = `${ex.story} Хочу его ударить.`;
+    const r = await post('/api/render', { ...body, story: concernStory });
+    assert.equal(r.status, 503, 'локальный concern + «неизвестно» — ролика нет');
+    assert.equal((await r.json()).unknown, true);
   });
   assert.equal(renders.length, 0);
+  await run(async () => { throw new Error('сеть'); }, async (post) => {
+    assert.equal((await post('/api/render', body)).status, 200, 'локально чисто + «неизвестно» — ролик делается');
+  });
+  assert.equal(renders.length, 1);
+  renders.length = 0;
   await run(async () => false, async (post) => {
     assert.equal((await post('/api/render', body)).status, 200);
   });

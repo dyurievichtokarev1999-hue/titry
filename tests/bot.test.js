@@ -3,8 +3,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { applyEdit, createBot, draftMessage, makeMetrics, parseEdit } from '../server/bot.js';
+import { TEXT, applyEdit, createBot, draftMessage, makeMetrics, parseEdit } from '../server/bot.js';
 import { draftRuleBased } from '../server/draft.js';
+import { helpMessage } from '../server/safety.js';
+
+// Утверждённый владельцем текст экрана остановки — литералом, независимо от проверяемой функции.
+const STOP_LITERAL = 'Для этого рассказа ролика не будет. Если тебе или кому-то рядом сейчас угрожает опасность, звони 112.';
 
 // Есть ли значение id среди значений полей журнала (рекурсивно). Подстроку не ищем:
 // «:42» бывает во времени поля at — из-за этого тест падал по часам (QA, 10.11).
@@ -24,10 +28,14 @@ test('разбор правок', () => {
 });
 
 test('правки применяются и соблюдают лимиты', () => {
-  const { episode } = draftRuleBased('Утром работа. Днём встреча с другом. Вечером ужин. Потом прогулка.', { date: '2026-11-05' });
+  // заготовка без модели строк не предлагает (вариант 1, 12.11): строки пишет человек
+  const { episode } = draftRuleBased('Утром я работала. Днём я встретилась с другом. Вечером мы ужинали. Потом мы гуляли.', { date: '2026-11-05' });
+  assert.equal(episode.rows.length, 0);
+  for (const t of ['+ Утром — работала', '+ Днём — встреча с другом', '+ Вечером — ужинали']) assert.equal(applyEdit(episode, parseEdit(t)), null);
   const n = episode.rows.length;
   assert.equal(applyEdit(episode, { op: 'row', n: 1, role: 'Утро', value: 'работа' }), null);
-  assert.equal(episode.rows[0].source, 'работа', 'отредактированная строка опирается на слова самого человека');
+  // Цитата строки — то, что человек написал в правке целиком (роль и текст): это его собственные слова (решение 3б).
+  assert.equal(episode.rows[0].source, 'Утро работа', 'отредактированная строка опирается на слова самого человека');
   assert.equal(applyEdit(episode, { op: 'delete', n: 99 }), 'Строки 99 нет.');
   assert.equal(applyEdit(episode, { op: 'delete', n: 1 }), null);
   assert.equal(episode.rows.length, n - 1);
@@ -61,16 +69,21 @@ test('сценарий бота: рассказ → правка → ролик 
   const render = async (ep, opts) => { rendered.push(ep); await fs.mkdir(path.dirname(opts.outPath), { recursive: true }); await fs.writeFile(opts.outPath, 'mp4'); return { outPath: opts.outPath, duration: 24, seconds: 1 }; };
   const bot = createBot({ safetyCheck: async () => false, tg, metrics, render, draft: (s, o) => import('../server/draft.js').then((m) => m.makeDraft(s, { ...o, provider: 'manual' })) });
   const chat = { id: 42, type: 'private' };
+  // Слияние с PR 14 (вариант 1, 12.11): заготовка строк не даёт — реплика нехватки с приглашением, черновика с ⚠ нет;
+  // строки человек пишет сам правками, первая правка открывает черновик.
   const story = 'Сегодня я долго правил письмо и отправил его. Вечером позвонил друг. Потом ужин и сериал.';
 
   await bot.handleUpdate({ message: { chat, text: '/start' } });
   await bot.handleUpdate({ message: { chat, text: story } });
+  assert.ok(tg.sent.some((m) => m.text === `${TEXT.insufficient}\n\n${TEXT.insufficientInvite}`));
+  assert.ok(!tg.sent.some((m) => /Похоже на твой день|⚠/.test(m.text)), 'черновика с ⚠ нет');
+  await bot.handleUpdate({ message: { chat, text: '+ Утром — я отправил письмо' } });
   assert.ok(tg.sent.some((m) => /Похоже на твой день/.test(m.text)));
-  await bot.handleUpdate({ message: { chat, text: '1: Письмо — отправлено' } });
+  await bot.handleUpdate({ message: { chat, text: '+ Вечером — я смотрел сериал' } });
   await bot.handleUpdate({ callback_query: { id: 'q1', data: `mood:${playId(tg)}`, message: { chat } } });
   await bot.handleUpdate({ callback_query: { id: 'q2', data: `play:${playId(tg)}`, message: { chat } } });
   assert.equal(rendered.length, 1);
-  assert.equal(rendered[0].rows[0].value, 'отправлено');
+  assert.ok(rendered[0].rows.some((r) => r.value === 'я отправил письмо'));
   // Настроение не названо → quiet (10.11); кнопка плёнки переключает по кругу quiet → warm.
   assert.equal(rendered[0].mood, 'warm');
   assert.ok(tg.sent.some((m) => m.type === 'video'));
@@ -92,7 +105,7 @@ test('бот: срочный риск — без ролика, с экраном
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-test-'));
   const bot = createBot({ safetyCheck: async () => false, tg, metrics: makeMetrics(path.join(dir, 'm.jsonl'), 'test-salt'), render: async () => { throw new Error('не должно вызываться'); }, draft: (s, o) => import('../server/draft.js').then((m) => m.makeDraft(s, { ...o, provider: 'manual' })) });
   await bot.handleUpdate({ message: { chat: { id: 7, type: 'private' }, text: 'Сегодня понял, что не хочу больше жить.' } });
-  assert.ok(tg.sent.some((m) => /Сейчас важнее не титры/.test(m.text)));
+  assert.ok(tg.sent.some((m) => m.text === helpMessage('urgent') && m.text.startsWith(STOP_LITERAL)), 'экран остановки — дословно утверждённый текст');
   assert.ok(!tg.sent.some((m) => /Похоже на твой день/.test(m.text)));
   const before = tg.sent.length;
   await bot.handleUpdate({ message: { chat: { id: 8, type: 'group' }, text: 'Длинная история про день в группе' } });

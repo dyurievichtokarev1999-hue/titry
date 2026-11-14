@@ -47,7 +47,8 @@ test('Угроза не в титрах: черновик модели — ст�
   assert.equal(episode.title, '', 'название из угрозы не берётся');
   assert.ok(dropped.length >= 2);
   // Исходный рассказ для проверки безопасности не урезается: угроза по-прежнему видна фильтру.
-  assert.equal(lv(STORY), 'concern');
+  // КРИТИКА 14.11: «хочу убить мужа» — явная угроза другому, urgent (правило титров при этом то же).
+  assert.equal(lv(STORY), 'urgent');
 });
 
 test('Угроза не в титрах: заготовка без ИИ не берёт предложение с угрозой', () => {
@@ -72,7 +73,8 @@ test('Угроза не в титрах: ручная правка с угроз
     const res = await fetch(`http://127.0.0.1:${server.address().port}/api/render`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ story: STORY, episode: ep }) });
     const body = await res.json();
     assert.equal(res.status, 422);
-    assert.ok(body.validation.errors.some((e) => e.path === 'rows.1'));
+    // С 14.11 рассказ с явной угрозой останавливается раньше проверки строк (422 safety); оба исхода — без ролика.
+    assert.ok(body.kind === 'safety' || body.validation.errors.some((e) => e.path === 'rows.1'));
     assert.equal(renders, 0);
   } finally { server.close(); await fs.rm(dataDir, { recursive: true, force: true }); }
 });

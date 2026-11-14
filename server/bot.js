@@ -5,10 +5,10 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS, episodeToText } from '../engine/episode.js';
-import { makeDraft, modelSafetyCheck, hasClaudeCredentials } from './draft.js';
-import { makeGate } from './gate.js';
-import { helpMessage, assessEpisodeRisk, validateSafeEpisode } from './safety.js';
+import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS, episodeToText, EDIT_SEP, cleanInput, joinEdits } from '../engine/episode.js';
+import { makeDraft, draftRuleBased, modelSafetyCheck, hasClaudeCredentials, pairFromSentence, SAFETY_TIMEOUT_MS } from './draft.js';
+import { makeGate, modelModeAtStart, RETRY_DELAY_MS } from './gate.js';
+import { helpMessage, tryLaterMessage, NOT_HEARD_TEXT, prepareHelp, assessRisk, assessEpisodeRisk, validateSafeEpisode, threatErrors, threatPronounFilter, INSUFFICIENT_TEXT, INSUFFICIENT_INVITE_TEXT, INSUFFICIENT_AFTER_EXCLUSION, INSUFFICIENT_MATERIAL, EDIT_NOT_IN_TITLES_TEXT, editNotInTitlesText, TELEGRAM_TEXT_LIMIT } from './safety.js';
 import { renderEpisode, ROOT } from './render.js';
 import { logError, safeCode } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS, cleanupVoiceOrphans } from './stt.js';
@@ -18,6 +18,18 @@ const MOOD_ORDER = ['warm', 'sad', 'anger', 'quiet'];
 const MUSIC_ORDER = ['warm', 'sad', 'anger', 'quiet', 'none'];
 const SESSION_TTL_MS = 3 * 60 * 60 * 1000;
 const WATERMARK = process.env.BOT_WATERMARK ?? 'сделано в титрах';
+
+// Команды бота (setMyCommands): точное совпадение обрабатывается до разбора текста.
+const KNOWN_COMMANDS = new Set(['start', 'year', 'delete', 'help']);
+// Предел, сколько доставка ролика ждёт проверки сообщений, пришедших во время подготовки (страховка от зависания;
+// у самой проверки свой предел и один повтор). По истечении — как «неизвестно» (условие 3).
+export const HOLD_WAIT_MS = 120 * 1000;
+// Бюджет одной проверки сообщения в окне: вызов модели + пауза + повтор, с запасом (server/draft.js, server/gate.js).
+export const CHECK_BUDGET_MS = 2 * SAFETY_TIMEOUT_MS + RETRY_DELAY_MS + 2000;
+// Короткие ответы во время подготовки, которые модельную проверку не ждут (условие 2). Сравниваются без знаков.
+const TRIVIAL_REPLIES = new Set(['ок', 'окей', 'ok', 'okay', 'ага', 'да', 'угу', 'хорошо', 'ладно', 'жду', 'понял', 'поняла', 'спасибо', 'спс', 'благодарю', 'супер', 'класс', 'круто', 'thanks', 'спасибо большое', 'ок спасибо', 'хорошо спасибо']);
+// Предел ожидания одного вызова Telegram API (кроме длинного опроса и загрузки видео).
+export const TELEGRAM_CALL_MS = 10 * 1000;
 
 export const TEXT = {
   start: [
@@ -36,12 +48,13 @@ export const TEXT = {
   voiceOff: 'Голосовые пока не подключены. Напиши, пожалуйста, текстом.',
   voiceLong: `Голосовое длиннее ${Math.round(MAX_VOICE_SECONDS / 60)} минут. Для одной сцены хватит минуты.`,
   voiceEmpty: 'Не получилось разобрать голосовое. Можно повторить или написать текстом.',
+  editExcluded: EDIT_NOT_IN_TITLES_TEXT, // текст — в server/safety.js; окончательный утверждает редактор
   editHelp: [
     'Как поправить:',
-    '<code>2: вечерний звонок</code> — новый текст строки 2',
-    '<code>2: Друг — вечерний звонок</code> — роль и текст',
+    '<code>2: вечером гуляла в парке</code> — новая строка 2 из твоих слов',
+    '<code>2: Вечером — гуляла в парке</code> — роль и текст',
     '<code>-3</code> — убрать строку 3',
-    '<code>+ Окно — долгий вечер</code> — добавить строку',
+    '<code>+ Ночью — смотрела в окно</code> — добавить строку',
     '<code>название: Письмо, которое ушло</code>',
     '<code>жанр: тихая драма</code>',
     '<code>после: Посуда — до завтра.</code> или <code>после: -</code>',
@@ -57,19 +70,69 @@ export const TEXT = {
   // Исход 2 — ТОЛЬКО вымышленный стенд (TITRY_STAND=fictional; редактор 18:25, решение владельца 17:10).
   // Маркер «[срок не утверждён]» не допускается в сборке для реальных данных (tests/release-guard.test.js).
   keptSafety: 'Служебная запись об остановке по безопасности сохранена по правилу теста. В ней нет текста рассказа. [срок не утверждён]',
-  keptTechnical: 'Служебная запись о технической приостановке сохранена по правилу теста. В ней нет текста рассказа. [срок не утверждён]',
   recordUnknown: 'Проверить состояние служебной записи не получилось. Полное удаление не подтверждено.',
+  more: 'Расскажи чуть подробнее: что было, что запомнилось.',
+  // Модель не ответила и после повтора, в ролике есть локальный concern (условие 3): текст — в server/safety.js.
+  tryLater: () => tryLaterMessage(),
+  // Голосовое во время подготовки ролика не распознано (условие 2): ролик не отменяется. Текст — в server/safety.js.
+  notHeard: NOT_HEARD_TEXT,
   // ИР-02: проверка недоступна — текст редактора повествования (PM-01, 9.11) дословно. Без срока и без карточки помощи.
   checkUnavailable: 'Ролик задерживается: сервис не завершил проверку. Сейчас отправить его не получится. Ждать в чате и отвечать на это сообщение не нужно.',
-  // Техническая приостановка — редактор повествования 14:42, принято владельцем 15:08, дословно.
-  checkPaused: 'Сервис дважды не смог завершить проверку рассказа. Сейчас ролик не создаётся. Ждать в чате и отвечать на это сообщение не нужно.',
   // Черновик текста, на вычитку редактору повествования: честно, без «всё удалено», без обещаний сроков.
   deleteFailed: 'Сессия удалена, а удаление статистики по тебе подтвердить не получилось. Попробуй /delete ещё раз чуть позже.',
   renderFail: 'Не получилось собрать ролик. Попробуй ещё раз чуть позже.',
   draftFail: 'Не получилось собрать черновик. Попробуй ещё раз чуть позже.',
+  // Внутренняя причина insufficient_after_exclusion (редактор повествования), дословно: только эта реплика —
+  // без черновика, ролика, просьбы дописать и кнопок. Показывается только после stop и технических исходов.
+  insufficient: INSUFFICIENT_TEXT, // текст — в server/safety.js
+  insufficientInvite: INSUFFICIENT_INVITE_TEXT, // текст — в server/safety.js; утверждает редактор
 };
 
+export { TELEGRAM_TEXT_LIMIT };
+
+/**
+ * Ответ при нехватке материала: реплика; при concern — одним сообщением «реплика, пустая строка, блок помощи».
+ * Контакты — проверенные при старте (prepareHelp в prepareBot), файл во время работы не перечитывается,
+ * ветки «реплика без помощи» нет. Защитная ветка: если вместе не помещается в лимит Telegram — СНАЧАЛА блок
+ * помощи, ЗАТЕМ реплика, в журнал — код message_too_long (без текста). Сам блок длиннее лимита в рабочем пути
+ * не бывает: это ошибка проверки при старте. Параметр help — только для тестов, он эту проверку обходит.
+ */
+export function insufficientMessages(concern, { help, log = logError } = {}) {
+  // Реплика нехватки и сразу приглашение написать строки правкой (решение владельца 12.11 11:05, вариант 1).
+  const reply = `${TEXT.insufficient}\n\n${TEXT.insufficientInvite}`;
+  if (!concern) return [reply];
+  const block = help ? helpMessage('concern', help) : helpMessage('concern');
+  const one = `${reply}\n\n${block}`;
+  if (one.length <= TELEGRAM_TEXT_LIMIT) return [one];
+  log('insufficient', { code: 'message_too_long' });
+  return [block, reply];
+}
+
+/**
+ * Ответ, когда строку из правки не берём в титры. При concern, внесённом правкой, — одним сообщением «реплика, пустая
+ * строка, блок помощи concern» (как у нехватки в PR 11); если вместе не помещается — сначала блок помощи.
+ */
+export function editExcludedMessages(concern, { help, log = logError, path = 'rows.0' } = {}) {
+  const text = editNotInTitlesText(path);
+  if (!concern) return [text];
+  const block = help ? helpMessage('concern', help) : helpMessage('concern');
+  const one = `${text}\n\n${block}`;
+  if (one.length <= TELEGRAM_TEXT_LIMIT) return [one];
+  log('edit', { code: 'message_too_long' });
+  return [block, text];
+}
+
 // ── Чистые функции: разбор правок ────────────────────────────────────────────
+
+/** Поле эпизода, которое меняет правка (после applyEdit): путь как в ошибках проверки. */
+export function editedPath(cmd, ep) {
+  switch (cmd.op) {
+    case 'add': return `rows.${ep.rows.length - 1}`;
+    case 'row': return `rows.${cmd.n - 1}`;
+    case 'title': case 'genre': case 'lead': case 'post': return cmd.op;
+    default: return null;
+  }
+}
 
 /** Разобрать команду правки. Возвращает объект команды или null. */
 export function parseEdit(text) {
@@ -86,6 +149,13 @@ export function parseEdit(text) {
   return null;
 }
 
+/** Строка из правки человека: цитата — его роль и текст в том порядке, как editCorpus добавляет их в опору. */
+function ownRow(role, value) {
+  // Без обрезки: длинную роль или текст покажет проверка черновика понятной ошибкой длины.
+  // Правка человека — его собственные слова (решение 3б, 12.11): опора строки — сам текст правки.
+  return { role, value, source: `${role} ${value}`, own: true };
+}
+
 /** Применить правку к эпизоду. Номера строк — как в сообщении с черновиком (без фиксированных строк). */
 export function applyEdit(ep, cmd) {
   const rows = ep.rows;
@@ -97,18 +167,31 @@ export function applyEdit(ep, cmd) {
       rows.splice(idx, 1); return null;
     case 'add':
       if (rows.length >= LIMITS.rowsMax) return `Больше ${LIMITS.rowsMax} строк не поместится. Сначала убери одну.`;
-      rows.push({ role: cmd.role.slice(0, LIMITS.role), value: cmd.value.slice(0, LIMITS.value), source: cmd.value.slice(0, LIMITS.value) }); return null;
+      // Слова роли и значения — из цитаты этой же строки: цитата — то, что человек написал в правке (роль и текст).
+      rows.push(ownRow(cmd.role, cmd.value)); return null;
     case 'row':
       if (idx < 0 || idx >= rows.length) return `Строки ${cmd.n} нет.`;
-      if (cmd.role) rows[idx].role = cmd.role.slice(0, LIMITS.role);
-      rows[idx].value = cmd.value.slice(0, LIMITS.value);
-      rows[idx].source = rows[idx].value; // слова самого человека; бот добавляет правку в опору (editCorpus)
+      if (cmd.role) { rows[idx] = ownRow(cmd.role, cmd.value); return null; }
+      // Только новый текст: роль и значение берутся из слов этого же текста (правило 11.11 — без чужих слов).
+      // Если пару собрать не из чего, прежняя роль остаётся, проверка черновика покажет ошибку, ролик не соберётся;
+      // правку не отклоняем, чтобы её текст прошёл обычную проверку безопасности.
+      {
+        const pair = pairFromSentence(cmd.value, new Set(), cmd.value);
+        if (pair) { rows[idx] = { ...pair.row, own: true }; return null; }
+      }
+      // пару собрать не из чего (одно слово, сон, «почти»…): роли из этого текста нет — проверка покажет «нет роли»,
+      // а не «слово не из рассказа» про прежнюю роль, которой человек не писал
+      rows[idx].role = '';
+      rows[idx].value = cmd.value;
+      rows[idx].source = cmd.value;
+      rows[idx].own = true;
       return null;
     case 'title': if (!cmd.value) return 'Название не может быть пустым.'; ep.title = cmd.value.slice(0, LIMITS.title); return null;
     case 'genre': if (!cmd.value) return 'Жанр не может быть пустым.'; ep.genre = cmd.value.slice(0, LIMITS.genre); return null;
     case 'lead': ep.lead = (cmd.value || 'ты').slice(0, 24); return null;
     case 'post':
-      ep.post = cmd.value === '-' || !cmd.value ? { text: '', source: '' } : { text: cmd.value.slice(0, LIMITS.post), source: cmd.value.slice(0, LIMITS.post) };
+      ep.post = cmd.value === '-' || !cmd.value ? { text: '', source: '' } : { text: cmd.value, source: cmd.value, own: true };
+      // без обрезки, как в ownRow: опора — полный текст правки; длинную сцену покажет понятная ошибка длины
       return null;
     default: return 'Не понял правку.';
   }
@@ -122,6 +205,26 @@ export function editCorpus(cmd) {
 }
 
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+/** Ошибка проверки словами для человека: без «цитаты» и служебных терминов. */
+export function personMessage(e) {
+  if (!e) return '';
+  // строка без роли (правка «N: текст», из которого пару не собрать): подсказываем, как написать
+  const noRole = /^rows\.(\d+)\.role$/.exec(e.path || '');
+  if (noRole && /нет роли/.test(e.msg || '')) return `${e.msg} Напиши её так: «${+noRole[1] + 1}: роль — текст».`;
+  if (!String(e.kind || '').startsWith('words:')) return e.msg;
+  const n = e.row + 1;
+  const redo = `Напиши её заново своими словами: «${n}: роль — текст».`;
+  switch (e.kind) {
+    case 'words:long': return `Строка ${n}: роль — одно-два слова. ${redo}`;
+    case 'words:bound': return `Строка ${n}: в рассказе слово «${e.words[0]}» стоит с другими словами («не», «бы», «если», «сказала»…), а без них смысл другой. ${redo}`;
+    case 'words:cut': return `Строка ${n}: в рассказе перед этими словами стоит «не» или похожее слово, без него смысл другой. ${redo}`;
+    case 'words:ambiguous': return `Строка ${n}: слово «${e.words[0]}» в рассказе встречается и с «не», и без него. ${redo}`;
+    case 'words:empty': return `Строка ${n}: в ней не хватает слов. ${redo}`;
+    case 'words:missing': return `Строка ${n}: слово «${e.words[0]}» не из твоего рассказа. ${redo}`;
+    default: return `Строка ${n}: эти слова не складываются из твоего рассказа. ${redo}`;
+  }
+}
 
 /** Черновик в виде сообщения Telegram (HTML). */
 export function draftMessage(ep, validation) {
@@ -138,7 +241,7 @@ export function draftMessage(ep, validation) {
   if (ep.post && ep.post.text) lines.push('', `После титров: ${esc(ep.post.text)}`);
   lines.push('', `Плёнка: ${MOODS[ep.mood].film} · музыка: ${TRACKS[ep.music].file ? TRACKS[ep.music].title : 'тишина'}`);
   const problems = validation ? validation.errors : [];
-  if (problems.length) lines.push('', ...problems.map((e) => `⚠ ${esc(e.msg)}`));
+  if (problems.length) lines.push('', ...[...new Set(problems.map(personMessage))].map((m) => `⚠ ${esc(m)}`));
   lines.push('', 'Похоже на твой день? Любую строку можно поправить.');
   return lines.join('\n');
 }
@@ -304,15 +407,21 @@ export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), sal
   };
 }
 
+// Подпись — новая строка после расшифровки, с заглавной буквы: перенос — граница предложения (п. 4 КРИТИКИ PR 16).
+const withCaption = (story, caption) => (caption ? `${story}\n${caption.charAt(0).toUpperCase()}${caption.slice(1)}` : story);
+
 // ── Логика бота (транспорт подменяется в тестах) ─────────────────────────────
 
 export function createBot({
   tg, metrics = makeMetrics(), draft = makeDraft, render = renderEpisode, transcribe = transcribeOgg, now = () => new Date(),
-  // Отдельная проверка перед рендером (контракт владельца 10.11 12:05 / 13:05): true — опасно, false — разрешение,
-  // исключение — проверка не завершена. Нет ключа — проверка недоступна, ролик не собирается.
-  safetyCheck, hasKey = safetyCheck ? () => true : hasClaudeCredentials, monoNow, wallNow,
+  // Модельная проверка перед рендером (решение владельца кода 13.11 15:00): true — опасно, false — безопасно,
+  // исключение — «неизвестно» (один повтор через checkRetryMs). Нет ключа — режим «только локальный фильтр».
+  safetyCheck, hasKey = safetyCheck ? () => true : hasClaudeCredentials,
   ledger = null, // хранилище запретов (server/ledger.js); область — участник, производная HMAC на диске
-  gate = makeGate({ check: safetyCheck || ((text) => modelSafetyCheck(text)), hasKey, monoNow, wallNow, ledger }),
+  checkRetryMs = RETRY_DELAY_MS,
+  gate = makeGate({ check: safetyCheck || ((text) => modelSafetyCheck(text)), hasKey, ledger, retryDelayMs: checkRetryMs }),
+  checkBudgetMs = CHECK_BUDGET_MS, // бюджет ожидания одной проверки сообщения в окне (вызов + повтор)
+  holdWaitMs = HOLD_WAIT_MS, // жёсткий общий предел ожидания проверок сообщений, пришедших во время подготовки ролика
 } = {}) {
   const sessions = new Map();
   // Незавершённые черновики и отдельные проверки участника: их результат может создать запрет уже после /delete.
@@ -332,7 +441,7 @@ export function createBot({
   const session = (chatId) => {
     let s = sessions.get(chatId);
     // scope — область запретов шлюза: участник (чат), а не сессия. /delete удаляет сессию и статистику,
-    // но не снимает ни safety, ни technical (решение владельца 15:08 / 16:00). На диск — только HMAC области.
+    // но не снимает запрет safety (решение владельца 15:08 / 16:00). На диск — только HMAC области.
     if (!s) { s = { stage: 'idle', period: 'day', scope: `chat:${chatId}` }; sessions.set(chatId, s); }
     s.touched = Date.now();
     return s;
@@ -349,18 +458,24 @@ export function createBot({
   }
 
   // Остановка по безопасности: прежний черновик уничтожается, рассказ запоминается как запрещённый.
-  async function stopForSafety(chatId, s, level, extra = {}) {
+  // Состояние остановки применяется синхронно, до любых отправок: сбой отправки не отменяет остановку.
+  function applyStop(s) {
     s.episode = null;
+    s.skeleton = null;
     s.verdict = 'blocked';
-    s.draftId = (s.draftId || 0) + 1; // кнопки всех прежних черновиков перестают работать
+    s.draftId = (s.draftId || 0) + 1; // кнопки всех прежних черновиков перестают работать; ролик не уходит
     s.stage = 'help';
     if (s.story) {
       s.blocked = s.blocked || new Set();
       s.blocked.add(storyKey(s.originalStory || s.story));
       gate.markSafety(s.scope, s.originalStory || s.story);
     }
-    await metrics.log(chatId, 'safety', { level, ...extra });
-    await tg.send(chatId, helpMessage('urgent'));
+  }
+  async function stopForSafety(chatId, s, level, extra = {}) {
+    applyStop(s);
+    // Экран остановки — до записи в журнал: сбой или зависание журнала не задерживает помощь.
+    try { await tg.send(chatId, helpMessage('urgent')); }
+    finally { try { await metrics.log(chatId, 'safety', { level, ...extra }); } catch (e) { logError('metrics', e); } }
   }
 
   // Сессия ещё та же: не удалена через /delete и не заменена новой после истечения срока.
@@ -370,6 +485,7 @@ export function createBot({
   async function handleStory(chatId, s, story, source) {
     // Новый рассказ сразу отменяет прежний черновик: его кнопки больше ничего не запускают.
     s.episode = null;
+    s.skeleton = null;
     s.verdict = null;
     s.draftId = (s.draftId || 0) + 1;
     const gen = s.draftId; // поколение: результат ожидания применяется, только если оно всё ещё текущее
@@ -381,10 +497,10 @@ export function createBot({
       return stopForSafety(chatId, s, 'urgent', { at: 'repeat' });
     }
     if (prior.kind) {
-      // technical или хранилище недоступно: черновик не делается, без карточки помощи.
-      logError('check', { code: prior.kind === 'technical' ? 'check_incomplete_twice' : prior.code });
+      // Хранилище запретов недоступно: черновик не делается, без карточки помощи.
+      logError('check', { code: prior.code });
       s.stage = 'idle';
-      return tg.send(chatId, prior.kind === 'technical' ? TEXT.checkPaused : TEXT.checkUnavailable);
+      return tg.send(chatId, TEXT.checkUnavailable);
     }
     const current = () => alive(chatId, s) && s.draftId === gen && !isBlocked(s, story) && gate.status(s.scope, story).kind !== 'safety';
     await tg.action(chatId, 'typing');
@@ -401,7 +517,7 @@ export function createBot({
     }
     // Опасный черновик, пришедший после /delete или смены сессии: запрет участника записывается всё равно
     // (область — чат, а не сессия), но в чат ничего не отправляется.
-    if (r && !r.unavailable && !r.episode) gate.markSafety(`chat:${chatId}`, story);
+    if (r && !r.unavailable && !r.insufficient && !r.episode) gate.markSafety(`chat:${chatId}`, story);
     if (!alive(chatId, s)) return; // удалённая сессия не оживает из отложенного ответа
     if (r.unavailable) {
       // ИР-02: проверка не завершена — техническое состояние, не остановка: рассказ не запоминается
@@ -411,6 +527,7 @@ export function createBot({
       s.stage = 'idle';
       return tg.send(chatId, TEXT.checkUnavailable);
     }
+    if (r.insufficient) return replyInsufficient(chatId, s, story, gen, current, r.risk && r.risk.level === 'concern', r.code);
     if (!r.episode) {
       // Остановка важнее всего, даже если ответ устарел: рассказ запоминается как запрещённый.
       if (s.draftId === gen) return stopForSafety(chatId, s, r.risk.level, { byModel: r.risk.byModel });
@@ -423,7 +540,13 @@ export function createBot({
       }
       return;
     }
-    if (!current()) return; // устаревший «можно» молча отбрасывается
+    if (!current()) {
+      // Устаревший «можно» молча отбрасывается. Но если тот же рассказ этой сессии тем временем остановлен
+      // (например, проверкой прежней сессии до /delete), человек получает карточку помощи, а не тишину.
+      if (alive(chatId, s) && s.verdict !== 'blocked' && s.originalStory && storyKey(s.originalStory) === storyKey(story)
+        && (isBlocked(s, story) || gate.status(s.scope, story).kind === 'safety')) return stopForSafety(chatId, s, 'urgent', { at: 'late' });
+      return;
+    }
     await metrics.log(chatId, 'story', { source, period: s.period, chars: Math.round(story.length / 50) * 50 });
     if (!current()) return;
     if (r.risk.level === 'concern') await tg.send(chatId, helpMessage('concern'));
@@ -437,10 +560,49 @@ export function createBot({
     await showDraft(chatId, s);
   }
 
+  // Нехватка материала после исключения опасных частей (insufficient_after_exclusion). Порядок исходов:
+  // stop (safety) → хранилище недоступно → нехватка.
+  // В метрики — только код события, без текста рассказа и номеров предложений.
+  // Решение владельца 1 (PR 11): если исключался фрагмент уровня concern, сразу за репликой — тот же блок помощи,
+  // что у прежней карточки concern (helpMessage('concern')), без переходной фразы, черновика и кнопок.
+  // Признак concern — уровень всего рассказа, как у прежней карточки. Решение владельца 11.11 09:05: ОДНО сообщение
+  // «реплика, пустая строка, блок помощи» — между двумя сообщениями блок помощи мог бы потеряться. Длина
+  // (реплика + helpMessage('concern')) ограничена тестом (≤ 3500) и проверяется при отправке (insufficientMessages):
+  // сверх 4096 — сначала блок помощи, затем реплика, код message_too_long в журнале; сейчас 256 знаков.
+  // Решение владельца 11.11 12:05, п. 4: обычная нехватка у заготовки (insufficient_material) идёт тем же путём
+  // и с той же репликой; в метрику — только код причины из закрытого списка.
+  async function replyInsufficient(chatId, s, story, gen, current, concern, code = INSUFFICIENT_AFTER_EXCLUSION) {
+    // Тот же рассказ сейчас в работе и ещё не остановлен: поздняя остановка (как в ветке !r.episode, at: 'late').
+    // Без этого два подряд одинаковых рассказа, у первого из которых проверка вернула true, оставляли человека
+    // без карточки помощи: первый ответ устарел, у второго current() уже false из-за safety — оба молча выходили.
+    const sameStoryInWork = () => alive(chatId, s) && s.verdict !== 'blocked' && !!s.originalStory && storyKey(s.originalStory) === storyKey(story);
+    const stoppedNow = () => isBlocked(s, story) || gate.status(s.scope, story).kind === 'safety';
+    if (!current()) {
+      if (stoppedNow() && sameStoryInWork()) return stopForSafety(chatId, s, 'urgent', { at: 'late' });
+      return;
+    }
+    // Модельной проверки здесь нет (решение владельца кода 13.11 15:00): модельная проверка одна — перед рендером, на
+    // всём, что попадёт в ролик. Рассказ уже прошёл локальный фильтр в черновике; запрет и хранилище — по состоянию.
+    const st = gate.status(s.scope, story);
+    if (st.kind) { logError('check', { code: st.code }); s.stage = 'idle'; return tg.send(chatId, TEXT.checkUnavailable); }
+    s.stage = 'idle'; // заготовка появится только перед самой отправкой реплики (восьмой разбор)
+    await metrics.log(chatId, code === INSUFFICIENT_MATERIAL ? INSUFFICIENT_MATERIAL : INSUFFICIENT_AFTER_EXCLUSION);
+    if (!current()) {
+      // Пока писалась метрика, тот же рассказ остановлен (например, проверкой прежней сессии): карточка помощи, не тишина.
+      if (stoppedNow() && sameStoryInWork()) return stopForSafety(chatId, s, 'urgent', { at: 'late' });
+      return;
+    }
+    // Черновика нет, но человек может написать строки сам (вариант 1): правки ложатся на пустую заготовку эпизода
+    // (название, жанр, плёнка — из draftRuleBased, строк нет). Кнопок нет, пока нет черновика.
+    s.stage = 'compose';
+    s.skeleton = draftRuleBased(story, { date: todayIso(now()), period: s.period }).episode;
+    for (const text of insufficientMessages(concern)) await tg.send(chatId, text);
+  }
+
   async function doRender(chatId, s) {
     // Правки после черновика тоже проверяются: опасная строка не попадёт в ролик.
     if (s.verdict !== 'ok' || !s.episode) return tg.send(chatId, TEXT.noDraft);
-    const risk = assessEpisodeRisk(s.story, s.episode);
+    const risk = assessEpisodeRisk(joinEdits(s.story), s.episode); // правки — продолжение рассказа для проверки безопасности
     if (risk.level === 'urgent') return stopForSafety(chatId, s, 'urgent', { at: 'render' });
     const v = validateSafeEpisode(s.episode, s.story);
     if (!v.ok) { await showDraft(chatId, s); return; }
@@ -451,20 +613,46 @@ export function createBot({
     if (waiting >= 1 + MAX_RENDER_WAITING) return tg.send(chatId, TEXT.busy); // состояние сессии не меняется
     const ep = structuredClone(s.episode);
     const story = s.story;
-    // Отдельная проверка именно этой версии (рассказ + строки + пост + название/жанр) перед очередью.
+    // Модельная проверка перед рендером — одна, на всём, что попадёт в ролик (условие 1): рассказ со всеми правками
+    // (расшифровки, подписи, «/текст» уже в нём) и итоговые строки титров. Рендер стартует только после её результата.
     s.stage = 'rendering';
-    const g = await track(chatId, gate.verify(s.scope, original, ep, `${story}\n${episodeToText(ep)}`));
+    // Доставка идёт: сообщения до её конца проверяются первыми (duringRender), даже если /start сменил стадию.
+    // Номер доставки: отмена (s.veto) действует на все доставки с номером не больше своего, начатые до неё;
+    // новое «Смотреть титры» после отмены — новая доставка, отмена на неё не переносится.
+    const myDelivery = s.deliveries = (s.deliveries || 0) + 1;
+    const cancelled = () => (s.veto || 0) >= myDelivery;
+    s.delivering = (s.delivering || 0) + 1;
+    try {
+    const text = `${joinEdits(story)}\n${episodeToText(ep)}`;
+    const g = await track(chatId, gate.verify(s.scope, original, ep, text));
     if (!alive(chatId, s) || s.draftId !== gen) return; // удалённая или заменённая сессия не оживает
-    if (g.kind === 'safety') return stopForSafety(chatId, s, 'urgent', { at: 'check', byModel: true });
-    if (!g.ok) {
+    if (g.kind === 'safety') return stopForSafety(chatId, s, 'urgent', { at: 'check', byModel: !!g.byModel });
+    if (g.unknown) {
+      // «Неизвестно» и после повтора (условие 3): локально чисто — ролик делается; есть concern — ролика нет.
+      logError('check', { code: g.code });
+      // Отказ проверяющей модели (refusal) — как локальный concern.
+      if (g.refusal || assessEpisodeRisk(joinEdits(story), ep).level !== 'none') {
+        s.stage = 'draft';
+        return tg.send(chatId, TEXT.tryLater());
+      }
+    } else if (!g.ok) {
+      // Хранилище запретов недоступно: выдачи нет.
       logError('check', { code: g.code });
       s.stage = 'draft';
-      return tg.send(chatId, g.kind === 'technical' ? TEXT.checkPaused : TEXT.checkUnavailable);
+      return tg.send(chatId, TEXT.checkUnavailable);
     }
     if (!current()) { if (alive(chatId, s) && s.stage === 'rendering') s.stage = s.verdict === 'blocked' ? 'help' : 'draft'; return; }
+    // Сообщение во время проверки уже отменило эту доставку (ответ отправлен) — рендер не запускается.
+    // Начало окна «после проверки — до отправки»: от него считается жёсткий общий предел ожидания доставки.
+    // Время в очереди и рендера в предел не входит (окно ждёт не дольше holdWaitMs сверх подготовки ролика).
+    const windowStart = Date.now();
+    let renderMs = 0;
+    if (cancelled()) { s.stage = 'draft'; return; }
     if (waiting >= 1 + MAX_RENDER_WAITING) { s.stage = 'draft'; return tg.send(chatId, TEXT.busy); }
     const ahead = waiting;
     waiting++;
+    let released = false;
+    const release = () => { if (!released) { released = true; waiting--; } }; // место в очереди — до ожидания проверок
     const out = path.join(botTmpDir(), `${metrics.hash(chatId)}-${Date.now()}.mp4`);
     const STALE = Symbol('stale');
     let job;
@@ -479,9 +667,27 @@ export function createBot({
         return render(ep, { story, outPath: out, preset: process.env.BOT_PRESET || 'standard', watermark: WATERMARK || false });
       });
       queue = job.catch(() => {});
+      const renderFrom = Date.now();
       const r = await job;
+      renderMs = Date.now() - renderFrom;
       // После рендера: если черновик остановлен или сессия удалена, видео не отправляется (файл удалится ниже).
       if (r === STALE || !current()) return;
+      // Доставка ждёт модельной проверки сообщений, пришедших в окно «после проверки — до отправки» (условие 2).
+      release();
+      const pending = await waitHolds(s, windowStart + renderMs + holdWaitMs);
+      if (pending.length) {
+        // Предел ожидания истёк — как «неизвестно» (условие 3): у ждущих сообщений есть concern — ролика нет.
+        logError('check', { code: 'timeout' });
+        if (pending.includes('concern')) {
+          s.deliveryEpoch = (s.deliveryEpoch || 0) + 1;
+          s.veto = s.deliveries;
+          if (current()) { s.stage = 'draft'; await sendSafe(chatId, TEXT.tryLater()); }
+          return;
+        }
+      }
+      // Сообщение окна с concern, по которому модель не ответила, отменило ролик (условие 3): ответ уже отправлен.
+      if (cancelled()) { if (current()) s.stage = 'draft'; return; }
+      if (!current()) return;
       await tg.sendVideo(chatId, r.outPath, { caption: 'Конец сцены.', width: 720, height: 1280, duration: Math.round(r.duration), reply_markup: FEEDBACK_KB });
       // /delete во время отправки: после metrics.forget новая запись о человеке не появляется.
       if (!alive(chatId, s)) return;
@@ -494,23 +700,132 @@ export function createBot({
         await tg.send(chatId, TEXT.renderFail);
       }
     } finally {
-      waiting--;
+      release();
       await fs.rm(out, { force: true });
     }
+    } finally { s.delivering--; }
+  }
+
+  // Сообщение, пришедшее во время подготовки ролика: окно «после проверки — до отправки» (решение владельца кода
+  // 13.11 15:00, условие 2). Текст сообщения не пишется в журнал и метрики.
+  //  - локальный фильтр всегда: urgent → ролик отменяется, экран остановки;
+  //  - текст (не эмодзи, не команда, не короткое «ок/спасибо») → отправка ролика ждёт одной модельной проверки
+  //    этого сообщения до применения её результата: опасно → отмена и экран остановки; «неизвестно» и после повтора →
+  //    при локальном concern ролика нет («не получилось» и контакты), при локально чистом — ролик уходит;
+  //  - concern без опасности по модели → блок помощи, ролик уходит (он сделан из проверенного рассказа).
+  // Удержание: Map промис → локальный уровень сообщения (по нему решается истечение предела ожидания).
+  // Бюджет ожидания привязан к зарегистрированной проверке (КРИТИКА PR 16, п. 3): один вызов + один повтор
+  // (checkBudgetMs от регистрации). Жёсткий общий предел — holdWaitMs от начала окна, время очереди и рендера не считается
+  // (windowStart + renderMs + holdWaitMs; отступление от буквы решения — в docs/DECISIONS.md): позднее сообщение продлевает
+  // ожидание в пределах своего бюджета, но не дальше этого предела.
+  // budget: Infinity — удержание на время распознавания голоса: его ограничивает только жёсткий предел, бюджет проверки
+  // начинается с регистрации самой проверки (duringRender).
+  const holdDelivery = (s, p, level = 'none', budget = checkBudgetMs) => {
+    s.holds = s.holds || new Map();
+    s.holds.set(p, { level, deadline: Date.now() + budget });
+    p.finally(() => s.holds.delete(p)).catch(() => {});
+  };
+  // [] — все проверки применены; иначе бюджеты или жёсткий предел исчерпаны — уровни ещё не применённых сообщений
+  // (незавершённая проверка = «неизвестно»).
+  const waitHolds = async (s, hardDeadline) => {
+    for (;;) {
+      const open = [...(s.holds || new Map()).entries()];
+      if (!open.length) return [];
+      const now = Date.now();
+      const live = open.filter(([, h]) => h.deadline > now).map(([, h]) => h.deadline);
+      const until = Math.min(hardDeadline, live.length ? Math.max(...live) : now);
+      if (now >= until) return open.map(([, h]) => h.level);
+      let timer;
+      const tick = new Promise((r) => { timer = setTimeout(r, until - now); });
+      try { await Promise.race([Promise.allSettled(open.map(([p]) => p)), tick]); } finally { clearTimeout(timer); }
+    }
+  };
+  // Отправка, сбой которой не влияет на безопасность: в журнал — только код.
+  const sendSafe = async (chatId, text, extra) => { try { await tg.send(chatId, text, extra); } catch (e) { logError('send', e); } };
+  // Эмодзи, знаки, короткое «ок / спасибо»: модельную проверку не ждут (локальный фильтр всё равно проходят).
+  const trivial = (body) => {
+    const t = body.toLowerCase().replace(/ё/g, 'е').replace(/[^a-zа-я0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+    return !t || TRIVIAL_REPLIES.has(t);
+  };
+
+  // Удержание снимается только после ПРИМЕНЕНИЯ результата (как в PR 15): проверка → синхронное применение
+  // (остановка / отмена ролика) → готово. Промис никогда не отклоняется.
+  function decide(chatId, s, body, level) {
+    return (async () => {
+      let r;
+      if (level === 'urgent') r = { kind: 'urgent' };
+      else {
+        try {
+          const g = await track(chatId, gate.verify(s.scope, body, null, body));
+          if (g.kind === 'safety') r = { kind: 'urgent', byModel: !!g.byModel };
+          else if (g.ok) r = { kind: level };
+          else r = { kind: level === 'concern' || g.refusal ? 'unknown' : 'none', code: g.code }; // условие 3; отказ — как concern
+        } catch { r = { kind: level === 'concern' ? 'unknown' : 'none', code: 'error' }; }
+      }
+      if (r.kind === 'urgent') { s.story = body; s.originalStory = body; applyStop(s); } // запрет — на это сообщение
+      else if (r.kind === 'unknown') {
+        // Ролика нет: отменяются все идущие доставки. fresh — отмена новая (иначе «не получилось» уже отправлено).
+        r.fresh = !!s.delivering && (s.veto || 0) < (s.deliveries || 0); // ролик уже ушёл — «не получилось» не шлём
+        s.veto = s.deliveries || 0;
+      }
+      return r;
+    })();
+  }
+
+  // echo — эхо расшифровки (только при безопасном исходе, после проверки).
+  async function duringRender(chatId, s, text, { echo } = {}) {
+    let body = String(text || '').trim();
+    if (body.startsWith('/')) {
+      const m = /^\/([A-Za-z]+)(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(body);
+      const known = m && KNOWN_COMMANDS.has(m[1].toLowerCase());
+      body = known ? (m[2] || '').trim() : body.replace(/^\/+/, '').trim();
+    }
+    const level = body ? assessRisk(body).level : 'none';
+    if (level === 'none' && trivial(body)) return sendSafe(chatId, TEXT.rendering);
+    const epoch = s.deliveryEpoch || 0;
+    const hold = decide(chatId, s, body, level);
+    holdDelivery(s, hold, level); // синхронно, до первого await
+    const r = await hold;
+    if (!alive(chatId, s)) return; // /delete во время проверки: ничего не отвечаем (запрет, если был, остаётся)
+    const logSafety = (extra) => Promise.resolve().then(() => metrics.log(chatId, 'safety', extra)).catch((e) => logError('metrics', e));
+    if (r.kind === 'urgent') {
+      // Экран остановки — первым и ни от чего не зависит: эха нет (повторять опасную фразу незачем), метрики — после.
+      await sendSafe(chatId, helpMessage('urgent'));
+      return logSafety({ level: 'urgent', at: 'rendering', byModel: !!r.byModel });
+    }
+    if (r.code) logError('check', { code: r.code });
+    if (r.kind === 'unknown') {
+      if (!r.fresh) return; // доставка уже отменена (предел ожидания или другое сообщение): ответ уже отправлен
+      if (s.delivering) s.stage = 'draft';
+      return sendSafe(chatId, TEXT.tryLater());
+    }
+    if (r.kind === 'concern') {
+      // Доставка уже отменена с «не получилось» (предел ожидания): второго ответа нет.
+      if ((s.veto || 0) >= (s.deliveries || 0) && (s.deliveries || 0) > 0) return logSafety({ level: 'concern', at: 'rendering' });
+      await sendSafe(chatId, helpMessage('concern'));
+      return logSafety({ level: 'concern', at: 'rendering' });
+    }
+    // «Собираю ролик» (и эхо) — только если ролик ещё может уйти: противоречивых обещаний нет.
+    const stillDelivering = () => s.delivering && (s.deliveryEpoch || 0) === epoch && (s.veto || 0) < (s.deliveries || 0) && s.verdict !== 'blocked';
+    if (!stillDelivering()) return;
+    if (echo) await sendSafe(chatId, echo); // эхо расшифровки — только при безопасном исходе и необязательно
+    if (stillDelivering()) return sendSafe(chatId, TEXT.rendering);
   }
 
   async function onMessage(msg) {
     const chatId = msg.chat.id;
     if (msg.chat.type !== 'private') return; // только личные чаты: истории не для групп
     const s = session(chatId);
-    const text = (msg.text || '').trim();
+    // Подпись к фото, видео, файлу — такой же текст, как сообщение (условие 1: подписи попадают в ролик и проверяются).
+    // Подпись к голосовому разбирается вместе с расшифровкой ниже. Разделитель правок не может прийти от человека.
+    const text = cleanInput(msg.text || (msg.voice ? '' : msg.caption) || '').trim();
 
     if (text === '/start') { s.stage = 'idle'; s.period = 'day'; await metrics.log(chatId, 'start'); return tg.send(chatId, TEXT.start); }
     if (text === '/year') { s.stage = 'idle'; s.period = 'year'; await metrics.log(chatId, 'year'); return tg.send(chatId, TEXT.year); }
     if (text === '/delete') {
       sessions.delete(chatId);
       // Честный ответ (редактор 16:24): «удалены» — только если удаление сессии и статистики подтверждено.
-      // Запреты safety/technical по /delete не снимаются; если они есть, полное удаление не подтверждается.
+      // Запрет safety по /delete не снимается; если они есть, полное удаление не подтверждается.
       let forgot = true;
       try { await metrics.forget(chatId); } catch { forgot = false; }
       const kinds = gate.recordsFor(`chat:${chatId}`);
@@ -519,7 +834,6 @@ export function createBot({
       else {
         const fictional = process.env.TITRY_STAND === 'fictional';
         if (fictional && kinds.has('safety')) lines.push(TEXT.keptSafety);
-        if (fictional && kinds.has('technical')) lines.push(TEXT.keptTechnical);
         // Не вымышленный стенд (срок не утверждён) или черновик/проверка ещё идут и могут поставить запрет.
         if ((kinds.size && !fictional) || inFlight.has(chatId)) lines.push(TEXT.deleteKept);
       }
@@ -527,37 +841,150 @@ export function createBot({
     }
     if (text === '/help') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });
 
-    if (s.stage === 'rendering') return tg.send(chatId, TEXT.rendering);
-
     if (msg.voice) {
-      if (!sttAvailable() && transcribe === transcribeOgg) return tg.send(chatId, TEXT.voiceOff);
-      if (msg.voice.duration > MAX_VOICE_SECONDS) return tg.send(chatId, TEXT.voiceLong);
+      const voiceRefused = !sttAvailable() && transcribe === transcribeOgg ? TEXT.voiceOff : msg.voice.duration > MAX_VOICE_SECONDS ? TEXT.voiceLong : null;
+      const caption = typeof msg.caption === 'string' ? cleanInput(msg.caption).trim() : ''; // подпись к голосовому — тоже текст
+      // Подпись проходит локальный фильтр синхронно, ДО распознавания (КРИТИКА PR 16, п. 1): явный сигнал — сразу путь
+      // остановки, без ожидания и без зависимости от распознавания.
+      const captionLevel = caption ? assessRisk(caption).level : 'none';
+      if (s.delivering) {
+        // Голосовое в окне до отправки (условие 2). Не распознано — ролик не отменяется: «не расслышал, напиши текстом»;
+        // подпись проверяется как текст. Распознанное держит доставку с начала распознавания (как в PR 15).
+        if (captionLevel === 'urgent') return duringRender(chatId, s, caption); // ролик отменяется сейчас
+        if (voiceRefused) return caption ? Promise.all([sendSafe(chatId, TEXT.notHeard), duringRender(chatId, s, caption)]) : sendSafe(chatId, TEXT.notHeard);
+        let releaseVoice;
+        // Уровень удержания — уровень подписи: concern подписи держит «неизвестно» до конца проверки (не none).
+        holdDelivery(s, new Promise((r) => { releaseVoice = r; }), captionLevel, Infinity);
+        try {
+          let story = '';
+          try {
+            Promise.resolve().then(() => tg.action(chatId, 'typing')).catch((e) => logError('send', e)); // не ждём
+            story = cleanInput(await transcribe(await tg.fileBuffer(msg.voice.file_id), { duration: msg.voice.duration }));
+          } catch (e) { logError('stt', e); }
+          story = String(story || '').trim();
+          if (!alive(chatId, s)) return;
+          if (!story) {
+            const p = caption ? duringRender(chatId, s, caption) : null; // удержание подписи ставится синхронно
+            releaseVoice();
+            await sendSafe(chatId, TEXT.notHeard);
+            return await p;
+          }
+          // duringRender ставит своё удержание синхронно; внешнее снимаем сразу — эхо и typing ожидание не держат.
+          const p = duringRender(chatId, s, withCaption(story, caption), { echo: `Расшифровка:\n«${story}»` });
+          releaseVoice();
+          return await p;
+        } finally { releaseVoice(); }
+      }
+      if (captionLevel === 'urgent') return handleStory(chatId, s, caption, 'text'); // остановка без распознавания
+      if (voiceRefused) {
+        await tg.send(chatId, voiceRefused);
+        return caption ? handleStory(chatId, s, caption, 'text') : undefined; // подпись — тот же путь, что текст
+      }
       await tg.action(chatId, 'typing');
       let story = '';
-      try { story = await transcribe(await tg.fileBuffer(msg.voice.file_id), { duration: msg.voice.duration }); }
+      try { story = cleanInput(await transcribe(await tg.fileBuffer(msg.voice.file_id), { duration: msg.voice.duration })); }
       catch (e) { logError('stt', e); }
       if (!alive(chatId, s)) return; // /delete во время распознавания: ничего не отвечаем
-      if (!story) return tg.send(chatId, TEXT.voiceEmpty);
+      if (!story) {
+        await tg.send(chatId, TEXT.voiceEmpty);
+        return caption ? handleStory(chatId, s, caption, 'text') : undefined;
+      }
+      // Подпись к голосовому — продолжение рассказа: те же проверки на всём, что может попасть в ролик.
+      const full = withCaption(story, caption);
       await tg.send(chatId, `Расшифровка:\n«${story}»`);
-      return handleStory(chatId, s, story, 'voice');
+      return handleStory(chatId, s, full, 'voice');
     }
 
+    if (s.delivering && !text) {
+      // Кружок, аудио, видео, стикер, фото во время подготовки: ролик не отменяется (условие 2). Подпись — как текст.
+      const caption = typeof msg.caption === 'string' ? cleanInput(msg.caption).trim() : '';
+      if (caption) return duringRender(chatId, s, caption);
+      return sendSafe(chatId, msg.video_note || msg.audio || msg.video ? TEXT.notHeard : TEXT.rendering);
+    }
     if (!text) return;
+    if (s.delivering) return duringRender(chatId, s, text);
+    // Пустая заготовка после нехватки: первая правка открывает черновик (рассказ уже прошёл ту же проверку,
+    // что перед репликой нехватки: остановка → технические исходы → нехватка).
+    if (s.stage === 'compose' && s.skeleton && !s.episode && parseEdit(text)) {
+      const original = s.originalStory || s.story;
+      // Рассказ, который тем временем запрещён, черновика не открывает: карточка помощи (восьмой разбор).
+      if (isBlocked(s, original) || gate.status(s.scope, original).kind === 'safety') return stopForSafety(chatId, s, 'urgent', { at: 'late' });
+      if (gate.status(s.scope, original).kind) { s.skeleton = null; s.stage = 'idle'; return tg.send(chatId, TEXT.checkUnavailable); }
+      s.episode = s.skeleton; s.skeleton = null; s.verdict = 'ok'; s.edits = 0; s.stage = 'draft';
+    }
     if ((s.stage === 'draft' || s.stage === 'watched') && s.episode) {
       const cmd = parseEdit(text);
       if (cmd) {
-        const err = applyEdit(s.episode, cmd);
-        if (err) return tg.send(chatId, err);
+        // Решение владельца 11.11 12:05, п. 1: правка — такой же вход, как рассказ. Её текст проходит тот же фильтр
+        // остановки в контексте всего рассказа (рассказ + прежние правки + эта) ДО разбора правки: ошибка номера строки
+        // или лимита не пропускает текст мимо фильтра (разбор 940f41cc). Опора и контекст — только в памяти сессии;
+        // текст правки не пишется ни в журнал, ни в метрики (там — только уровень и место).
         const own = editCorpus(cmd);
-        if (own) s.story = `${s.story}\n${own}`; // опора хранится только в памяти сессии
+        // Правка — отдельная фраза контекста: без точки она склеилась бы с соседним текстом в одну часть; от рассказа она
+        // отделена EDIT_SEP (PR 13): признаки рассказа на неё не переходят, фильтр видит рассказ и правку вместе.
+        const ctx = own ? `${s.story}${EDIT_SEP}${/[.!?…]$/.test(own) ? own : `${own}.`}` : s.story;
+        let concern = false;
+        if (own) {
+          // Для проверок безопасности правки — продолжение рассказа (joinEdits, PR 13): «Я хочу» + правка «умереть».
+          const prevLevel = assessRisk(joinEdits(s.story)).level;
+          const risk = assessRisk(joinEdits(ctx));
+          if (risk.level === 'urgent') { s.story = ctx; return stopForSafety(chatId, s, 'urgent', { at: 'edit' }); }
+          // concern, который внесла сама правка: строка не берётся, рядом — тот же блок помощи, что у рассказа с concern
+          // (одним сообщением, как в PR 11). Реплики нехватки здесь нет: прежний черновик остаётся.
+          // Если рассказ уже был concern, блок помощи человек видел вместе с черновиком: правка, которая сама по себе
+          // none, отклоняется ниже правилом титров без повторного блока (четвёртый разбор, мелочь 3).
+          concern = risk.level === 'concern' && (prevLevel === 'none' || assessRisk(own).level !== 'none');
+        }
+        const before = structuredClone(s.episode);
+        if (!concern) {
+          const err = applyEdit(s.episode, cmd);
+          if (err) return tg.send(chatId, err);
+        }
+        let excluded = concern;
+        if (own) {
+          s.story = ctx;
+          // п. 2: «угроза не в титрах» — и для фраз из словаря угроз, которые фильтр остановки пропустил как гиперболу;
+          // п. 3 для правок: местоимение в строке правки, указывающее на человека из исключённой угрозы.
+          const path = editedPath(cmd, s.episode);
+          const joined = joinEdits(ctx);
+          if (!excluded && path && (threatErrors(joined, s.episode).some((e) => e.path === path)
+            || (/^(?:rows\.|post$)/.test(path) && threatPronounFilter(joined)(own)))) excluded = true;
+          if (excluded) s.episode = before;
+          // Один вердикт на правку: та же проверка, что перед рендером (рассказ + поля эпизода). Если она даёт urgent,
+          // остановка сейчас, а не обещание «черновик на месте» и остановка на «Смотреть».
+          if (assessEpisodeRisk(joined, s.episode).level === 'urgent') return stopForSafety(chatId, s, 'urgent', { at: 'edit' });
+          if (excluded) {
+            await metrics.log(chatId, 'edit_excluded', { level: concern ? 'concern' : 'none' });
+            for (const t of editExcludedMessages(concern, { path })) await tg.send(chatId, t);
+            return;
+          }
+        }
         s.edits = (s.edits || 0) + 1;
         s.stage = 'draft';
         return showDraft(chatId, s);
       }
     }
-    if (text.startsWith('/')) return tg.send(chatId, TEXT.start);
-    if (text.length < 12) return tg.send(chatId, 'Расскажи чуть подробнее: что было, что запомнилось.');
-    return handleStory(chatId, s, text, 'text');
+    // «/текст» (решение Claude 11.11 15:05 п. 1): известная команда без хвоста обработана выше; у известной команды
+    // с хвостом проверяется хвост, любой другой текст на «/» — путь рассказа (проверка безопасности первой).
+    let body = text;
+    if (text.startsWith('/')) {
+      const m = /^\/([A-Za-z]+)(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(text);
+      const known = m && KNOWN_COMMANDS.has(m[1].toLowerCase());
+      if (known && !(m[2] || '').trim()) return tg.send(chatId, TEXT.start);
+      body = known ? m[2].trim() : text.replace(/^\/+/, '').trim();
+      if (!body) return tg.send(chatId, TEXT.start);
+    }
+    if (body.length < 12) return shortText(chatId, s, body);
+    return handleStory(chatId, s, body, 'text');
+  }
+
+  // Короткий текст (< 12 знаков; PR 15): локальный фильтр ≠ none → путь рассказа (остановка и помощь, без «подробнее»);
+  // иначе — «Расскажи чуть подробнее». Модельной проверки коротких текстов нет (решение владельца кода 13.11 15:00):
+  // модельная проверка одна — перед рендером. Текст в журнал и метрики не пишется.
+  async function shortText(chatId, s, text) {
+    // Запрещённый раньше текст (например, моделью в окне до отправки) — снова остановка, а не «подробнее».
+    if (assessRisk(text).level !== 'none' || isBlocked(s, text) || gate.status(s.scope, text).kind === 'safety') return handleStory(chatId, s, text, 'text');
+    return tg.send(chatId, TEXT.more);
   }
 
   async function onCallback(q) {
@@ -583,9 +1010,23 @@ export function createBot({
     if (action === 'music') { s.episode.music = MUSIC_ORDER[(MUSIC_ORDER.indexOf(s.episode.music) + 1) % MUSIC_ORDER.length]; s.stage = 'draft'; return showDraft(chatId, s); }
   }
 
+  // Исправленное сообщение (КРИТИКА 14.11, п. 4): правка проходит локальный фильтр, как новое сообщение. Явная
+  // опасность — ролик отменяется (в окне доставки), черновик уничтожается, экран остановки. В рассказ правка
+  // не попадает и других ответов не даёт: исправленный текст ролик не меняет. Текст в журнал и метрики не пишется.
+  async function onEdited(msg) {
+    if (!msg.chat || msg.chat.type !== 'private') return;
+    const chatId = msg.chat.id;
+    const text = cleanInput(msg.text || msg.caption || '').trim();
+    if (!text || assessRisk(text).level !== 'urgent') return;
+    const s = session(chatId);
+    s.story = text; s.originalStory = text;
+    return stopForSafety(chatId, s, 'urgent', { at: s.delivering ? 'edited_rendering' : 'edited' });
+  }
+
   async function handleUpdate(u) {
     try {
       if (u.message) await onMessage(u.message);
+      else if (u.edited_message) await onEdited(u.edited_message);
       else if (u.callback_query) await onCallback(u.callback_query);
     } catch (e) { logError('update', e); }
   }
@@ -595,13 +1036,17 @@ export function createBot({
 
 // ── Транспорт Telegram Bot API ───────────────────────────────────────────────
 
-export function telegram(token) {
+export function telegram(token, { callMs = TELEGRAM_CALL_MS } = {}) {
   const base = `https://api.telegram.org/bot${token}`;
+  // Предел ожидания приложения для каждого вызова API (решение Claude 12.11 20:00): зависший вызов не держит ветку.
+  // getUpdates — длинный опрос (30 с) с запасом; sendVideo — загрузка файла; остальное — TELEGRAM_CALL_MS.
+  const limitFor = (method) => (method === 'getUpdates' ? 45_000 : method === 'sendVideo' ? 120_000 : callMs);
   async function call(method, body) {
     const res = await fetch(`${base}/${method}`, {
       method: 'POST',
       headers: body instanceof FormData ? undefined : { 'Content-Type': 'application/json' },
       body: body instanceof FormData ? body : JSON.stringify(body || {}),
+      signal: AbortSignal.timeout(limitFor(method)),
     });
     const data = await res.json().catch(() => ({}));
     // status — код Telegram (401/403/429…): по нему оператор различает причину в обезличенном журнале.
@@ -615,7 +1060,7 @@ export function telegram(token) {
     answer: (id) => call('answerCallbackQuery', { callback_query_id: id }).catch(() => {}),
     async fileBuffer(file_id) {
       const f = await call('getFile', { file_id });
-      const res = await fetch(`https://api.telegram.org/file/bot${token}/${f.file_path}`);
+      const res = await fetch(`https://api.telegram.org/file/bot${token}/${f.file_path}`, { signal: AbortSignal.timeout(30_000) });
       if (!res.ok) throw new Error(`Telegram file ${res.status}`);
       return Buffer.from(await res.arrayBuffer());
     },
@@ -659,11 +1104,15 @@ export async function purgeBotTmp(dir = botTmpDir()) {
   return removed;
 }
 
-export async function prepareBot({ cleanup = cleanupVoiceOrphans, cleanupTmp = purgeBotTmp, ledger, env = process.env, log = console.error } = {}) {
+export async function prepareBot({ cleanup = cleanupVoiceOrphans, cleanupTmp = purgeBotTmp, ledger, helpFile, env = process.env, log = console.error } = {}) {
   if (!env.METRICS_SALT || String(env.METRICS_SALT).trim().length < METRICS_SALT_MIN) {
     logError('metrics.salt', { code: 'metrics_salt' });
     throw Object.assign(new Error('startup'), { code: 'metrics_salt', stage: 'metrics.salt' });
   }
+  // Нет ключа API: при TITRY_RELEASE_REAL_DATA=1 — отказ старта; иначе одна строка в журнал (условие 4).
+  try { modelModeAtStart({ env, log }); } catch (e) { logError('model.key', e); throw e; }
+  // Контакты помощи: без проверенного блока помощи бот не стартует (решение владельца 11:05).
+  try { prepareHelp(helpFile); } catch (e) { logError('help.load', e); throw Object.assign(new Error('startup'), { code: 'help_config', stage: 'help.load' }); }
   try { await cleanup(); } catch (e) { logError('voice.cleanup', e); throw Object.assign(new Error('startup'), { code: safeCode(e), stage: 'voice.cleanup' }); }
   try {
     const removed = await cleanupTmp();
@@ -680,7 +1129,7 @@ async function main() {
   if (!token) { console.error('Задайте TELEGRAM_BOT_TOKEN (выдаёт @BotFather).'); process.exit(2); }
   let ledger;
   try { ledger = await prepareBot(); } catch {
-    console.error(`Запуск остановлен: не задана METRICS_SALT (не короче ${METRICS_SALT_MIN} знаков), не подтверждена очистка временных файлов или хранилище запретов (${KEY_ENV}, ${KEY_VERSION_ENV}). Задачи не принимаются. Остатки tmp и файл хранилища не удаляйте вручную без владельца кода.`);
+    console.error(`Запуск остановлен: не задана METRICS_SALT (не короче ${METRICS_SALT_MIN} знаков), нет ключа модели при TITRY_RELEASE_REAL_DATA=1, не проверены контакты помощи (config/help.json), не подтверждена очистка временных файлов или хранилище запретов (${KEY_ENV}, ${KEY_VERSION_ENV}). Задачи не принимаются. Остатки tmp и файл хранилища не удаляйте вручную без владельца кода.`);
     process.exit(3);
   }
   const tg = telegram(token);
@@ -697,7 +1146,7 @@ async function main() {
   let offset = 0;
   for (;;) {
     try {
-      const updates = await tg.call('getUpdates', { offset, timeout: 30, allowed_updates: ['message', 'callback_query'] });
+      const updates = await tg.call('getUpdates', { offset, timeout: 30, allowed_updates: ['message', 'edited_message', 'callback_query'] });
       for (const u of updates) {
         offset = u.update_id + 1;
         bot.handleUpdate(u); // не ждём: рендер одного пользователя не блокирует ответы другим

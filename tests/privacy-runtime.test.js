@@ -128,14 +128,14 @@ test('бот: safety переживает перезапуск и /delete (хр�
   } finally { await Promise.all(opened.map((l) => l.flush())); await fs.rm(dir, { recursive: true, force: true }); }
 });
 
-test('бот: technical переживает перезапуск и /delete; опасный черновик после /delete всё равно записывает запрет', async () => {
+// Техническая пауза второй проверки убрана (решение владельца кода 13.11 15:00); остаётся гонка опасного черновика.
+test('бот: опасный черновик после /delete всё равно записывает запрет', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-botledger2-'));
   const opened = [];
   const file = path.join(dir, 'state', 'blocked-v1.json');
   const chat = { id: 77201, type: 'private' };
   const metrics = { hash: () => 'qa', log: async () => {}, forget: async () => {} };
   const good = async () => ({ episode: structuredClone(ex.episode), risk: { level: 'none' }, provider: 'claude', dropped: [] });
-  const fail = () => { throw Object.assign(new Error('x'), { code: 'incomplete_response' }); };
   async function boot({ check, draft = good }) {
     const ledger = makeLedger({ file, key: 'test-only-key-not-a-secret', keyVersion: 'v1' });
     await ledger.load();
@@ -152,16 +152,6 @@ test('бот: technical переживает перезапуск и /delete; о
     return { ledger, sent, c, say, playAll };
   }
   try {
-    const a = await boot({ check: fail });
-    await a.say(ex.story); await a.playAll(); await a.playAll(); // две неполные проверки подряд
-    assert.match(a.sent.join('\n'), /дважды не смог/);
-    await a.ledger.flush();
-    const b = await boot({ check: () => false });
-    await b.say('/delete');
-    await b.say(ex.story); await b.playAll();
-    assert.match(b.sent.join('\n'), /дважды не смог завершить проверку рассказа/);
-    assert.equal(b.c.check, 0); assert.equal(b.c.render, 0); assert.equal(b.c.video, 0);
-
     // Гонка: опасный черновик возвращается после /delete.
     const other = { id: 77202, type: 'private' };
     const STORY2 = `${ex.story} Вечером пила чай.`;

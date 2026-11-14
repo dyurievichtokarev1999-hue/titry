@@ -8,14 +8,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { createApp } from '../server/app.js';
 import { makeLedger } from '../server/ledger.js';
-import { RETRY_AFTER_MS } from '../server/gate.js';
 
 const ex = JSON.parse(await fs.readFile(new URL('../examples/day-quiet.json', import.meta.url), 'utf8'));
 const ep = () => structuredClone(ex.episode);
 const STORY = ex.story;
 const KEY = 'test-only-key-not-a-secret';
 const OTHER = `${STORY} Вечером пила чай.`; // другой рассказ, источники строк эпизода в нём есть
-const fail = () => { throw Object.assign(new Error('x'), { code: 'incomplete_response' }); };
 
 async function boot(dir, { check, clock, key = KEY, fsImpl } = {}) {
   const ledger = makeLedger({ file: path.join(dir, 'state', 'blocked-v1.json'), key, keyVersion: 'v1', wallNow: () => clock.wall, ...(fsImpl ? { fsImpl } : {}) });
@@ -35,7 +33,6 @@ async function boot(dir, { check, clock, key = KEY, fsImpl } = {}) {
   return {
     counters, ledger,
     render: (story = STORY, episode = ep()) => post('/api/render', { story, episode }),
-    recheck: (story = STORY, episode = ep()) => post('/api/recheck', { story, episode }),
     draft: (story = STORY) => post('/api/draft', { story }),
     close: async () => { server.closeAllConnections(); server.close(); },
   };
@@ -61,35 +58,8 @@ test('B01: safety → «аварийный» перезапуск → тот ж�
   });
 });
 
-test('B02: technical → перезапуск → повтор раньше 15 мин запрещён, после 15 мин без действия всё ещё запрещён, действие — полная проверка', async () => {
-  await withDir(async (dir) => {
-    const clock = clockAt();
-    const a = await boot(dir, { check: fail, clock });
-    await a.render(); assert.equal((await a.render()).body.kind, 'technical');
-    await a.ledger.flush(); await a.close();
-    // Перезапуск через 14 минут: монотонные часы нового процесса начинаются заново.
-    const c2 = { mono: 0, wall: clock.wall + 14 * 60_000 };
-    let mode = 'fail';
-    const b = await boot(dir, { check: () => (mode === 'fail' ? fail() : false), clock: c2 });
-    assert.equal((await b.render()).body.kind, 'technical');
-    const early = await b.recheck();
-    assert.equal(early.body.early, true);
-    assert.ok(Date.parse(early.body.retryNotBeforeAt) >= c2.wall + RETRY_AFTER_MS, 'отсчёт после перезапуска — не раньше загрузки + 15 мин');
-    c2.mono += RETRY_AFTER_MS - 1; c2.wall += RETRY_AFTER_MS - 1;
-    assert.equal((await b.recheck()).body.early, true);
-    c2.mono += 1; c2.wall += 1;
-    assert.equal((await b.render()).body.kind, 'technical', 'срок сам ничего не снимает');
-    assert.equal(b.counters.check, 0);
-    mode = 'ok';
-    assert.equal((await b.recheck()).status, 200);
-    await b.close();
-    // Снятие записано: следующий перезапуск паузы не видит.
-    const c = await boot(dir, { check: () => false, clock: c2 });
-    assert.equal((await c.render()).status, 200);
-    assert.equal(c.counters.render, 1);
-    await c.close();
-  });
-});
+// B02 (техническая пауза после двух неполных проверок и повтор организатора) удалён: паузы больше нет
+// (решение владельца кода 13.11 15:00); «неизвестно» — один повтор и решение по локальному уровню, safety-consolidated.
 
 test('B03: поздний false, правка эпизода и плёнки не снимают safety после перезапуска', async () => {
   await withDir(async (dir) => {

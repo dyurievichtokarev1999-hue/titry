@@ -4,7 +4,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import { createBot } from '../server/bot.js';
-import { RETRY_AFTER_MS } from '../server/gate.js';
 
 const ex = JSON.parse(await fs.readFile(new URL('../examples/day-quiet.json', import.meta.url), 'utf8'));
 const chat = { id: 77001, type: 'private' };
@@ -26,7 +25,7 @@ function setup({ check, hasKey, draft = good } = {}) {
     tg, metrics, draft,
     safetyCheck: async (t) => { counters.check++; return check(t, counters.check); },
     ...(hasKey ? { hasKey } : {}),
-    monoNow: () => clock.mono, wallNow: () => clock.wall,
+    checkRetryMs: 0,
     render: async (e, o) => { counters.render++; return { seconds: 1, duration: 24, outPath: o.outPath }; },
   });
   let draftId = 0;
@@ -46,40 +45,32 @@ test('бот S02: отдельная проверка true → сообщени�
   assert.equal(b.counters.check, 1, 'после остановки рассказ больше не проверяется');
 });
 
-test('бот U01–U05: первый неполный ответ → checkUnavailable без помощи; render/sendVideo 0', async () => {
+// Решение владельца кода 13.11 15:00: «неизвестно» — один повтор; рассказ локально чистый — ролик делается (условие 3).
+// Нет ключа — режим «только локальный фильтр» без «проверка не завершилась» (условие 4).
+test('бот U01–U05: неполный ответ и после повтора, локально чисто → ролик, без «не завершил» и без помощи', async () => {
   const b = setup({ check: fail });
   await b.story(); await b.play();
-  assert.match(b.last(), /не завершил проверку/);
+  assert.equal(b.counters.check, 2, 'один повтор');
+  assert.doesNotMatch(b.sent.join('\n'), /не завершил|не завершилась/);
   assert.doesNotMatch(b.sent.join('\n'), HELP);
-  assert.equal(b.counters.render, 0); assert.equal(b.counters.video, 0);
-});
-
-test('бот U06: нет ключа → checkUnavailable, проверка не вызывается', async () => {
-  const b = setup({ check: () => false, hasKey: () => false });
-  await b.story(); await b.play(); await b.play(); await b.play();
-  assert.match(b.last(), /не завершил проверку/);
-  assert.equal(b.counters.check, 0); assert.equal(b.counters.render, 0); assert.equal(b.counters.video, 0);
-});
-
-test('бот U07: неполный, затем полный false → один render и одна выдача', async () => {
-  const b = setup({ check: (t, n) => (n === 1 ? fail() : false) });
-  await b.story(); await b.play(); await b.play();
   assert.equal(b.counters.render, 1); assert.equal(b.counters.video, 1);
 });
 
-test('бот T01/T03: два неполных подряд → техническая приостановка без помощи; время без организатора ничего не снимает', async () => {
-  const b = setup({ check: fail });
-  await b.story(); await b.play(); await b.play();
-  assert.match(b.last(), /дважды не смог завершить проверку/);
-  assert.doesNotMatch(b.sent.join('\n'), HELP);
-  assert.doesNotMatch(b.last(), /опасн|тяж[её]л/i);
-  b.clock.mono += RETRY_AFTER_MS * 3; b.clock.wall += RETRY_AFTER_MS * 3;
-  await b.play();
-  const at = b.sent.length;
+test('бот U06: нет ключа → только локальный фильтр: ролик, проверка не вызывается', async () => {
+  const b = setup({ check: () => false, hasKey: () => false });
   await b.story(); await b.play();
-  assert.match(b.sent[at], /дважды не смог/, 'новый рассказ тот же — сразу техническая приостановка, без черновика');
-  assert.equal(b.counters.check, 2); assert.equal(b.counters.render, 0); assert.equal(b.counters.video, 0);
+  assert.doesNotMatch(b.sent.join('\n'), /не завершил|не завершилась/);
+  assert.equal(b.counters.check, 0); assert.equal(b.counters.render, 1); assert.equal(b.counters.video, 1);
 });
+
+test('бот U07: неполный, повтор — полный false → один render и одна выдача', async () => {
+  const b = setup({ check: (t, n) => (n === 1 ? fail() : false) });
+  await b.story(); await b.play();
+  assert.equal(b.counters.check, 2);
+  assert.equal(b.counters.render, 1); assert.equal(b.counters.video, 1);
+});
+
+// T01/T03 (техническая пауза после двух неполных) удалён: паузы нет (решение 13.11 15:00).
 
 test('бот V04: /delete во время отдельной проверки — сессия не оживает, рендера и выдачи нет', async () => {
   let release; const held = new Promise((r) => { release = r; });
@@ -93,7 +84,7 @@ test('бот V04: /delete во время отдельной проверки �
 });
 
 // Контракт владельца 15:08 / 16:00 (QA D01–D04): /delete удаляет сессию и статистику, но не снимает
-// ни safety, ни technical. Тот же рассказ после /delete → render/sendVideo = 0/0, прежнее сообщение.
+// safety. Тот же рассказ после /delete → render/sendVideo = 0/0, прежнее сообщение.
 const del = (b) => b.bot.handleUpdate({ message: { chat, text: '/delete' } });
 const freshPlay = async (b, story = ex.story) => {
   await b.bot.handleUpdate({ message: { chat, text: story } });
@@ -107,18 +98,7 @@ test('бот D01: обычное удаление без запрета — но
   assert.equal(b.counters.render, 1); assert.equal(b.counters.video, 1);
 });
 
-test('бот D02: technical → /delete → тот же рассказ — пауза сохраняется, 0/0, без помощи', async () => {
-  const b = setup({ check: (t, n) => (n <= 2 ? fail() : false) });
-  await b.story(); await b.play(); await b.play();
-  assert.match(b.last(), /дважды не смог/);
-  await del(b);
-  const at = b.sent.length; // первое сообщение после нового рассказа
-  await freshPlay(b);
-  assert.match(b.sent[at], /дважды не смог завершить проверку рассказа/);
-  assert.doesNotMatch(b.sent.join('\n'), HELP);
-  assert.equal(b.counters.check, 2, 'после /delete проверка не запускается');
-  assert.equal(b.counters.render, 0); assert.equal(b.counters.video, 0);
-});
+// D02 (technical → /delete) удалён: технической паузы нет.
 
 test('бот D03: safety → /delete → тот же рассказ — остановка сохраняется, 0/0, прежнее сообщение', async () => {
   const b = setup({ check: (t, n) => n === 1 });
@@ -168,7 +148,7 @@ test('бот /delete: исход 1 — нет записей → «Сессия 
 });
 
 test('бот /delete: запись запрета сохранена → удаление сессии подтверждено, полное удаление — нет', async () => {
-  for (const check of [() => true, fail]) {
+  for (const check of [() => true]) { // запись technical больше не создаётся (решение 13.11 15:00)
     const b = setup({ check });
     await b.story(); await b.play(); await b.play();
     await del(b);
@@ -208,7 +188,6 @@ test('бот /delete, исход 2: на вымышленном стенде —
   try {
     for (const [stand, check, expect] of [
       ['fictional', () => true, 'Сессия и статистика по тебе удалены.\nСлужебная запись об остановке по безопасности сохранена по правилу теста. В ней нет текста рассказа. [срок не утверждён]'],
-      ['fictional', fail, 'Сессия и статистика по тебе удалены.\nСлужебная запись о технической приостановке сохранена по правилу теста. В ней нет текста рассказа. [срок не утверждён]'],
       [undefined, () => true, 'Сессия и статистика по тебе удалены.\nПолное удаление не подтверждено.'],
     ]) {
       if (stand) process.env.TITRY_STAND = stand; else delete process.env.TITRY_STAND;
@@ -220,23 +199,11 @@ test('бот /delete, исход 2: на вымышленном стенде —
   } finally { if (saved === undefined) delete process.env.TITRY_STAND; else process.env.TITRY_STAND = saved; }
 });
 
-test('бот /delete: сочетания — два вида записи; запись + идущая проверка (вымышленный стенд)', async () => {
+test('бот /delete: запись safety + идущая проверка (вымышленный стенд)', async () => {
   const saved = process.env.TITRY_STAND;
   process.env.TITRY_STAND = 'fictional';
   try {
-    // Два вида: technical для одного рассказа, safety для другого — у одного участника.
-    let n = 0;
-    const b = setup({ check: (t) => { n++; if (t.includes('Вечером пила чай')) return true; throw Object.assign(new Error('x'), { code: 'timeout' }); } });
-    await b.story(); await b.play(); await b.play(); // technical для первого рассказа
-    await b.bot.handleUpdate({ message: { chat, text: `${ex.story} Вечером пила чай.` } });
-    for (let k = 0; k <= 4; k++) await b.bot.handleUpdate({ callback_query: { id: 'q', data: `play:${k}`, message: { chat } } });
-    await del(b);
-    assert.equal(b.last(), [
-      'Сессия и статистика по тебе удалены.',
-      'Служебная запись об остановке по безопасности сохранена по правилу теста. В ней нет текста рассказа. [срок не утверждён]',
-      'Служебная запись о технической приостановке сохранена по правилу теста. В ней нет текста рассказа. [срок не утверждён]',
-    ].join('\n'));
-
+    // Сочетание «technical + safety» удалено: запись technical больше не создаётся (решение 13.11 15:00).
     // Известная запись + проверка ещё идёт: вид назван, полный результат не подтверждается.
     let release; const held = new Promise((r) => { release = r; });
     let calls = 0;

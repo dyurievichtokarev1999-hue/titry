@@ -31,7 +31,7 @@ test('B05: на диске нет рассказа, области и ключа
   const dir = await tmpDir();
   try {
     const l = open(dir); await l.load();
-    await l.put({ scope: 'chat-123456', story: STORY, episodeDigest: 'a'.repeat(64), kind: 'technical', reason: 'check_incomplete_twice', retryNotBeforeAt: '2026-11-10T12:15:00.000Z' });
+    await l.put({ scope: 'chat-123456', story: STORY, episodeDigest: 'a'.repeat(64), kind: 'safety', reason: 'safety' });
     const file = path.join(dir, 'state', 'blocked-v1.json');
     const raw = await fs.readFile(file, 'utf8');
     for (const s of [STORY.slice(0, 12), 'chat-123456', '123456', KEY, 'a'.repeat(64)]) assert.ok(!raw.includes(s), `нет ${s.slice(0, 8)}…`);
@@ -101,19 +101,18 @@ test('B04: сбой записи/rename — failed, ложного «сохра�
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
-test('technical не пишется поверх safety; safety вытесняет technical; clearTechnical не трогает safety', async () => {
+// Техническая пауза убрана (решение 13.11 15:00): записи technical больше не пишутся, хранилище держит только safety.
+test('запись technical не пишется и хранилище не портит; safety пишется и читается после перезапуска', async () => {
   const dir = await tmpDir();
   try {
     const l = open(dir); await l.load();
-    const t = { kind: 'technical', reason: 'check_incomplete_twice', retryNotBeforeAt: '2026-11-10T12:15:00.000Z' };
-    await l.put({ scope: 's', story: STORY, ...t });
-    assert.equal(l.lookup('s', STORY).kind, 'technical');
-    assert.equal(l.lookup('s', STORY).retryNotBeforeAt, '2026-11-10T12:15:00.000Z');
+    await assert.rejects(l.put({ scope: 's', story: STORY, kind: 'technical', reason: 'check_incomplete_twice' }), { code: 'ledger' });
+    assert.equal(l.healthy(), true);
+    assert.equal(l.lookup('s', STORY).kind, null);
     await l.put({ scope: 's', story: STORY, kind: 'safety', reason: 'safety' });
-    await l.put({ scope: 's', story: STORY, ...t });
-    await l.clearTechnical('s', STORY);
     const r = open(dir); await r.load();
     assert.equal(r.lookup('s', STORY).kind, 'safety');
+    assert.deepEqual([...r.scopeKinds('s')], ['safety']);
     assert.equal(r.size, 1);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
