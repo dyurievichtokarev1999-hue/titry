@@ -611,12 +611,18 @@ const OTHER_KILL = new RegExp([
   String.raw`(?<![а-я])(?:возьму|достану|захвачу|прихвачу)\s+(?:\S+\s+)?(?:нож|топор|пистолет|ружье|ствол|биту|арматуру|кастет)(?![а-я])(?:\s+\S+){0,2}\s+(?:пойду|приду|поеду|зайду|загляну|наведаюсь)\s+к\s+(?:нему|ней|ним|тебе|вам|${PERSON_DAT})(?![а-я])`,
 ].join('|'));
 // Угроза глаголом расправы с местоимением — без условия «человек рядом», но не при вещах и животных без человека.
-const OTHER_KILL_PRON = new RegExp([
+// Сильные глаголы («зарежу, пристрелю, задушу его»): вещь в той же фразе гасит угрозу, только если там нет человека
+// и «он / она / они» («Кот орёт, задушу его» — нет; «Сосед поцарапал мою машину, зарежу его» — urgent).
+const OTHER_KILL_PRON_STRONG = new RegExp([
   String.raw`(?<![а-я])${KILL_PRON_STRONG}(?:\s+\S+)?\s+(?:его|ее|их)(?![а-я])${NOT_GAME}${NOT_TOY}`,
-  String.raw`(?<![а-я])(?:порежу|убью|урою)(?:\s+\S+)?\s+(?:его|ее|их)(?![а-я])${NOT_FOR_REASON}${NOT_GAME}${NOT_TOY}`,
   // «Задушу его подушкой» — подушка здесь орудие, не игра (NOT_TOY для «задушу» не действует).
   String.raw`(?<![а-я])задушу\s+(?:\S+\s+)?(?:его|ее|их|${PAST_OBJ})\s+подушк\S*`,
-  String.raw`(?<![а-я])(?:его|ее|их)\s+(?:\S+\s+)?${KILL_PRON_FREE}(?![а-я])${NOT_GAME}`,
+  String.raw`(?<![а-я])(?:его|ее|их)\s+(?:\S+\s+)?${KILL_PRON_STRONG}(?![а-я])${NOT_GAME}`,
+].join('|'));
+// Бытовые глаголы («убью, урою, порежу его», «хочу его убить»): вещь в той же фразе гасит угрозу всегда.
+const OTHER_KILL_PRON = new RegExp([
+  String.raw`(?<![а-я])(?:порежу|убью|урою)(?:\s+\S+)?\s+(?:его|ее|их)(?![а-я])${NOT_FOR_REASON}${NOT_GAME}${NOT_TOY}`,
+  String.raw`(?<![а-я])(?:его|ее|их)\s+(?:\S+\s+)?(?:порежу|убью|урою)(?![а-я])${NOT_GAME}`,
   String.raw`(?<![а-я])${WANT_KILL}\s+(?:\S+\s+)?${KILL_INF_PRON}\s+(?:\S+\s+)?(?:его|ее|их)(?![а-я])${NOT_FOR_REASON}${NOT_GAME}${NOT_TOY}`,
   String.raw`(?<![а-я])${WANT_KILL}\s+(?:его|ее|их)\s+(?:\S+\s+)?${KILL_INF_PRON}(?![а-я])${NOT_FOR_REASON}${NOT_GAME}`,
 ].join('|'));
@@ -671,6 +677,8 @@ function threatOther(text) {
     const thingSame = THING_CTX.test(flat(x));
     const thingPrev = i > 0 && THING_CTX.test(flat(sents[i - 1])) && !/(?<![а-я])(?:он|она|они)(?![а-я])/.test(flat(sents[i - 1]));
     if (parts.some((p) => OTHER_CORE.test(p)) || kill.some((p) => OTHER_KILL.test(p)) || soft.some((p) => OTHER_VSOFT.test(p))) return true;
+    const personSame = hasPerson(x) || /(?<![а-я])(?:он|она|они)(?![а-я])/.test(flat(x));
+    if ((!thingSame || personSame) && (near || !thingPrev) && kill.some((p) => OTHER_KILL_PRON_STRONG.test(p))) return true;
     if (!thingSame && (near || !thingPrev) && kill.some((p) => OTHER_KILL_PRON.test(p))) return true;
     return near && (parts.some((p) => PRON_CORE.test(p)) || kill.some((p) => PRON_SOFT.test(p)));
   });
