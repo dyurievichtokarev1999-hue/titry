@@ -10,10 +10,12 @@ import { helpMessage, loadHelp } from '../server/safety.js';
 import { createBot, makeMetrics } from '../server/bot.js';
 import { createApp } from '../server/app.js';
 
-const APPROVED = 'Титры для этого рассказа не будут собраны. Если тебе или кому-то рядом прямо сейчас угрожает опасность, позвони по одному из номеров ниже или попроси человека рядом побыть с тобой.';
+const APPROVED = 'Для этого рассказа ролика не будет. Если тебе или кому-то рядом сейчас угрожает опасность, звони 112.';
 // Блок контактов — из действующей конфигурации, тем же форматом, что и экран помощи.
 const CONTACTS = loadHelp().contacts.map((c) => `• ${c.label}: ${c.phone}${c.hours ? ` (${c.hours})` : ''}`).join('\n');
-const EXPECTED = `${APPROVED}\n\n${CONTACTS}`;
+// 112 назван в самом тексте экрана — отдельной строкой в списке экрана он не повторяется (редактор, 14.11).
+const OTHERS = loadHelp().contacts.filter((c) => String(c.phone).trim() !== '112').map((c) => `• ${c.label}: ${c.phone}${c.hours ? ` (${c.hours})` : ''}`).join('\n');
+const EXPECTED = OTHERS ? `${APPROVED}\n\n${OTHERS}` : APPROVED;
 const NEW_STORY = /нов\S* рассказ|Когда захочется|пришли|прислать|переформулир|ещё раз|снова/i;
 const URGENT = 'Вечером сидел на подоконнике и думал, что не хочу больше жить.';
 const CONCERN_OLD = `Похоже, в этом дне было что-то опасное или очень тяжёлое.\n\nЕсли тебе или кому-то рядом угрожает опасность, лучше обратиться за живой помощью:\n\n${CONTACTS}`;
@@ -22,8 +24,8 @@ test('экран остановки: дословный текст и конта
   const text = helpMessage('urgent');
   assert.equal(text, EXPECTED);
   assert.doesNotMatch(text, NEW_STORY, 'нет приглашения прислать новый рассказ');
-  assert.ok(CONTACTS.length > 0 && text.endsWith(`\n\n${CONTACTS}`), 'контакты идут сразу после текста');
   for (const c of loadHelp().contacts) assert.ok(text.includes(c.phone), `контакт ${c.label} на месте`);
+  assert.equal(text.split('112').length - 1, 1, '112 — ровно в одном месте');
 });
 
 test('экран остановки строит список контактов из переданной конфигурации', () => {

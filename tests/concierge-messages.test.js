@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import { STOP_SCREEN_TEXT } from '../server/safety.js';
 
-const APPROVED = 'Титры для этого рассказа не будут собраны. Если тебе или кому-то рядом прямо сейчас угрожает опасность, позвони по одному из номеров ниже или попроси человека рядом побыть с тобой.';
+const APPROVED = 'Для этого рассказа ролика не будет. Если тебе или кому-то рядом сейчас угрожает опасность, звони 112.';
 const md = await fs.readFile(new URL('../concierge/messages.md', import.meta.url), 'utf8');
 const section = (title) => {
   const m = md.match(new RegExp(`^## ${title}\\n([\\s\\S]*?)(?=^## |(?![\\s\\S]))`, 'm'));

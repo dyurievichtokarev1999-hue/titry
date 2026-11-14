@@ -11,7 +11,7 @@ import { makeDraft } from '../server/draft.js';
 const chat = { id: 77501, type: 'private' };
 const MORE = /Расскажи чуть подробнее/;
 const HELP = /помощ|112|телефон доверия|8-800/i;
-const URGENT_CARD = /Титры для этого рассказа не будут собраны/;
+const URGENT_CARD = /Для этого рассказа ролика не будет/;
 
 function setup({ check = () => false, hasKey } = {}) {
   const sent = []; const counters = { draft: 0, render: 0, check: 0 };

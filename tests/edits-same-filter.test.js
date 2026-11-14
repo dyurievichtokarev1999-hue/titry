@@ -21,7 +21,7 @@ const BOT_REPLY = `${REPLY}\n\n${INSUFFICIENT_INVITE_TEXT}`;
 const SAFE = 'Утром я пила чай. Вечером я пекла пирог.';
 const ONE = 'Сегодня утром я долго пила чай.'; // одна фраза — у заготовки одна строка
 const URGENT = 'Сегодня всё валится из рук. Я не хочу больше жить.';
-const URGENT_CARD = /Титры для этого рассказа не будут собраны/;
+const URGENT_CARD = /Для этого рассказа ролика не будет/;
 const chat = { id: 88123, type: 'private' };
 const manual = (story, o = {}) => makeDraft(story, { ...o, provider: 'manual' });
 const fields = (ep) => [ep.title, ep.genre, ep.lead, ...(ep.rows || []).flatMap((r) => [r.role, r.value, r.source]), ep.post?.text, ep.post?.source].join(' | ');

@@ -200,7 +200,7 @@ test('бот: нехватка после concern → ровно одна отп
     assert.equal(after[0].extra.parse_mode, undefined, `${id}: без HTML-разметки — контакты не экранируются`);
     assert.equal(after[0].text, `${BOT_REPLY}\n\n${helpMessage('concern')}`, `${id}: порядок «реплика (с приглашением) → блок», без переходной фразы`);
     for (const m of after) assert.equal(m.extra.reply_markup, undefined, `${id}: без кнопок`);
-    assert.doesNotMatch(b.texts().join('\n'), /Титры для этого рассказа не будут собраны/, `${id}: не карточка urgent`);
+    assert.doesNotMatch(b.texts().join('\n'), /Для этого рассказа ролика не будет/, `${id}: не карточка urgent`);
     assert.deepEqual(b.events, [{ event: 'insufficient_after_exclusion' }], `${id}: метрика без текста и номеров`);
     // Кнопки прежних черновиков ничего не запускают, ролика нет.
     for (let n = 0; n <= 3; n++) await b.press(`play:${n}`);

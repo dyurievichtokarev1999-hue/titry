@@ -9,7 +9,7 @@ import { helpMessage, tryLaterMessage, NOT_HEARD_TEXT, assessRisk } from '../ser
 
 const ex = JSON.parse(await fs.readFile(new URL('../examples/day-quiet.json', import.meta.url), 'utf8'));
 const chat = { id: 77901, type: 'private' };
-const URGENT_CARD = /Титры для этого рассказа не будут собраны/;
+const URGENT_CARD = /Для этого рассказа ролика не будет/;
 // Как makeDraft: при urgent черновика нет (остановка), иначе — вымышленный эпизод.
 const good = async (st) => (assessRisk(st).level === 'urgent' ? { risk: assessRisk(st), episode: null, provider: null }
   : { episode: structuredClone(ex.episode), risk: { level: 'none' }, provider: 'claude', dropped: [] });
