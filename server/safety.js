@@ -677,7 +677,12 @@ function threatOther(text) {
     const thingSame = THING_CTX.test(flat(x));
     const thingPrev = i > 0 && THING_CTX.test(flat(sents[i - 1])) && !/(?<![а-я])(?:он|она|они)(?![а-я])/.test(flat(sents[i - 1]));
     if (parts.some((p) => OTHER_CORE.test(p)) || kill.some((p) => OTHER_KILL.test(p)) || soft.some((p) => OTHER_VSOFT.test(p))) return true;
-    const personSame = hasPerson(x) || /(?<![а-я])(?:он|она|они)(?![а-я])/.test(flat(x));
+    // «он / она / они» — человек, только если стоит раньше вещи или животного («Он разбил мой телефон, зарежу его»);
+    // «Кот орёт, он достал, задушу его» — местоимение про кота.
+    const fx = flat(x);
+    const pronAt = fx.search(/(?<![а-я])(?:он|она|они)(?![а-я])/);
+    const thingAt = fx.search(THING_CTX);
+    const personSame = hasPerson(x) || (pronAt >= 0 && (thingAt < 0 || pronAt < thingAt));
     if ((!thingSame || personSame) && (near || !thingPrev) && kill.some((p) => OTHER_KILL_PRON_STRONG.test(p))) return true;
     if (!thingSame && (near || !thingPrev) && kill.some((p) => OTHER_KILL_PRON.test(p))) return true;
     return near && (parts.some((p) => PRON_CORE.test(p)) || kill.some((p) => PRON_SOFT.test(p)));
