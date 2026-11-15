@@ -619,18 +619,20 @@ const OTHER_KILL = new RegExp([
 // и «он / она / они» («Кот орёт, задушу его» — нет; «Сосед поцарапал мою машину, зарежу его» — urgent).
 // «Взглядом / в игре» гасят насилие, только если дальше в той же фразе нет настоящего орудия или последствий:
 // «Застрелила взглядом начальника, потом из ружья в упор», «Застрелил брата в контре, а потом в реальности» — urgent.
-const REAL_VERB = String.raw`(?:${VIOLENCE_CORE}|убил|убила|убили)`;
+// «Убил» — только с человеком, названным словом («Убил таракана, его кровью…», «Ноутбук завис, убил его» — нет).
+// «бы» снимает ветку только прямо перед глаголом («Я бы застрелил его», «Если бы застрелил брата»), не в конце фразы.
+const NOT_BY = String.raw`(?<!(?:^|\s)бы\s)`;
+const REAL_VERB = String.raw`${NOT_BY}${VIOLENCE_CORE}`;
+const REAL_KILL = String.raw`${NOT_BY}(?:убил|убила|убили)`;
 const REAL_OBJ = String.raw`(?:${PAST_OBJ}|его|ее|их|нас)`;
 // Настоящее орудие или последствие — достаточно всегда; «в упор», «насмерть», «не дышит» — только без игры, игрушки и «взглядом».
 const REAL_STRONG = String.raw`(?:из\s+(?:ружья|пистолета|автомата|обреза|винтовки)|ножом|топором|в\s+реальности|по\s+настоящему|в\s+реальной\s+жизни|кровью)`;
 const REAL_WEAK = String.raw`(?:в\s+упор|насмерть|не\s+дышит|не\s+двигается)`;
-const REAL_PAIR = (tail) => new RegExp(String.raw`(?<![а-я])(?:${REAL_VERB}(?![а-я])(?:\s+\S+){0,3}?\s+${REAL_OBJ}|${REAL_OBJ}(?:\s+\S+){0,2}?\s+${REAL_VERB})(?![а-я]).*?(?<![а-я])${tail}(?![а-я])`);
+const REAL_PAIR = (tail) => new RegExp(String.raw`(?<![а-я])(?:${REAL_VERB}(?![а-я])(?:\s+\S+){0,3}?\s+${REAL_OBJ}|${REAL_OBJ}(?:\s+\S+){0,2}?\s+${REAL_VERB}|${REAL_KILL}(?![а-я])(?:\s+\S+){0,3}?\s+${PAST_OBJ}|${NOT_PREP}${PAST_OBJ}(?:\s+\S+){0,2}?\s+${REAL_KILL})(?![а-я]).*?(?<![а-я])${tail}(?![а-я])`);
 const REAL_STRONG_RE = REAL_PAIR(REAL_STRONG);
 const REAL_WEAK_RE = REAL_PAIR(REAL_WEAK);
 const REAL_PLAY = new RegExp(String.raw`(?<![а-я])(?:в|во|на)\s+(?:${GAME_CORE}|пейнтбол\S*|лазертаг\S*)(?![а-я])|(?<![а-я])(?:взглядом|глазами|словом|словами|снежк\S*|водян\S*|нерф\S*)(?![а-я])`);
-// «Я бы застрелил его из ружья», «Если бы застрелил…» — не совершённое (как «я бы убил брата»).
-const REAL_WOULD = /(?<![а-я])бы(?![а-я])/;
-const VIOLENCE_REAL = { test: (p) => !REAL_WOULD.test(p) && (REAL_STRONG_RE.test(p) || (!REAL_PLAY.test(p) && REAL_WEAK_RE.test(p))) };
+const VIOLENCE_REAL = { test: (p) => (REAL_STRONG_RE.test(p) || (!REAL_PLAY.test(p) && REAL_WEAK_RE.test(p))) };
 const OTHER_KILL_PRON_STRONG = new RegExp([
   String.raw`(?<![а-я])${KILL_PRON_STRONG}(?:\s+\S+)?\s+(?:его|ее|их)(?![а-я])${NOT_GAME}${NOT_TOY}`,
   // «Задушу его подушкой» — подушка здесь орудие, не игра (NOT_TOY для «задушу» не действует).
