@@ -643,6 +643,9 @@ const CLOSE_KIN = String.raw`(?:жен[аеуы]|женой|муж|мужа|му
 const CORE_CLOSE = new RegExp([
   String.raw`(?<![а-я])${NOT_WOULD}${VIOLENCE_CORE}(?![а-я])${NOT_WOULD_AFTER}${NOT_GLANCE}\s+(?:\S+\s+)?${CLOSE_KIN}(?![а-я])${NOT_GAME_PURE}${NOT_TOY}`,
   String.raw`(?<![а-я])${NOT_PREP}(?!(?:муж|дочь|мать)(?![а-я]))${CLOSE_KIN}(?![а-я])(?:\s+\S+){0,2}\s+${NOT_WOULD}${VIOLENCE_CORE}(?![а-я])${NOT_WOULD_AFTER}${NOT_GAME_PURE}`,
+  // «Дочь избил в карате», «Мать избили в боксе» — глагол не женского рода: дочь / мать — пострадавшие
+  // («Дочь избила соперницу» — бьёт сама).
+  String.raw`(?<![а-я])${NOT_PREP}(?:дочь|мать)(?:\s+\S+){0,2}\s+${NOT_WOULD}(?:избил|избили|зарезал|зарезали|застрелил|застрелили|изнасиловал|изнасиловали|пырнул|пырнули)(?![а-я])${NOT_WOULD_AFTER}${NOT_GAME_PURE}`,
 ].join('|'));
 const VIOLENCE_REAL = { test: (p) => (REAL_STRONG_RE.test(p) || (!REAL_PLAY.test(p) && REAL_WEAK_RE.test(p))) };
 const OTHER_KILL_PRON_STRONG = new RegExp([
