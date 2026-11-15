@@ -464,7 +464,7 @@ const GAME_PURE = String.raw`(?:шахматы|шахматах|шашки|ша�
 // Бокс и единоборства гасят ядро, кроме близкого человека и тяжёлого последствия (разбор 322abdd6).
 const SPORT_FIGHT = String.raw`(?:бокс|боксе|спарринге|карате|дзюдо)`;
 const GAME_CORE = String.raw`(?:${GAME_PURE}|${SPORT_FIGHT})`;
-const NOT_GAME_PURE = String.raw`(?!\s+(?:(?!(?:и|а|но|потом|затем|пошла|пошел|пошли|ушла|ушел|ушли)(?![а-я]))\S+\s+){0,2}(?:в|во|на)\s+(?:${GAME_PURE}|турнире|олимпиаде|соревнованиях|экзамене)(?![а-я]))`;
+const NOT_GAME_PURE = String.raw`(?!\s+(?:(?!(?:и|а|но|потом|затем|пошла|пошел|пошли|ушла|ушел|ушли)(?![а-я]))\S+\s+){0,2}(?:в|во|на)\s+(?:${GAME_PURE}|турнире|олимпиаде|соревнованиях|ринге|татами|экзамене)(?![а-я]))`;
 const NOT_GAME_CORE = String.raw`(?!\s+(?:(?!(?:и|а|но|потом|затем|пошла|пошел|пошли|ушла|ушел|ушли)(?![а-я]))\S+\s+){0,2}(?:в|во|на)\s+(?:${GAME_CORE}|турнире|олимпиаде|соревнованиях|ринге|татами|экзамене)(?![а-я]))`;
 const LIMB = String.raw`(?:руки|руку|ноги|ногу|шею|кости|ребра|башку|голову|челюсть|нос|зубы|лицо|пальцы|хребет|позвоночник)`;
 // Голая угроза глаголом от первого лица — вся часть фразы («Зарежу.», «Пристрелю!»).
@@ -632,8 +632,8 @@ const REAL_VERB = String.raw`${NOT_BY}${VIOLENCE_CORE}${NOT_BY_AFTER}`;
 const REAL_KILL = String.raw`${NOT_BY}(?:убил|убила|убили)${NOT_BY_AFTER}`;
 const REAL_OBJ = String.raw`(?:${PAST_OBJ}|его|ее|их|нас)`;
 // Настоящее орудие или последствие — достаточно всегда; «в упор», «насмерть», «не дышит» — только без игры, игрушки и «взглядом».
-const REAL_STRONG = String.raw`(?:в\s+больнице|без\s+сознания|в\s+реанимации|кров\S*|из\s+(?:ружья|пистолета|автомата|обреза|винтовки)|ножом|топором|в\s+реальности|по\s+настоящему|в\s+реальной\s+жизни|кровью)`;
-const REAL_WEAK = String.raw`(?:в\s+упор|насмерть|не\s+дышит|не\s+двигается)`;
+const REAL_STRONG = String.raw`(?:кровь|крови|кровью|кровища|кровищи|кровищей|из\s+(?:ружья|пистолета|автомата|обреза|винтовки)|ножом|топором|в\s+реальности|по\s+настоящему|в\s+реальной\s+жизни|кровью)`;
+const REAL_WEAK = String.raw`(?:в\s+больнице|без\s+сознания|в\s+реанимации|в\s+упор|насмерть|не\s+дышит|не\s+двигается)`;
 const REAL_PAIR = (tail) => new RegExp(String.raw`(?<![а-я])(?:${REAL_VERB}(?![а-я])(?:\s+\S+){0,3}?\s+${REAL_OBJ}|${REAL_OBJ}(?:\s+\S+){0,2}?\s+${REAL_VERB}|${REAL_KILL}(?![а-я])(?:\s+\S+){0,3}?\s+${PAST_OBJ}|${NOT_PREP}${PAST_OBJ}(?:\s+\S+){0,2}?\s+${REAL_KILL})(?![а-я]).*?(?<![а-я])${tail}(?![а-я])`);
 const REAL_STRONG_RE = REAL_PAIR(REAL_STRONG);
 const REAL_WEAK_RE = REAL_PAIR(REAL_WEAK);
@@ -642,7 +642,7 @@ const REAL_PLAY = new RegExp(String.raw`(?<![а-я])(?:в|во|на)\s+(?:${GAME
 const CLOSE_KIN = String.raw`(?:жен[аеуы]|женой|муж|мужа|мужу|мужем|ребенка|ребенку|ребенком|дочь|дочку|дочери|сына|сыну|сыном|маму|мать|матери|папу|отца|бабушку|дедушку)`;
 const CORE_CLOSE = new RegExp([
   String.raw`(?<![а-я])${NOT_WOULD}${VIOLENCE_CORE}(?![а-я])${NOT_WOULD_AFTER}${NOT_GLANCE}\s+(?:\S+\s+)?${CLOSE_KIN}(?![а-я])${NOT_GAME_PURE}${NOT_TOY}`,
-  String.raw`(?<![а-я])${NOT_PREP}${CLOSE_KIN}(?![а-я])(?:\s+\S+){0,2}\s+${NOT_WOULD}${VIOLENCE_CORE}(?![а-я])${NOT_WOULD_AFTER}${NOT_GAME_PURE}`,
+  String.raw`(?<![а-я])${NOT_PREP}(?!(?:муж|дочь|мать)(?![а-я]))${CLOSE_KIN}(?![а-я])(?:\s+\S+){0,2}\s+${NOT_WOULD}${VIOLENCE_CORE}(?![а-я])${NOT_WOULD_AFTER}${NOT_GAME_PURE}`,
 ].join('|'));
 const VIOLENCE_REAL = { test: (p) => (REAL_STRONG_RE.test(p) || (!REAL_PLAY.test(p) && REAL_WEAK_RE.test(p))) };
 const OTHER_KILL_PRON_STRONG = new RegExp([
