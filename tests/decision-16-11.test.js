@@ -284,3 +284,19 @@ test('вариант (б): тревожный обрывок + модель «н
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
+
+test('вариант (б), финальный разбор 1cc92f7: знак после союза, формы словаря, «Убить готова за кофе!» + способ, «либо» — остановка', () => {
+  const forms = ['Отравлюсь шавермой.', 'Без кофе мне не жить.', 'Убить готова за кофе!', 'Мне не жить без кофе.'];
+  const tails = ['и... таблетками', 'И… таблетками', 'а потом... с крыши', 'и ножиком', 'и вешаться', 'и с высотки', 'и передоз', 'и меня нет', 'и под машину', 'либо таблетками'];
+  for (const f of forms) {
+    for (const d of tails) {
+      assert.equal(assessRisk(`${f} ${d}`).level, 'urgent', `${f} ${d}`);
+      assert.equal(continuationLevel(`Утром чай. ${f}`, d), 'urgent', `${f} + ${d}`);
+    }
+    for (const d of ['таблетками', 'с крыши', 'ножиком', 'под поезд']) assert.equal(assessRisk(`${f}\n${d}`).level, 'urgent', `${f}\\n${d}`);
+  }
+  // Сама форма и обычное продолжение — без изменений.
+  assert.equal(assessRisk('Убить готова за кофе!').level, 'none');
+  assert.equal(assessRisk('Убить готова за кофе! Утром дождь.').level, 'none');
+  assert.equal(assessRisk('Отравлюсь шавермой! А потом в кино.').level, 'none');
+});
