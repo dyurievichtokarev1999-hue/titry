@@ -420,9 +420,15 @@ export function continuationLevel(prev, next) {
   // Отдельное сообщение — как отдельная строка: решает правило эллиптического продолжения (server/safety.js).
   const tail = lastPhrase(joinEdits(prev));
   // Последняя фраза с собственным уровнем уже обработана при своём сообщении: её уровень не переносим на новое.
-  if (assessRisk(tail).level !== 'none') return assessRisk(body).level;
-  return assessRisk(`${tail}\n${body}`).level;
+  if (assessRisk(tail).level !== 'none') return 'none';
+  // Продолжение — только если связь с прежней фразой поднимает уровень (QA PR 16, п. 1): собственный concern или
+  // urgent нового сообщения — самостоятельный рассказ, он не наследует прежний.
+  const joint = assessRisk(`${tail}\n${body}`).level;
+  return LEVEL_RANK[joint] > LEVEL_RANK[assessRisk(body).level] ? joint : 'none';
 }
+const LEVEL_RANK = { none: 0, concern: 1, urgent: 2 };
+// Текст для модельной проверки сообщения: при продолжении — фрагмент и одна предыдущая фраза, не весь рассказ.
+const continuationContext = (prev, next) => `${lastPhrase(joinEdits(prev))}\n${String(next || '').trim()}`;
 
 // ── Логика бота (транспорт подменяется в тестах) ─────────────────────────────
 
@@ -794,13 +800,13 @@ export function createBot({
 
   // Удержание снимается только после ПРИМЕНЕНИЯ результата (как в PR 15): проверка → синхронное применение
   // (остановка / отмена ролика) → готово. Промис никогда не отклоняется.
-  function decide(chatId, s, body, level) {
+  function decide(chatId, s, body, level, ask = body) {
     return (async () => {
       let r;
       if (level === 'urgent') r = { kind: 'urgent' };
       else {
         try {
-          const g = await track(chatId, gate.verify(s.scope, body, null, body));
+          const g = await track(chatId, gate.verify(s.scope, body, null, ask));
           if (g.kind === 'safety') r = { kind: 'urgent', byModel: !!g.byModel };
           else if (g.ok) r = { kind: level };
           else r = { kind: level === 'concern' || g.refusal ? 'unknown' : 'none', code: g.code }; // условие 3; отказ — как concern
@@ -826,11 +832,11 @@ export function createBot({
     }
     const own = body ? assessRisk(body).level : 'none';
     const cont = body ? continuationLevel(s.story, body) : 'none';
-    const RANK = { none: 0, concern: 1, urgent: 2 };
-    const level = RANK[cont] > RANK[own] ? cont : own;
+    const level = cont !== 'none' ? cont : own;
     if (level === 'none' && trivial(body)) return sendSafe(chatId, TEXT.rendering);
     const epoch = s.deliveryEpoch || 0;
-    const hold = decide(chatId, s, body, level);
+    // Самостоятельное сообщение проверяется без прежнего рассказа (QA PR 16, п. 2).
+    const hold = decide(chatId, s, body, level, cont !== 'none' ? continuationContext(s.story, body) : body);
     holdDelivery(s, hold, level); // синхронно, до первого await
     const r = await hold;
     if (!alive(chatId, s)) return; // /delete во время проверки: ничего не отвечаем (запрет, если был, остаётся)

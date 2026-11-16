@@ -329,3 +329,73 @@ test('вариант (б), доделка разбора 59e8ab0: составн
   assessRisk(`Отравлюсь шавермой. И${', .'.repeat(10000)} таблетками`);
   assert.ok(Date.now() - t0 < 2000);
 });
+
+// ── QA PR 16 (93f7fbb2): самостоятельный рассказ не наследует прежний; окно доставки — только связанная фраза ──────
+
+function qaBot({ safetyCheck, render } = {}) {
+  const sent = []; const drafts = []; const c = { video: 0 };
+  const bot = createBot({
+    tg: { send: async (id, text, extra) => { sent.push({ text, extra }); }, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''), sendVideo: async () => { c.video++; } },
+    checkRetryMs: 0, safetyCheck: safetyCheck || (async () => false),
+    draft: (st, o) => { drafts.push(st); return modelLike(st, o); },
+    metrics: makeMetrics(path.join(helpDir, `qa-${Math.random()}.jsonl`), 'test-salt-fictional-0001'),
+    render: render || (async (ep, o) => { await fs.mkdir(path.dirname(o.outPath), { recursive: true }); await fs.writeFile(o.outPath, 'x'); return { outPath: o.outPath, duration: 20, seconds: 1 }; }),
+  });
+  const chat = { id: 716300 + Math.floor(Math.random() * 1000), type: 'private' };
+  const say = (text) => bot.handleUpdate({ message: { chat, text } });
+  const play = () => {
+    const m = [...sent].reverse().find((x) => x.extra?.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data?.startsWith('play:'));
+    assert.ok(m, 'кнопка ролика есть');
+    return bot.handleUpdate({ callback_query: { id: 'q', data: m.extra.reply_markup.inline_keyboard[0][0].callback_data, message: { chat } } });
+  };
+  return { bot, chat, sent, drafts, c, say, play };
+}
+const OWN_CONCERN = 'Вечером мы гуляли у реки. Хочу его ударить.';
+
+test('QA PR 16, п. 1: второй самостоятельный рассказ со своим concern не наследует первый', async () => {
+  assert.equal(assessRisk(OWN_CONCERN).level, 'concern');
+  assert.equal(continuationLevel(STORY, OWN_CONCERN), 'none', 'собственный concern — не продолжение');
+  const { bot, chat, drafts, say } = qaBot();
+  await say(STORY);
+  await say(OWN_CONCERN);
+  assert.equal(drafts.length, 2);
+  assert.ok(!drafts[1].includes('Отравлюсь'), 'в черновик второго не попадает текст первого');
+  assert.equal(bot.sessions.get(chat.id).story, OWN_CONCERN, 'в состоянии бота — только второй рассказ');
+});
+
+test('QA PR 16, п. 1: настоящее продолжение (обрывок после бытовой формы) объединяется с рассказом', async () => {
+  assert.equal(continuationLevel(STORY, 'и хватит'), 'concern');
+  const { bot, chat, drafts, say } = qaBot();
+  await say(STORY);
+  await say('и хватит');
+  assert.equal(drafts.at(-1), `${STORY}\nи хватит`);
+  assert.equal(bot.sessions.get(chat.id).story, `${STORY}\nи хватит`);
+});
+
+for (const [name, msg, expected] of [
+  ['продолжение: модель получает фрагмент и одну предыдущую фразу', 'и хватит', 'Отравлюсь шавермой.\nи хватит'],
+  ['самостоятельное сообщение: контекст прежнего рассказа не передаётся', OWN_CONCERN, OWN_CONCERN],
+]) {
+  test(`QA PR 16, п. 2, окно доставки — ${name}; «неизвестно» → 0 роликов и один ответ с контактами`, async (t) => {
+    t.mock.method(console, 'error', () => {});
+    let release; const hold = new Promise((r) => { release = r; });
+    const inputs = []; let fail = false;
+    const safetyCheck = async (x) => { if (!fail) return false; inputs.push(x); throw Object.assign(new Error('x'), { code: 'timeout' }); };
+    const render = async (ep, o) => { await hold; await fs.mkdir(path.dirname(o.outPath), { recursive: true }); await fs.writeFile(o.outPath, 'x'); return { outPath: o.outPath, duration: 20, seconds: 1 }; };
+    const { sent, c, say, play } = qaBot({ safetyCheck, render });
+    await say(STORY);
+    const p = play();
+    for (let i = 0; i < 50; i++) await new Promise((r) => setImmediate(r));
+    fail = true;
+    const before = sent.length;
+    await say(msg);
+    release();
+    await p;
+    assert.ok(inputs.length >= 1);
+    for (const x of inputs) assert.equal(x, expected);
+    assert.equal(c.video, 0);
+    const replies = sent.slice(before).filter((x) => /8-800-000-00-00/.test(x.text));
+    assert.equal(replies.length, 1, 'ровно один ответ с контактами');
+    assert.ok(replies[0].text.startsWith(TRY_LATER_TEXT));
+  });
+}
