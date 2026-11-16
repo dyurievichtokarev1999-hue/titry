@@ -309,12 +309,14 @@ const ciWord = (w) => [...w].map((c) => (/[а-я]/.test(c) ? `[${c}${c.toUpperCa
 // Внутри предложения (запятая, тире с продолжением) — как раньше: оценка голой формы.
 const CONT_CONJ = ['и', 'а', 'потом', 'или', 'плюс', 'да и', 'еще и'];
 // Пропускаются и невидимые символы (\p{Cf}: пробел нулевой ширины, мягкий перенос), метки (\p{Me}, \p{Mn}) и эмодзи-клавиши «1️⃣».
-const CONT_RE_SRC = String.raw`(?:[\s\p{P}\p{S}\p{Extended_Pictographic}\p{Cf}\p{Me}\p{Mn}]|[0-9#*]\ufe0f?\u20e3)*(?:${CONT_CONJ.map((w) => w.split(' ').map(ciWord).join(String.raw`\s+`)).join('|')})(?![а-яА-ЯёЁ])`;
+const CONT_RE_SRC = String.raw`(?:[\s\p{P}\p{S}\p{Extended_Pictographic}\p{Cf}\p{Me}\p{Mn}\u115f\u1160\u3164\uffa0\u2800]|[0-9#*]\ufe0f?\u20e3)*(?:${CONT_CONJ.map((w) => w.split(' ').map(ciWord).join(String.raw`\s+`)).join('|')})(?![а-яА-ЯёЁ])`;
 /** Начинается ли текст (после знаков и эмодзи) с союза продолжения. */
 export const startsWithContinuation = (t) => new RegExp(`^${CONT_RE_SRC}`, 'u').test(String(t ?? '').replace(/ё/g, 'е').replace(/Ё/g, 'Е'));
 // Конец формы: знак конца, перевод строки или конец текста; эмодзи, смайлик, скобка или кавычка — только если за ними
 // конец текста, знак конца, перевод строки, заглавная буква или цифра («Отравлюсь шавермой) таблетками» — не конец).
-const END_MARK = String.raw`\s*(?:[.!?…]|\n|$|(?:\p{Extended_Pictographic}|[\u200d\ufe0f\p{Cf}]|[:;]-?[)(dDрР]+|[)(»"”]|\s)+(?:[.!?…]|\n|$|\p{Lu}|\d))`;
+// Хотя бы один настоящий знак (не голый пробел): «Отравлюсь шавермой 2 таблетками» — не конец.
+const END_SIGN = String.raw`(?:\p{Extended_Pictographic}|[\u200d\ufe0f\p{Cf}]|[:;]-?[)(dDрР]+|[)(»"”])`;
+const END_MARK = String.raw`\s*(?:[.!?…]|\n|$|${END_SIGN}(?:${END_SIGN}|\s)*(?:[.!?…]|\n|$|\p{Lu}|\d))`;
 const HOUSEHOLD_RE = HOUSEHOLD_IDIOMS.map((p) => new RegExp(String.raw`(?<![а-яА-Я])${p.trim().split(/\s+/).map(ciWord).join(String.raw`[\s,]+`)}(?=${END_MARK})(?!${CONT_RE_SRC})`, 'gu'));
 // Перевод строки сохраняется: правилам RAW_URGENT нужен исходный конец строки.
 const stripHousehold = (t) => HOUSEHOLD_RE.reduce((x, re) => x.replace(re, ' · '), t);
