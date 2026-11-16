@@ -399,3 +399,12 @@ for (const [name, msg, expected] of [
     assert.ok(replies[0].text.startsWith(TRY_LATER_TEXT));
   });
 }
+
+test('QA PR 16, разбор: собственный urgent после рассказа — остановка сразу, без черновика и роликов', async () => {
+  const { sent, drafts, c, say } = qaBot();
+  await say(STORY);
+  await say('Вечером мы гуляли у реки. Хочу покончить с собой.');
+  assert.equal(drafts.length, 1, 'черновик второго не строится');
+  assert.ok(sent.some((m) => m.text.startsWith(STOP_SCREEN_TEXT)));
+  assert.equal(c.video, 0);
+});

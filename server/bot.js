@@ -412,7 +412,8 @@ export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), sal
 const withCaption = (story, caption) => (caption ? `${story}\n${caption}` : story);
 // Новое сообщение, которое начинается с союза продолжения («и», «а потом», «— и …», «🙂 и …», любой регистр), сразу
 // после текста, который кончается бытовой формой списка, — продолжение (решение 16.11, (б), уточнение родителя:
-// союз, а не регистр). Уровень считается по последней фразе прежнего текста и новому сообщению вместе.
+// союз, а не регистр). Уровень считается по последней фразе прежнего текста и новому сообщению вместе; продолжение —
+// только если этот уровень выше уровня сообщения самого по себе (QA PR 16), иначе 'none'.
 const lastPhrase = (t) => String(t || '').trim().split(/(?<=[.!?…])\s+|\n+/).filter(Boolean).at(-1) || '';
 export function continuationLevel(prev, next) {
   const body = String(next || '').trim();
@@ -519,8 +520,9 @@ export function createBot({
     s.story = story;
     s.originalStory = story;
     s.stage = 'drafting';
-    // Решение 16.11 (б): однозначное продолжение бытовой формы прежнего текста — остановка.
-    if (cont === 'urgent') return stopForSafety(chatId, s, 'urgent', { at: 'continuation' });
+    // Решение 16.11 (б): однозначное продолжение бытовой формы прежнего текста — остановка. Собственный urgent нового
+    // сообщения после рассказа — тоже сразу, до любых отправок (как до разбора QA PR 16).
+    if (cont === 'urgent' || (prevStory && assessRisk(story).level === 'urgent')) return stopForSafety(chatId, s, 'urgent', { at: 'continuation' });
     const prior = gate.status(s.scope, story);
     if (isBlocked(s, story) || prior.kind === 'safety') {
       return stopForSafety(chatId, s, 'urgent', { at: 'repeat' });
