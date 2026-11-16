@@ -282,7 +282,7 @@ test('после предела ожидания поздний ответ «б�
   assert.equal(b.sent.length, n, 'доставка закончена — обещания ролика нет');
 });
 
-test('голос во время подготовки: расшифровки нет (сбой распознавания) → «не расслышал», ролик не отменяется', async () => {
+test('голос во время подготовки: расшифровки нет (сбой распознавания) → «не разобрал голосовое», ролик не отменяется', async () => {
   const r = deferred();
   const b = setup({ transcribe: async () => { throw new Error('stt'); }, render: () => r.promise });
   await b.say(ex.story);
@@ -294,7 +294,7 @@ test('голос во время подготовки: расшифровки н
   assert.ok(b.sent.includes(NOT_HEARD_TEXT));
 });
 
-test('голос во время подготовки длиннее предела (не распознаётся) → «не расслышал», ролик не отменяется', async () => {
+test('голос во время подготовки длиннее предела (не распознаётся) → «не разобрал голосовое», ролик не отменяется', async () => {
   const r = deferred();
   const b = setup({ transcribe: async () => 'Пила чай', render: () => r.promise });
   await b.say(ex.story);
@@ -342,7 +342,7 @@ test('отмена прежней доставки (concern + «неизвест
   assert.match(c.sent.at(-1), URGENT_CARD);
 });
 
-test('кружок или аудиофайл во время подготовки — «не расслышал», ролик не отменяется', async () => {
+test('кружок или аудиофайл во время подготовки — «не разобрал голосовое», ролик не отменяется', async () => {
   for (const extra of [{ video_note: { file_id: 'v' } }, { audio: { file_id: 'a' } }]) {
     const r = deferred();
     const b = setup({ render: () => r.promise });
@@ -483,18 +483,18 @@ test('безопасный голос + незавершённое эхо, пр�
 test('отклонённое голосовое: подпись без признаков, вторая проверка — опасно → экран остановки, ролика нет', async () => {
   const r = deferred();
   let checked = 0;
-  const b = setup({ transcribe: async () => 'Пила чай', render: () => r.promise, second: (t) => { checked++; return t === 'Сдохну'; } });
+  const b = setup({ transcribe: async () => 'Пила чай', render: () => r.promise, second: (t) => { checked++; return t === 'Кот спит на окне'; } });
   await b.say(ex.story);
   const p = b.play();
   await waitFor(() => b.counters.render === 1);
-  await b.bot.handleUpdate({ message: { chat, voice: { file_id: 'f', duration: 100000 }, caption: 'Сдохну' } });
+  await b.bot.handleUpdate({ message: { chat, voice: { file_id: 'f', duration: 100000 }, caption: 'Кот спит на окне' } });
   r.resolve(); await p;
   assert.equal(checked, 1, 'подпись прошла вторую проверку');
   assert.equal(b.counters.video, 0);
   assert.match(b.sent.at(-1), URGENT_CARD);
 });
 
-test('отклонённое голосовое с безопасной подписью → «не расслышал», подпись проверена, ролик уходит', async () => {
+test('отклонённое голосовое с безопасной подписью → «не разобрал голосовое», подпись проверена, ролик уходит', async () => {
   const r = deferred();
   const b = setup({ transcribe: async () => 'Пила чай', render: () => r.promise });
   await b.say(ex.story);

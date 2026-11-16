@@ -870,7 +870,7 @@ export function createBot({
       // остановки, без ожидания и без зависимости от распознавания.
       const captionLevel = caption ? assessRisk(caption).level : 'none';
       if (s.delivering) {
-        // Голосовое в окне до отправки (условие 2). Не распознано — ролик не отменяется: «не расслышал, напиши текстом»;
+        // Голосовое в окне до отправки (условие 2). Не распознано — ролик не отменяется: «не получилось разобрать голосовое, напиши текстом»;
         // подпись проверяется как текст. Распознанное держит доставку с начала распознавания (как в PR 15).
         if (captionLevel === 'urgent') return duringRender(chatId, s, caption); // ролик отменяется сейчас
         if (voiceRefused) return caption ? Promise.all([sendSafe(chatId, TEXT.notHeard), duringRender(chatId, s, caption)]) : sendSafe(chatId, TEXT.notHeard);
