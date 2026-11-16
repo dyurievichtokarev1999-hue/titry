@@ -315,7 +315,7 @@ export const startsWithContinuation = (t) => new RegExp(`^${CONT_RE_SRC}`, 'u').
 // Конец формы: знак конца, перевод строки или конец текста; эмодзи, смайлик, скобка или кавычка — только если за ними
 // конец текста, знак конца, перевод строки, заглавная буква или цифра («Отравлюсь шавермой) таблетками» — не конец).
 // Хотя бы один настоящий знак (не голый пробел): «Отравлюсь шавермой 2 таблетками» — не конец.
-const END_SIGN = String.raw`(?:\p{Extended_Pictographic}|[\u200d\ufe0f\p{Cf}]|[:;]-?[)(dDрР]+|[)(»"”])`;
+const END_SIGN = String.raw`(?:\p{Extended_Pictographic}|[:;]-?[)(dDрР]+|[)(»"”])`;
 const END_MARK = String.raw`\s*(?:[.!?…]|\n|$|${END_SIGN}(?:${END_SIGN}|\s)*(?:[.!?…]|\n|$|\p{Lu}|\d))`;
 const HOUSEHOLD_RE = HOUSEHOLD_IDIOMS.map((p) => new RegExp(String.raw`(?<![а-яА-Я])${p.trim().split(/\s+/).map(ciWord).join(String.raw`[\s,]+`)}(?=${END_MARK})(?!${CONT_RE_SRC})`, 'gu'));
 // Перевод строки сохраняется: правилам RAW_URGENT нужен исходный конец строки.
@@ -390,8 +390,14 @@ export function cyrillicLookalikes(text) {
   });
 }
 
+// Невидимые символы (\p{Cf}: пробел нулевой ширины, мягкий перенос, word joiner, соединитель эмодзи; селекторы
+// вариантов; пустые буквы хангыль, пустой Брайль, монгольский разделитель) вырезаются до локального фильтра:
+// ими нельзя ни разорвать слово, ни изобразить конец бытовой формы.
+const INVISIBLE_RE = /[\p{Cf}\ufe00-\ufe0f\u115f\u1160\u3164\uffa0\u2800\u180e]/gu;
+export const stripInvisible = (t) => String(t ?? '').replace(INVISIBLE_RE, '');
+
 export function assessRisk(text, modelFlag = false) {
-  text = cyrillicLookalikes(text);
+  text = cyrillicLookalikes(stripInvisible(text));
   const t = stripIdioms(text);
   const full = riskCore(t, text, modelFlag);
   // Все проверки — на исходном тексте; исключение только понижает тревогу, вызванную одной гиперболой.
