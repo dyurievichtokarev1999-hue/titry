@@ -396,8 +396,18 @@ export function cyrillicLookalikes(text) {
 const INVISIBLE_RE = /[\p{Cf}\ufe00-\ufe0f\u115f\u1160\u3164\uffa0\u2800\u180e]/gu;
 export const stripInvisible = (t) => String(t ?? '').replace(INVISIBLE_RE, '');
 
+const RANK = { none: 0, concern: 1, urgent: 2 };
 export function assessRisk(text, modelFlag = false) {
-  text = cyrillicLookalikes(stripInvisible(text));
+  const raw = String(text ?? '');
+  const glued = assessOne(cyrillicLookalikes(stripInvisible(raw)), modelFlag);
+  if (!new RegExp(INVISIBLE_RE.source, 'u').test(raw)) return glued;
+  // Невидимый символ между словами («хочу\u200bумереть») — как пробел; внутри слова («по\u00adрежусь») — как ничего.
+  // Берётся более высокий уровень из двух прочтений.
+  const spaced = assessOne(cyrillicLookalikes(raw.replace(INVISIBLE_RE, ' ')), modelFlag);
+  return RANK[spaced.level] > RANK[glued.level] ? spaced : glued;
+}
+
+function assessOne(text, modelFlag) {
   const t = stripIdioms(text);
   const full = riskCore(t, text, modelFlag);
   // Все проверки — на исходном тексте; исключение только понижает тревогу, вызванную одной гиперболой.
