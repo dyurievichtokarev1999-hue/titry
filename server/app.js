@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { MOODS, TRACKS, sanitizeEpisode, validateEpisode, episodeToText, cleanInput } from '../engine/episode.js';
 import { makeDraft, hasClaudeCredentials, DEFAULT_MODEL, modelSafetyCheck } from './draft.js';
-import { renderEpisode, ROOT } from './render.js';
+import { renderEpisode, ROOT, RENDER_TIMEOUT_MS, renderTimeoutFromEnv, withRenderTimeout } from './render.js';
 import { logError, safeCode } from './errlog.js';
 import { currentHelp, prepareHelp, helpMessage, assessEpisodeRisk, validateSafeEpisode, INSUFFICIENT_TEXT, TRY_LATER_TEXT, helpContactList } from './safety.js';
 import { makeGate, modelModeAtStart, RETRY_DELAY_MS } from './gate.js';
@@ -166,6 +166,7 @@ export function createApp({
   ledger = null, // хранилище запретов; загружается до приёма задач (см. запуск ниже)
   checkRetryMs = RETRY_DELAY_MS,
   gate = makeGate({ check: safetyCheck || ((text) => modelSafetyCheck(text)), hasKey, ledger, retryDelayMs: checkRetryMs }),
+  renderTimeoutMs = RENDER_TIMEOUT_MS, // предел активного рендера от старта задачи в слоте (server/render.js)
 } = {}) {
   const OUT = path.join(dataDir, 'out');
   const LOG = path.join(dataDir, 'concierge');
@@ -268,12 +269,13 @@ export function createApp({
       const job = rendering.then(() => {
         // Проверка при запуске из очереди: остановка могла прийти, пока задача ждала.
         if (stopped()) return STOPPED;
-        return render(ep, {
+        // Предел активного рендера: по истечении файлы удаляются, ответ — 500 с кодом render_timeout.
+        return withRenderTimeout((signal) => render(ep, {
           story,
           outPath: files[0], posterPath: files[1],
           preset: ['preview', 'standard', 'hd'].includes(body.preset) ? body.preset : 'standard',
-          still: !!body.still, watermark: body.watermark ? 'сделано в титрах' : false,
-        });
+          still: !!body.still, watermark: body.watermark ? 'сделано в титрах' : false, signal,
+        }), renderTimeoutMs, { files });
       });
       rendering = job.catch(() => {});
       const r = await job;
@@ -396,7 +398,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     console.error('Запуск остановлен: не подтверждена очистка роликов прежнего запуска (data/out). Задачи не принимаются.');
     process.exit(3);
   }
-  createApp({ ledger }).listen(port, '127.0.0.1', () => {
+  createApp({ ledger, renderTimeoutMs: renderTimeoutFromEnv() }).listen(port, '127.0.0.1', () => {
     console.log(`Монтажная: http://127.0.0.1:${port}/`);
     console.log(hasClaudeCredentials() ? `Черновики: Claude (${DEFAULT_MODEL})` : 'Черновики: заготовка без ИИ (ключ ANTHROPIC_API_KEY не задан)');
   });

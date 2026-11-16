@@ -9,8 +9,8 @@ import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode
 import { makeDraft, draftRuleBased, modelSafetyCheck, hasClaudeCredentials, pairFromSentence, SAFETY_TIMEOUT_MS } from './draft.js';
 import { makeGate, modelModeAtStart, RETRY_DELAY_MS } from './gate.js';
 import { helpMessage, tryLaterMessage, NOT_HEARD_TEXT, prepareHelp, assessRisk, assessEpisodeRisk, validateSafeEpisode, threatErrors, threatPronounFilter, INSUFFICIENT_TEXT, INSUFFICIENT_INVITE_TEXT, INSUFFICIENT_AFTER_EXCLUSION, INSUFFICIENT_MATERIAL, EDIT_NOT_IN_TITLES_TEXT, editNotInTitlesText, TELEGRAM_TEXT_LIMIT } from './safety.js';
-import { renderEpisode, ROOT } from './render.js';
-import { logError, safeCode } from './errlog.js';
+import { renderEpisode, ROOT, RENDER_TIMEOUT_MS, renderTimeoutFromEnv, withRenderTimeout, removeQuiet } from './render.js';
+import { logError, safeCode, logRenderTimeout } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS, cleanupVoiceOrphans } from './stt.js';
 import { makeLedger, KEY_ENV, KEY_VERSION_ENV } from './ledger.js';
 
@@ -431,6 +431,7 @@ export function createBot({
   gate = makeGate({ check: safetyCheck || ((text) => modelSafetyCheck(text)), hasKey, ledger, retryDelayMs: checkRetryMs }),
   checkBudgetMs = CHECK_BUDGET_MS, // бюджет ожидания одной проверки сообщения в окне (вызов + повтор)
   holdWaitMs = HOLD_WAIT_MS, // жёсткий общий предел ожидания проверок сообщений, пришедших во время подготовки ролика
+  renderTimeoutMs = RENDER_TIMEOUT_MS, // предел активного рендера от старта задачи в слоте (server/render.js)
 } = {}) {
   const sessions = new Map();
   // Незавершённые черновики и отдельные проверки участника: их результат может создать запрет уже после /delete.
@@ -667,6 +668,7 @@ export function createBot({
     // Время в очереди и рендера в предел не входит (окно ждёт не дольше holdWaitMs сверх подготовки ролика).
     const windowStart = Date.now();
     let renderMs = 0;
+    let slotStart = 0; // старт задачи в слоте рендера
     if (cancelled()) { s.stage = 'draft'; return; }
     if (waiting >= 1 + MAX_RENDER_WAITING) { s.stage = 'draft'; return tg.send(chatId, TEXT.busy); }
     const ahead = waiting;
@@ -684,12 +686,17 @@ export function createBot({
         await tg.action(chatId, 'upload_video');
         // R3 (ревью QA 9.11): пока ждали tg.action, могла прийти остановка или /delete — рендер не начинается.
         if (!current()) return STALE;
-        return render(ep, { story, outPath: out, preset: process.env.BOT_PRESET || 'standard', watermark: WATERMARK || false });
+        // Предел активного рендера: отсчёт от старта в слоте; слот свободен только после выхода процесса или SIGKILL.
+        slotStart = Date.now();
+        return withRenderTimeout((signal) => render(ep, { story, outPath: out, preset: process.env.BOT_PRESET || 'standard', watermark: WATERMARK || false, signal }), renderTimeoutMs, { files: [out] });
       });
       queue = job.catch(() => {});
       const renderFrom = Date.now();
       const r = await job;
-      renderMs = Date.now() - renderFrom;
+      // Время в очереди + чистый рендер, ограниченный пределом активного рендера (п. 8 коммита 4): окно проверки сообщений
+      // не сокращается для задачи, долго ждавшей в очереди, и не растёт сверх предела рендера.
+      const done = Date.now();
+      renderMs = slotStart ? (slotStart - renderFrom) + Math.min(done - slotStart, renderTimeoutMs) : Math.min(done - renderFrom, renderTimeoutMs);
       // После рендера: если черновик остановлен или сессия удалена, видео не отправляется (файл удалится ниже).
       if (r === STALE || !current()) return;
       // Доставка ждёт модельной проверки сообщений, пришедших в окно «после проверки — до отправки» (условие 2).
@@ -714,14 +721,19 @@ export function createBot({
       await metrics.log(chatId, 'render', { seconds: Math.round(r.seconds), mood: ep.mood, music: ep.music, edits: s.edits || 0 });
       if (current()) s.stage = 'watched';
     } catch (e) {
-      logError('render', e);
-      if (current()) {
+      release(); // следующая задача и новые запросы — сразу
+      const timedOut = e?.code === 'render_timeout';
+      // Предел рендера: в журнал и метрики — только код и длительность; новая запись о человеке — только у живой сессии.
+      if (timedOut) { logRenderTimeout('render', e.ms); if (alive(chatId, s)) try { await metrics.log(chatId, 'render_timeout', { ms: Math.round(e.ms) }); } catch (m) { logError('metrics', m); } }
+      else logError('render', e);
+      // Сессия неактуальна (/delete, новый рассказ, отмена доставки) — по отменённой задаче ни одного сообщения.
+      if (current() && !(timedOut && cancelled())) {
         s.stage = 'draft';
         await tg.send(chatId, TEXT.renderFail);
       }
     } finally {
       release();
-      await fs.rm(out, { force: true });
+      await removeQuiet([out]); // ошибка удаления — в журнал только код
     }
     } finally { s.delivering--; }
   }
@@ -1163,7 +1175,7 @@ async function main() {
     { command: 'delete', description: 'Запросить удаление данных' },
   ] }).catch(() => {});
   console.log(`Бот @${me.username} запущен. Распознавание речи: ${sttAvailable() ? 'SpeechKit' : 'выключено'}.`);
-  const bot = createBot({ tg, ledger });
+  const bot = createBot({ tg, ledger, renderTimeoutMs: renderTimeoutFromEnv() });
   setInterval(bot.sweep, 10 * 60 * 1000).unref();
   let offset = 0;
   for (;;) {

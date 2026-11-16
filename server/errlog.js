@@ -15,7 +15,7 @@ const KNOWN_CODES = listed([
   // свои коды приложения
   'safety', 'timeout', 'browser', 'tmp_cleanup_pending', 'empty', 'stt_off', 'too_long', 'refusal',
   'max_tokens', 'bad_json', 'bad_response', 'incomplete_response', 'ffmpeg', 'fonts', 'no_key',
-  'ledger', 'metrics_salt', 'help_config', 'message_too_long',
+  'ledger', 'metrics_salt', 'help_config', 'message_too_long', 'render_timeout',
   // файловая система и сеть Node
   'ENOENT', 'ENOSPC', 'EACCES', 'EPERM', 'EIO', 'EEXIST', 'EMFILE', 'ENOTDIR', 'EISDIR', 'EBUSY', 'EROFS',
   'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE', 'ERR_STREAM_PREMATURE_CLOSE',
@@ -41,4 +41,9 @@ export function safeCode(e) {
 
 export function logError(stage, e, sink = console.error) {
   sink(JSON.stringify({ at: new Date().toISOString(), level: 'error', stage, code: safeCode(e), version }));
+}
+
+// Предел активного рендера (решение владельца кода 16.11): только код render_timeout и длительность в мс.
+export function logRenderTimeout(stage, ms, sink = console.error) {
+  sink(JSON.stringify({ at: new Date().toISOString(), level: 'error', stage, code: 'render_timeout', ms: Math.max(0, Math.round(Number(ms) || 0)), version }));
 }
