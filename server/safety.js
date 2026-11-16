@@ -313,7 +313,12 @@ const ciWord = (w) => [...w].map((c) => (/[а-я]/.test(c) ? `[${c}${c.toUpperCa
 // (запятая, тире с продолжением) — как раньше: оценка голой формы.
 /** Разделитель полей эпизода и правок: перевод строки, после которого продолжение — только с союза. */
 export const FIELD_SEP = '\n\u2029';
-const CONT_CONJ_RE = /^(?:а\s+потом|а\s+затем|да\s+и|еще\s+и|и|а|потом|затем|или|либо|плюс)(?![а-я])/;
+// Составные союзы — раньше одиночных: «и потом», «ну и», «а ещё» проходят тот же путь, что «и» (со знаком и без).
+const CONT_CONJ_SRC = '(?:(?:а|и)\\s+(?:потом|затем|еще)|ну\\s+и|да\\s+и|еще\\s+и|и|а|потом|затем|или|либо|плюс)';
+const CONT_CONJ_RE = new RegExp(`^${CONT_CONJ_SRC}(?![а-я])`);
+const CONT_CONJ_LEAD_RE = new RegExp(`^[\\s\\p{P}\\p{S}]*${CONT_CONJ_SRC}(?![а-яА-Я])`, 'iu');
+// Склейка частей после голого союза — не больше нескольких шагов (длинные цепочки знаков не дают квадратичного разбора).
+const CONT_GLUE_MAX = 6;
 const LEAD_SKIP_RE = /^(?:[\s\p{P}\p{S}\p{Extended_Pictographic}\p{Cf}\p{Me}\p{Mn}ᅟᅠㅤﾠ⠀]|[0-9#*]️?⃣)*/u;
 const REPLY_WORDS = new Set(['ок', 'окей', 'ok', 'okay', 'ага', 'да', 'нет', 'угу', 'ну', 'хорошо', 'ладно', 'жду', 'понял', 'поняла', 'спасибо', 'спс',
   'благодарю', 'супер', 'класс', 'круто', 'ура', 'thanks', 'большое', 'привет', 'пока', 'хм', 'ого', 'вау', 'ой', 'эх', 'ах']);
@@ -355,7 +360,7 @@ function householdAfter(after) {
   // Знаки сразу после союза («и... таблетками», «И… ядом») не обрезают обрывок: склеиваются следующие части.
   const parts = rest.split(/[.!?…;\n\u2029]/);
   let fragment = parts[0];
-  for (let k = 1; k < parts.length && !/[а-яa-z]/i.test(fragment.replace(/^[\s\p{P}\p{S}]*(?:а\s+потом|а\s+затем|да\s+и|еще\s+и|и|а|потом|затем|или|либо|плюс)(?![а-яА-Я])/iu, '')); k++) fragment += ` ${parts[k]}`;
+  for (let k = 1; k < Math.min(parts.length, CONT_GLUE_MAX + 1) && !/[а-яa-z]/i.test(fragment.replace(CONT_CONJ_LEAD_RE, '')); k++) fragment += ` ${parts[k]}`;
   // Отдельная строка в тексте человека — да; поле эпизода или правка (FIELD_SEP) — нет.
   const standalone = lead.includes('\n') && !lead.includes('\u2029');
   const kind = continuationKind(lead.replace(/[\s.!?…]+/g, ' ') + fragment, { standalone });
