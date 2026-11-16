@@ -408,7 +408,16 @@ export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), sal
 }
 
 // Подпись — новая строка после расшифровки, с заглавной буквы: перенос — граница предложения (п. 4 КРИТИКИ PR 16).
-const withCaption = (story, caption) => (caption ? `${story}\n${caption.charAt(0).toUpperCase()}${caption.slice(1)}` : story);
+// Решение 16.11, (б): регистр подписи не меняется — правило строчного продолжения одно для строки, сообщения и правки.
+const withCaption = (story, caption) => (caption ? `${story}\n${caption}` : story);
+// Новое сообщение со строчной буквы сразу после текста, который кончается бытовой формой списка, — продолжение
+// (решение 16.11, (б)): уровень считается по последней фразе прежнего текста и новому сообщению вместе.
+const lastPhrase = (t) => String(t || '').trim().split(/(?<=[.!?…])\s+|\n+/).filter(Boolean).at(-1) || '';
+export function continuationLevel(prev, next) {
+  const body = String(next || '').trim();
+  if (!prev || !/^\p{Ll}/u.test(body)) return 'none';
+  return assessRisk(`${lastPhrase(joinEdits(prev))}\n${body}`).level;
+}
 
 // ── Логика бота (транспорт подменяется в тестах) ─────────────────────────────
 
@@ -483,6 +492,7 @@ export function createBot({
   const isBlocked = (s, story) => !!(s.blocked && s.blocked.has(storyKey(story)));
 
   async function handleStory(chatId, s, story, source) {
+    const prevStory = s.story;
     // Новый рассказ сразу отменяет прежний черновик: его кнопки больше ничего не запускают.
     s.episode = null;
     s.skeleton = null;
@@ -492,6 +502,8 @@ export function createBot({
     s.story = story;
     s.originalStory = story;
     s.stage = 'drafting';
+    // Решение 16.11, (б): сообщение со строчной буквы сразу после бытовой формы — продолжение прежнего текста.
+    if (continuationLevel(prevStory, story) === 'urgent') return stopForSafety(chatId, s, 'urgent', { at: 'continuation' });
     const prior = gate.status(s.scope, story);
     if (isBlocked(s, story) || prior.kind === 'safety') {
       return stopForSafety(chatId, s, 'urgent', { at: 'repeat' });
@@ -788,7 +800,9 @@ export function createBot({
       const known = m && KNOWN_COMMANDS.has(m[1].toLowerCase());
       body = known ? (m[2] || '').trim() : body.replace(/^\/+/, '').trim();
     }
-    const level = body ? assessRisk(body).level : 'none';
+    const own = body ? assessRisk(body).level : 'none';
+    const cont = body ? continuationLevel(s.story, body) : 'none';
+    const level = cont === 'urgent' ? 'urgent' : own;
     if (level === 'none' && trivial(body)) return sendSafe(chatId, TEXT.rendering);
     const epoch = s.deliveryEpoch || 0;
     const hold = decide(chatId, s, body, level);
