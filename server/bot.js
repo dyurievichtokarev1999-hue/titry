@@ -8,8 +8,8 @@ import { fileURLToPath } from 'node:url';
 import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS, episodeToText, EDIT_SEP, cleanInput, joinEdits } from '../engine/episode.js';
 import { makeDraft, draftRuleBased, modelSafetyCheck, hasClaudeCredentials, pairFromSentence, SAFETY_TIMEOUT_MS } from './draft.js';
 import { makeGate, modelModeAtStart, RETRY_DELAY_MS } from './gate.js';
-import { helpMessage, tryLaterMessage, NOT_HEARD_TEXT, prepareHelp, assessRisk, assessEpisodeRisk, validateSafeEpisode, threatErrors, threatPronounFilter, INSUFFICIENT_TEXT, INSUFFICIENT_INVITE_TEXT, INSUFFICIENT_AFTER_EXCLUSION, INSUFFICIENT_MATERIAL, EDIT_NOT_IN_TITLES_TEXT, editNotInTitlesText, TELEGRAM_TEXT_LIMIT } from './safety.js';
-import { renderEpisode, ROOT, RENDER_TIMEOUT_MS, renderTimeoutFromEnv, withRenderTimeout, removeQuiet } from './render.js';
+import { startsWithContinuation, helpMessage, tryLaterMessage, NOT_HEARD_TEXT, prepareHelp, assessRisk, assessEpisodeRisk, validateSafeEpisode, threatErrors, threatPronounFilter, INSUFFICIENT_TEXT, INSUFFICIENT_INVITE_TEXT, INSUFFICIENT_AFTER_EXCLUSION, INSUFFICIENT_MATERIAL, EDIT_NOT_IN_TITLES_TEXT, editNotInTitlesText, TELEGRAM_TEXT_LIMIT } from './safety.js';
+import { renderEpisode, ROOT, RENDER_TIMEOUT_MS, KILL_GRACE_MS, renderTimeoutFromEnv, withRenderTimeout, removeQuiet } from './render.js';
 import { logError, safeCode, logRenderTimeout } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS, cleanupVoiceOrphans } from './stt.js';
 import { makeLedger, KEY_ENV, KEY_VERSION_ENV } from './ledger.js';
@@ -410,12 +410,13 @@ export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), sal
 // Подпись — новая строка после расшифровки, с заглавной буквы: перенос — граница предложения (п. 4 КРИТИКИ PR 16).
 // Решение 16.11, (б): регистр подписи не меняется — правило строчного продолжения одно для строки, сообщения и правки.
 const withCaption = (story, caption) => (caption ? `${story}\n${caption}` : story);
-// Новое сообщение со строчной буквы сразу после текста, который кончается бытовой формой списка, — продолжение
-// (решение 16.11, (б)): уровень считается по последней фразе прежнего текста и новому сообщению вместе.
+// Новое сообщение, которое начинается с союза продолжения («и», «а потом», «— и …», «🙂 и …», любой регистр), сразу
+// после текста, который кончается бытовой формой списка, — продолжение (решение 16.11, (б), уточнение родителя:
+// союз, а не регистр). Уровень считается по последней фразе прежнего текста и новому сообщению вместе.
 const lastPhrase = (t) => String(t || '').trim().split(/(?<=[.!?…])\s+|\n+/).filter(Boolean).at(-1) || '';
 export function continuationLevel(prev, next) {
   const body = String(next || '').trim();
-  if (!prev || !/^\p{Ll}/u.test(body)) return 'none';
+  if (!prev || !startsWithContinuation(body)) return 'none';
   // Короткое «ок / спасибо / да» (закрытый список TRIVIAL_REPLIES) — ответ, а не продолжение фразы.
   const plain = body.toLowerCase().replace(/ё/g, 'е').replace(/[^a-zа-я0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
   if (!plain || TRIVIAL_REPLIES.has(plain)) return 'none';
@@ -435,6 +436,7 @@ export function createBot({
   checkBudgetMs = CHECK_BUDGET_MS, // бюджет ожидания одной проверки сообщения в окне (вызов + повтор)
   holdWaitMs = HOLD_WAIT_MS, // жёсткий общий предел ожидания проверок сообщений, пришедших во время подготовки ролика
   renderTimeoutMs = RENDER_TIMEOUT_MS, // предел активного рендера от старта задачи в слоте (server/render.js)
+  renderGraceMs = KILL_GRACE_MS, // запасной предел: renderTimeoutMs + 2×renderGraceMs — слот освобождается принудительно
 } = {}) {
   const sessions = new Map();
   // Незавершённые черновики и отдельные проверки участника: их результат может создать запрет уже после /delete.
@@ -691,7 +693,7 @@ export function createBot({
         if (!current()) return STALE;
         // Предел активного рендера: отсчёт от старта в слоте; слот свободен только после выхода процесса или SIGKILL.
         slotStart = Date.now();
-        return withRenderTimeout((signal) => render(ep, { story, outPath: out, preset: process.env.BOT_PRESET || 'standard', watermark: WATERMARK || false, signal }), renderTimeoutMs, { files: [out] });
+        return withRenderTimeout((signal) => render(ep, { story, outPath: out, preset: process.env.BOT_PRESET || 'standard', watermark: WATERMARK || false, signal }), renderTimeoutMs, { files: [out], graceMs: renderGraceMs });
       });
       queue = job.catch(() => {});
       const renderFrom = Date.now();

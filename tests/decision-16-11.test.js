@@ -176,3 +176,39 @@ test('разбор: короткие «ок / спасибо / да» после
   });
 });
 
+// ── Уточнение 16.11 (разбор 8f5726cc): продолжение — союз, а не регистр ────────────────────────────────
+
+test('уточнение (б): после «Отравлюсь шавермой.» обычные сообщения — ролик, не продолжение', async () => {
+  for (const next of ['ну и день был', 'да, было весело', 'кстати, вечером смотрели кино', 'Ок, спасибо']) {
+    assert.equal(continuationLevel('Отравлюсь шавермой.', next), 'none', next);
+    await withBot(async ({ say, play, stopped, c }) => {
+      await say(STORY);
+      await say(next);
+      assert.ok(!stopped(), next);
+    });
+  }
+  await withBot(async ({ say, play, stopped, c }) => {
+    await say(STORY);
+    await say('ну и день был');
+    assert.ok(!stopped());
+  });
+});
+
+test('уточнение (б): союз продолжения в любом регистре и после знаков, эмодзи, кавычек — остановка', async () => {
+  for (const next of ['а потом таблетками', '— и таблетками', '...и таблетками', '🙂 и таблетками', '"и таблетками"', 'А потом таблетками.'])
+    assert.equal(continuationLevel('Отравлюсь шавермой.', next), 'urgent', next);
+  for (const t of ['Отравлюсь шавермой. А потом таблетками.', 'Без кофе мне не жить. И без тебя тоже.']) assert.equal(assessRisk(t).level, 'urgent', t);
+  for (const next of ['— и таблетками', 'А потом таблетками.']) {
+    await withBot(async ({ say, stopped, c }) => {
+      await say(STORY);
+      await say(next);
+      assert.ok(stopped(), next);
+      assert.equal(c.video, 0);
+    });
+  }
+  await withBot(async ({ say, stopped }) => {
+    await say('Утром я пила чай. Днём я мыла посуду. Отравлюсь шавермой. А потом таблетками.');
+    assert.ok(stopped(), 'в том же сообщении');
+  });
+});
+

@@ -108,20 +108,32 @@ export async function removeQuiet(files) {
  * или получил SIGKILL), — слот до этого не освобождается. После отмены результат отбрасывается, files и файлы
  * результата удаляются, бросается ошибка с кодом render_timeout и длительностью ms.
  */
-export async function withRenderTimeout(run, timeoutMs = RENDER_TIMEOUT_MS, { files = [] } = {}) {
+export async function withRenderTimeout(run, timeoutMs = RENDER_TIMEOUT_MS, { files = [], graceMs = KILL_GRACE_MS } = {}) {
   const ac = new AbortController();
   const started = Date.now();
   const timer = setTimeout(() => ac.abort(renderTimeoutError(timeoutMs)), timeoutMs);
+  // Запасной предел (timeout + 2×grace): если рендер не завершился и после отмены (например, завис запуск браузера
+  // до подписки на сигнал), слот освобождается принудительно; поздний результат отбрасывается и его файлы удаляются.
+  let backstop;
+  const forced = new Promise((resolve) => { backstop = setTimeout(() => resolve(FORCED), timeoutMs + 2 * graceMs); });
+  const work = Promise.resolve().then(() => run(ac.signal));
   try {
-    const r = await run(ac.signal);
+    const r = await Promise.race([work, forced]);
+    if (r === FORCED) {
+      await removeQuiet(files);
+      work.then((late) => removeQuiet([late?.outPath, late?.posterPath, ...files]), () => removeQuiet(files));
+      throw Object.assign(renderTimeoutError(Date.now() - started), { forced: true });
+    }
     if (!ac.signal.aborted) return r;
     await removeQuiet([r?.outPath, r?.posterPath, ...files]); // поздний результат отменённой задачи
   } catch (e) {
+    if (e?.forced) throw e;
     if (!ac.signal.aborted) throw e;
     await removeQuiet(files);
-  } finally { clearTimeout(timer); }
+  } finally { clearTimeout(timer); clearTimeout(backstop); }
   throw renderTimeoutError(Date.now() - started);
 }
+const FORCED = Symbol('forced');
 
 function runFfmpeg(args, feed, signal) {
   return new Promise((resolve, reject) => {

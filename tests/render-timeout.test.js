@@ -34,7 +34,7 @@ function fakeProc({ ignoreTerm = false } = {}) {
 }
 
 // behave(chatId, o) — поведение подставного рендера для чата; по умолчанию — быстрый ролик.
-function setup(behave = {}) {
+function setup(behave = {}, extra = {}) {
   const sent = []; const videos = []; const events = []; const log = { kills: [], outs: {}, starts: [] };
   const tg = {
     send: async (c, text) => { sent.push({ c, text }); },
@@ -43,7 +43,7 @@ function setup(behave = {}) {
   };
   const metrics = { hash: (id) => `h${id}`, log: async (id, ev, extra = {}) => { events.push({ id, ev, ...extra }); }, forget: async () => {} };
   const bot = createBot({
-    tg, metrics, checkRetryMs: 0, renderTimeoutMs: LIMIT,
+    tg, metrics, checkRetryMs: 0, renderTimeoutMs: LIMIT, ...extra,
     draft: async () => ({ episode: structuredClone(ex.episode), risk: { level: 'none' }, provider: 'claude', dropped: [] }),
     safetyCheck: async () => false,
     render: async (ep, o) => {
@@ -175,3 +175,27 @@ test('TITRY_RENDER_TIMEOUT_MS: «0», «-5», «abc» → 180000 и одна с�
   assert.equal(renderTimeoutFromEnv({ env: {}, log: (l) => lines.push(l) }), 180000);
   assert.equal(lines.length, 0);
 });
+
+test('запасной предел: рендер не слушает отмену и не завершается → слот и доставка освобождаются, B проходит, поздний результат отброшен', async () => {
+  const A = 81041, B = 81042;
+  let lateResolve;
+  const late = new Promise((r) => { lateResolve = r; });
+  const b = setup({ [A]: async (o) => { await late; await fs.writeFile(o.outPath, 'поздний'); return { seconds: 0, duration: 24, outPath: o.outPath }; } }, { renderGraceMs: 20 });
+  await b.say(A, ex.story); await b.say(B, ex.story);
+  const t0 = Date.now();
+  await Promise.all([b.play(A), b.play(B)]);
+  assert.ok(Date.now() - t0 >= LIMIT + 40, 'освобождение — по запасному пределу (timeout + 2×grace)');
+  assert.equal(b.videos.filter((c) => c === A).length, 0);
+  assert.equal(b.textsTo(A).filter((t) => t === TEXT.renderFail).length, 1);
+  assert.equal(b.videos.filter((c) => c === B).length, 1, 'слот свободен: B доставлен');
+  assert.equal(await exists(b.log.outs[A]), false, 'файл A удалён при принудительном освобождении');
+  // Доставка A освобождена: новый запуск принимается (не «занято», не зависает).
+  const sentBefore = b.textsTo(A).length;
+  lateResolve();
+  await sleep(30);
+  assert.equal(await exists(b.log.outs[A]), false, 'поздний результат A удалён');
+  assert.equal(b.videos.filter((c) => c === A).length, 0, 'поздний результат не отправлен');
+  assert.equal(b.textsTo(A).length, sentBefore, 'после позднего результата сообщений нет');
+  assert.equal(b.bot.sessions.get(A).delivering || 0, 0, 's.delivering освобождён');
+});
+
