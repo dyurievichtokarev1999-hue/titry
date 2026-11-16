@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS, episodeToText, EDIT_SEP, cleanInput, joinEdits } from '../engine/episode.js';
 import { makeDraft, draftRuleBased, modelSafetyCheck, hasClaudeCredentials, pairFromSentence, SAFETY_TIMEOUT_MS } from './draft.js';
 import { makeGate, modelModeAtStart, RETRY_DELAY_MS } from './gate.js';
-import { startsWithContinuation, helpMessage, tryLaterMessage, NOT_HEARD_TEXT, prepareHelp, assessRisk, assessEpisodeRisk, validateSafeEpisode, threatErrors, threatPronounFilter, INSUFFICIENT_TEXT, INSUFFICIENT_INVITE_TEXT, INSUFFICIENT_AFTER_EXCLUSION, INSUFFICIENT_MATERIAL, EDIT_NOT_IN_TITLES_TEXT, editNotInTitlesText, TELEGRAM_TEXT_LIMIT } from './safety.js';
+import { startsWithContinuation, modelConcernMessage, helpMessage, tryLaterMessage, NOT_HEARD_TEXT, prepareHelp, assessRisk, assessEpisodeRisk, validateSafeEpisode, threatErrors, threatPronounFilter, INSUFFICIENT_TEXT, INSUFFICIENT_INVITE_TEXT, INSUFFICIENT_AFTER_EXCLUSION, INSUFFICIENT_MATERIAL, EDIT_NOT_IN_TITLES_TEXT, editNotInTitlesText, TELEGRAM_TEXT_LIMIT } from './safety.js';
 import { renderEpisode, ROOT, RENDER_TIMEOUT_MS, KILL_GRACE_MS, renderTimeoutFromEnv, withRenderTimeout, removeQuiet } from './render.js';
 import { logError, safeCode, logRenderTimeout } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS, cleanupVoiceOrphans } from './stt.js';
@@ -419,8 +419,8 @@ export function continuationLevel(prev, next) {
   if (!prev || !body) return 'none';
   // Отдельное сообщение — как отдельная строка: решает правило эллиптического продолжения (server/safety.js).
   const tail = lastPhrase(joinEdits(prev));
-  // Опасная сама по себе последняя фраза уже обработана при своём сообщении: её не переносим на новое.
-  if (assessRisk(tail).level === 'urgent') return assessRisk(body).level;
+  // Последняя фраза с собственным уровнем уже обработана при своём сообщении: её уровень не переносим на новое.
+  if (assessRisk(tail).level !== 'none') return assessRisk(body).level;
   return assessRisk(`${tail}\n${body}`).level;
 }
 
@@ -500,6 +500,10 @@ export function createBot({
 
   async function handleStory(chatId, s, story, source) {
     const prevStory = s.story;
+    // Решение 16.11 (б): тревожный обрывок после бытовой формы прежнего текста — продолжение рассказа уровня concern:
+    // черновик строится по обоим сообщениям вместе, дальше решает модельная проверка перед рендером.
+    const cont = continuationLevel(prevStory, story);
+    if (cont === 'concern') story = `${prevStory}\n${story}`;
     // Новый рассказ сразу отменяет прежний черновик: его кнопки больше ничего не запускают.
     s.episode = null;
     s.skeleton = null;
@@ -509,8 +513,8 @@ export function createBot({
     s.story = story;
     s.originalStory = story;
     s.stage = 'drafting';
-    // Решение 16.11, (б): сообщение со строчной буквы сразу после бытовой формы — продолжение прежнего текста.
-    if (continuationLevel(prevStory, story) === 'urgent') return stopForSafety(chatId, s, 'urgent', { at: 'continuation' });
+    // Решение 16.11 (б): однозначное продолжение бытовой формы прежнего текста — остановка.
+    if (cont === 'urgent') return stopForSafety(chatId, s, 'urgent', { at: 'continuation' });
     const prior = gate.status(s.scope, story);
     if (isBlocked(s, story) || prior.kind === 'safety') {
       return stopForSafety(chatId, s, 'urgent', { at: 'repeat' });
@@ -577,6 +581,8 @@ export function createBot({
     await metrics.log(chatId, 'story', { source, period: s.period, chars: Math.round(story.length / 50) * 50 });
     if (!current()) return;
     if (r.risk.level === 'concern') await tg.send(chatId, helpMessage('concern'));
+    // Решение 16.11 (в): флаг модели — мягкий блок с контактами рядом с черновиком, без остановки ролика.
+    else if (r.modelConcern) await tg.send(chatId, modelConcernMessage());
     if (!current()) return;
     s.episode = r.episode;
     s.verdict = 'ok';
@@ -820,7 +826,8 @@ export function createBot({
     }
     const own = body ? assessRisk(body).level : 'none';
     const cont = body ? continuationLevel(s.story, body) : 'none';
-    const level = cont === 'urgent' ? 'urgent' : own;
+    const RANK = { none: 0, concern: 1, urgent: 2 };
+    const level = RANK[cont] > RANK[own] ? cont : own;
     if (level === 'none' && trivial(body)) return sendSafe(chatId, TEXT.rendering);
     const epoch = s.deliveryEpoch || 0;
     const hold = decide(chatId, s, body, level);
@@ -1024,7 +1031,7 @@ export function createBot({
   async function shortText(chatId, s, text) {
     // Запрещённый раньше текст (например, моделью в окне до отправки) — снова остановка, а не «подробнее».
     // Строчное продолжение бытовой формы (решение 16.11, (б)) — и для коротких сообщений: «и ядом» после «Отравлюсь шавермой.».
-    if (assessRisk(text).level !== 'none' || continuationLevel(s.story, text) === 'urgent' || isBlocked(s, text) || gate.status(s.scope, text).kind === 'safety') return handleStory(chatId, s, text, 'text');
+    if (assessRisk(text).level !== 'none' || continuationLevel(s.story, text) !== 'none' || isBlocked(s, text) || gate.status(s.scope, text).kind === 'safety') return handleStory(chatId, s, text, 'text');
     return tg.send(chatId, TEXT.more);
   }
 

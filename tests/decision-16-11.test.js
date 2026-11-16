@@ -6,7 +6,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createBot, makeMetrics, continuationLevel } from '../server/bot.js';
-import { assessRisk, prepareHelp, STOP_SCREEN_TEXT, cyrillicLookalikes } from '../server/safety.js';
+import { assessRisk, prepareHelp, STOP_SCREEN_TEXT, TRY_LATER_TEXT, cyrillicLookalikes } from '../server/safety.js';
 import { joinEdits, EDIT_SEP } from '../engine/episode.js';
 import { modelLike } from './helpers/fake-model.js';
 
@@ -154,16 +154,6 @@ test('разбор: «бьёт дрожь / током / в шутку» — н�
   assert.notEqual(assessRisk('Умру со смеху.').level, 'urgent');
 });
 
-test('разбор: короткое строчное сообщение после бытовой формы — продолжение, экран остановки', async () => {
-  for (const [first, next] of [['Утром я пила чай. Днём я мыла посуду. Отравлюсь шавермой.', 'и ядом'], ['Без кофе мне не жить.', 'и без тебя'], ['Мне не жить без кофе.', 'и тебя']]) {
-    await withBot(async ({ say, stopped }) => {
-      await say(first);
-      await say(next);
-      assert.ok(stopped(), `${first} + ${next}`);
-    });
-  }
-});
-
 test('разбор: короткие «ок / спасибо / да» после бытовой формы — ответ, а не продолжение', async () => {
   assert.equal(continuationLevel('Отравлюсь шавермой.', 'спасибо'), 'none');
   assert.equal(continuationLevel('Отравлюсь шавермой.', 'ок 🙂'), 'none');
@@ -191,24 +181,6 @@ test('уточнение (б): после «Отравлюсь шавермой.
     await say(STORY);
     await say('ну и день был');
     assert.ok(!stopped());
-  });
-});
-
-test('уточнение (б): союз продолжения в любом регистре и после знаков, эмодзи, кавычек — остановка', async () => {
-  for (const next of ['а потом таблетками', '— и таблетками', '...и таблетками', '🙂 и таблетками', '"и таблетками"', 'А потом таблетками.'])
-    assert.equal(continuationLevel('Отравлюсь шавермой.', next), 'urgent', next);
-  for (const t of ['Отравлюсь шавермой. А потом таблетками.', 'Без кофе мне не жить. И без тебя тоже.']) assert.equal(assessRisk(t).level, 'urgent', t);
-  for (const next of ['— и таблетками', 'А потом таблетками.']) {
-    await withBot(async ({ say, stopped, c }) => {
-      await say(STORY);
-      await say(next);
-      assert.ok(stopped(), next);
-      assert.equal(c.video, 0);
-    });
-  }
-  await withBot(async ({ say, stopped }) => {
-    await say('Утром я пила чай. Днём я мыла посуду. Отравлюсь шавермой. А потом таблетками.');
-    assert.ok(stopped(), 'в том же сообщении');
   });
 });
 
@@ -249,66 +221,66 @@ test('эллиптическое продолжение: полная фраза
   });
 });
 
-test('эллиптическое продолжение: обрывок без глагола с союзом или отдельным сообщением — остановка', async () => {
-  for (const next of ['а потом таблетками', 'a потом таблетками', 'затем таблетками', 'таблетками', 'и ножом', '— и таблетками', '🙂 и таблетками', 'А потом таблетками.'])
-    assert.equal(continuationLevel('Утром я пила чай. Отравлюсь шавермой.', next), 'urgent', next);
-  for (const t of ['Отравлюсь шавермой. А потом таблетками.', 'Без кофе мне не жить. И без тебя тоже.', 'Отравлюсь шавермой.\nзатем с крыши'])
-    assert.equal(assessRisk(t).level, 'urgent', t);
-  for (const next of ['таблетками', 'a потом таблетками']) {
-    await withBot(async ({ say, stopped, c }) => {
-      await say(STORY);
-      await say(next);
-      assert.ok(stopped(), next);
-      assert.equal(c.video, 0);
-    });
-  }
+// ── Решение владельца кода 16.11, вариант (б): правило продолжения заморожено ─────────────────────────────
+
+test('вариант (б), обязательное: тревожный обрывок — concern; обычная речь — ролик; однозначный способ — остановка', () => {
+  const P = 'Утром я пила чай. Отравлюсь шавермой.';
+  for (const n of ['и уснуть', 'и пусть плачут', 'и хватит', 'и всё, что было']) assert.equal(continuationLevel(P, n), 'concern', n);
+  for (const n of ['а потом газету', 'и колесо обозрения', 'и чёрт с ним', 'и жизнь прекрасна', 'Таблетки от головы', 'Таблетку бы',
+    'и мама смеялась', 'а потом пошли в кино', 'Ок, спасибо', 'хаха 😂']) assert.equal(continuationLevel(P, n), 'none', n);
+  for (const n of ['и таблетками', 'а потом таблетками.', 'a потом таблетками', 'затем с крыши', 'таблетками', 'затем ножом', 'а потом с крыши',
+    '— и таблетками', '🙂 и таблетками', 'А потом таблетками.']) assert.equal(continuationLevel(P, n), 'urgent', n);
 });
 
-test('разбор e7ce243: опасные обрывки после бытовой формы — остановка; обычные реплики — нет', () => {
+test('вариант (б): опасные обрывки прошлых разборов не дают none (urgent или concern — решает модель)', () => {
   const P = 'Утром я пила чай. Отравлюсь шавермой.';
-  for (const n of ['а потом в петлю', 'А потом в окно.', 'а потом на рельсы', 'и в реку', 'и в могилу', 'и на кладбище', 'и в последний раз',
-    'и таблетки', 'А потом таблеток.', 'и 20 таблеток', 'и вены', 'а потом верёвка', 'и пистолет', 'и газ', 'и снотворное', 'и крыша',
-    'и вниз', 'и насмерть', 'и до смерти', 'и по венам', 'и к чёрту всё', 'и всё', 'и конец', 'и всё, конец', 'и точка', 'и прощай', 'и меня',
-    'и таблетками, всеми что есть дома', 'и в петлю полезу', 'и вены вскрою', 'и газ открою', 'и всё закончу'])
-    assert.equal(continuationLevel(P, n), 'urgent', n);
-  for (const n of ['Тоже', 'Снова', 'С подругой', 'С мамой', 'Без сахара', 'Всей семьёй', 'Шаурмой', 'Тортом', 'Хаха', 'и вечером', 'и домой',
-    'и к маме', 'Привет', 'и все собрались', 'и мы смеялись', 'и мама смеялась'])
-    assert.notEqual(continuationLevel(P, n), 'urgent', n);
-  for (const t of ['Без кофе мне не жить. А без тебя — тем более.', 'Без кофе мне не жить. И без смысла.']) assert.equal(assessRisk(t).level, 'urgent', t);
+  for (const n of ['и ядом', 'и в петлю', 'А потом в окно.', 'и таблетки', 'и 20 таблеток', 'и вены', 'и пистолет', 'и вниз', 'и насмерть',
+    'и всё, конец', 'и прощай', 'и в петлю полезу', 'и вены вскрою', 'и в воду', 'и на тот свет', 'и в омут', 'и ко дну', 'и шприцем',
+    'и уснуть и не проснуться', 'и меня не будет', 'и никто не заметит', 'и всем будет легче', 'и выпить всё что есть в аптечке',
+    'и в окно вышла', 'и газом надышалась', 'и под поезд бросилась', 'и в последний путь', 'и насовсем', 'С крыши', 'Ядом'])
+    assert.notEqual(continuationLevel(P, n), 'none', n);
+  assert.notEqual(assessRisk('Без кофе мне не жить. И без тебя тоже.').level, 'none');
 });
 
-test('разбор c40da63: способы с «в / на / к / по» и длинные перечни — остановка; рассказ в прошедшем времени и места из списка — ролик', () => {
-  const P = 'Утром я пила чай. Отравлюсь шавермой.';
-  for (const n of ['и в воду', 'и в воду прыгну', 'и на тот свет', 'и на тот свет уйду', 'и в омут', 'а потом в пропасть', 'и в прорубь', 'и ко дну',
-    'и на небо', 'и к праотцам', 'и по горлу', 'и в ванну', 'и на трассу', 'и к тебе', 'и шприцем', 'и полотенцем',
-    'и в окно, и с крыши, и под поезд, и вообще куда угодно']) assert.equal(continuationLevel(P, n), 'urgent', n);
-  for (const n of ['и окно открыла', 'а потом газету смотрела', 'и кровать заправила', 'и ножом резала хлеб', 'и реку видели',
-    'а потом в окно смотрела', 'а потом на крышу смотрели закат', 'Огонь!', 'Свет', 'А потом в кино.', 'А на работе завал.'])
-    assert.notEqual(continuationLevel(P, n), 'urgent', n);
+test('вариант (б): тревожный обрывок отдельным сообщением — concern в рассказе; без ключа API — по решению 13.11 (ролик и блок помощи)', async () => {
+  const sent = []; let videos = 0;
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-b-nokey-'));
+  const bot = createBot({
+    tg: { send: async (id, text, extra) => { sent.push({ text, extra }); }, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''), sendVideo: async () => { videos++; } },
+    hasKey: () => false, draft: modelLike, metrics: makeMetrics(path.join(dir, 'm.jsonl'), 'test-salt-fictional-0001'),
+    render: async (ep, o) => { await fs.mkdir(path.dirname(o.outPath), { recursive: true }); await fs.writeFile(o.outPath, 'x'); return { outPath: o.outPath, duration: 20, seconds: 1 }; },
+  });
+  const chat = { id: 716211, type: 'private' };
+  try {
+    await bot.handleUpdate({ message: { chat, text: 'Утром я пила чай. Днём я мыла посуду. Отравлюсь шавермой.' } });
+    await bot.handleUpdate({ message: { chat, text: 'и хватит' } });
+    assert.ok(!sent.some((m) => m.text.startsWith(STOP_SCREEN_TEXT)), 'не остановка');
+    assert.ok(sent.some((m) => /8-800-000-00-00/.test(m.text)), 'concern: блок помощи с контактами');
+    const m = [...sent].reverse().find((x) => x.extra?.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data?.startsWith('play:'));
+    assert.ok(m, 'черновик есть');
+    await bot.handleUpdate({ callback_query: { id: 'q', data: m.extra.reply_markup.inline_keyboard[0][0].callback_data, message: { chat } } });
+    assert.equal(videos, 1, 'без ключа — только локальный фильтр, concern не мешает ролику (условие 4 решения 13.11)');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
-test('разбор 711fbc5: инфинитив и будущее время после союза — продолжение; без союза — только однозначный способ без глагола', () => {
-  const P = 'Утром я пила чай. Отравлюсь шавермой.';
-  for (const n of ['и уснуть и не проснуться', 'и всё закончить', 'и не просыпаться', 'и утопиться', 'и выпить всё что есть в аптечке', 'и меня не будет',
-    'и всем будет легче', 'и никто не заметит', 'и умереть', 'а потом в реанимацию', 'С крыши', 'Ядом', 'и в подвал', 'и с моста в канал', 'и пилюли все', 'и прощай всё что было'])
-    assert.equal(continuationLevel(P, n), 'urgent', n);
-  for (const n of ['Ножи точу', 'Бритву купить', 'Колеса меняю', 'Газом пахнет', 'Пистолет водяной', 'Крыша едет', 'Этаж пятый', 'Поездом',
-    'Река', 'Балкон', 'Кладбище', 'Нож', 'Смерть', 'Вниз', 'Кровью', 'и к маме', 'и всё кончилось'])
-    assert.notEqual(continuationLevel(P, n), 'urgent', n);
-});
-
-test('уточнение родителя: полная фраза с глаголом после союза — не продолжение (допустимый класс); бытовые оценки — ролик', () => {
-  const P = 'Утром я пила чай. Отравлюсь шавермой.';
-  for (const n of ['и пойду спать', 'а потом посмотрим', 'и в кино пойдём', 'и буду спать', 'и пойдём гулять', 'и всё будет хорошо', 'и кот спит',
-    'и иду домой', 'и живу', 'и спокойной ночи', 'и всем привет', 'а потом на море', 'и всё хорошо', 'и ладно', 'и окно открыла', 'и газ выключила'])
-    assert.notEqual(continuationLevel(P, n), 'urgent', n);
-});
-
-test('разбор ce59d44: способ с прошедшим временем и предлогом направления — остановка; бытовой предмет с безобидным глаголом, компания и еда — ролик', () => {
-  const P = 'Утром я пила чай. Отравлюсь шавермой.';
-  for (const n of ['и в море', 'и в последний путь', 'и насовсем', 'и в темноту без возврата и без слов', 'и в окно вышла', 'и газом надышалась',
-    'и под поезд бросилась', 'и с крыши шагнула', 'и газ открыла', 'и в реку упала', 'и ножом порезалась']) assert.equal(continuationLevel(P, n), 'urgent', n);
-  for (const n of ['и окно открыла', 'и газ выключила', 'а потом в окно смотрела', 'и во дворе', 'и с подругой', 'и тортом', 'и в лес', 'и на море', 'и по магазинам'])
-    assert.notEqual(continuationLevel(P, n), 'urgent', n);
+test('вариант (б): тревожный обрывок + модель «неизвестно» → 0 видео, TRY_LATER и контакты (решение 13.11, условие 3)', async (t) => {
+  t.mock.method(console, 'error', () => {});
+  const sent = []; let videos = 0;
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-b-unk-'));
+  const bot = createBot({
+    tg: { send: async (id, text, extra) => { sent.push({ text, extra }); }, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''), sendVideo: async () => { videos++; } },
+    checkRetryMs: 0, safetyCheck: async () => { throw Object.assign(new Error('x'), { code: 'timeout' }); }, draft: modelLike,
+    metrics: makeMetrics(path.join(dir, 'm.jsonl'), 'test-salt-fictional-0001'),
+    render: async (ep, o) => { await fs.mkdir(path.dirname(o.outPath), { recursive: true }); await fs.writeFile(o.outPath, 'x'); return { outPath: o.outPath, duration: 20, seconds: 1 }; },
+  });
+  const chat = { id: 716212, type: 'private' };
+  try {
+    await bot.handleUpdate({ message: { chat, text: 'Утром я пила чай. Днём я мыла посуду. Отравлюсь шавермой. И хватит.' } });
+    const m = [...sent].reverse().find((x) => x.extra?.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data?.startsWith('play:'));
+    assert.ok(m);
+    await bot.handleUpdate({ callback_query: { id: 'q', data: m.extra.reply_markup.inline_keyboard[0][0].callback_data, message: { chat } } });
+    assert.equal(videos, 0);
+    assert.ok(sent.some((x) => x.text.startsWith(TRY_LATER_TEXT) && /8-800-000-00-00/.test(x.text)));
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 

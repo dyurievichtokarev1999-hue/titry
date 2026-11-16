@@ -10,7 +10,7 @@ import { MOODS, TRACKS, sanitizeEpisode, validateEpisode, episodeToText, cleanIn
 import { makeDraft, hasClaudeCredentials, DEFAULT_MODEL, modelSafetyCheck } from './draft.js';
 import { renderEpisode, ROOT, RENDER_TIMEOUT_MS, renderTimeoutFromEnv, withRenderTimeout } from './render.js';
 import { logError, safeCode } from './errlog.js';
-import { currentHelp, prepareHelp, helpMessage, assessEpisodeRisk, validateSafeEpisode, INSUFFICIENT_TEXT, TRY_LATER_TEXT, helpContactList } from './safety.js';
+import { currentHelp, prepareHelp, helpMessage, modelConcernMessage, assessEpisodeRisk, validateSafeEpisode, INSUFFICIENT_TEXT, TRY_LATER_TEXT, helpContactList } from './safety.js';
 import { makeGate, modelModeAtStart, RETRY_DELAY_MS } from './gate.js';
 import { makeLedger, KEY_ENV, KEY_VERSION_ENV } from './ledger.js';
 
@@ -227,7 +227,7 @@ export function createApp({
       return {
         episode: result.episode, validation: result.validation, risk: result.risk,
         provider: result.provider, note: result.note, dropped: result.dropped,
-        help: result.risk.level === 'concern' ? helpMessage('concern') : null,
+        help: result.risk.level === 'concern' ? helpMessage('concern') : result.modelConcern ? modelConcernMessage() : null,
       };
     },
 

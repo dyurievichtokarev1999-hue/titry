@@ -11,7 +11,7 @@ import path from 'node:path';
 import { makeDraft, makeModelClient, CLIENT_OPTIONS, MODEL_TIMEOUT_MS, SAFETY_TIMEOUT_MS } from '../server/draft.js';
 import { createBot, makeMetrics, TEXT } from '../server/bot.js';
 import { createApp } from '../server/app.js';
-import { prepareHelp, TRY_LATER_TEXT, STOP_SCREEN_TEXT } from '../server/safety.js';
+import { prepareHelp, TRY_LATER_TEXT, STOP_SCREEN_TEXT, MODEL_CONCERN_TEXT, helpMessage } from '../server/safety.js';
 import { fakeModelClient } from './helpers/fake-model.js';
 
 const helpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-df-help-'));
@@ -124,6 +124,11 @@ test('1.2: safety_flag черновика не останавливает и в�
     await say(STORY);
     assert.equal(client.calls, 1, 'флаг не порождает повторного вызова');
     assert.ok(!sent.some((m) => m.text.startsWith(STOP_SCREEN_TEXT)), 'остановки нет');
+    // Решение 16.11 (в): мягкий блок — только факт и контакты, ровно один раз, без текста concern с оценкой.
+    const soft = sent.filter((m) => m.text.startsWith(MODEL_CONCERN_TEXT));
+    assert.equal(soft.length, 1, 'мягкий блок рядом с черновиком');
+    assert.match(soft[0].text, /8-800-000-00-00/);
+    assert.ok(!sent.some((m) => m.text === helpMessage('concern')), 'не блок concern с оценкой');
     await play();
     assert.equal(c.check, 1);
     assert.equal(c.video, 1);
@@ -173,6 +178,8 @@ test('1.2 монтажная: safety_flag + «неизвестно» → 503 TRY
     try {
       const d = await (await post('/api/draft', { story: STORY })).json();
       assert.ok(d.episode, 'черновик есть');
+      if (flagged) assert.ok(d.help.startsWith(MODEL_CONCERN_TEXT) && /8-800-000-00-00/.test(d.help), 'монтажная: мягкий блок');
+      else assert.equal(d.help, null);
       const res = await post('/api/render', { episode: d.episode, story: STORY });
       if (flagged) {
         assert.equal(res.status, 503);
