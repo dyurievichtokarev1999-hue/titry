@@ -416,11 +416,12 @@ const withCaption = (story, caption) => (caption ? `${story}\n${caption}` : stor
 const lastPhrase = (t) => String(t || '').trim().split(/(?<=[.!?…])\s+|\n+/).filter(Boolean).at(-1) || '';
 export function continuationLevel(prev, next) {
   const body = String(next || '').trim();
-  if (!prev || !startsWithContinuation(body)) return 'none';
-  // Короткое «ок / спасибо / да» (закрытый список TRIVIAL_REPLIES) — ответ, а не продолжение фразы.
-  const plain = body.toLowerCase().replace(/ё/g, 'е').replace(/[^a-zа-я0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
-  if (!plain || TRIVIAL_REPLIES.has(plain)) return 'none';
-  return assessRisk(`${lastPhrase(joinEdits(prev))}\n${body}`).level;
+  if (!prev || !body) return 'none';
+  // Отдельное сообщение — как отдельная строка: решает правило эллиптического продолжения (server/safety.js).
+  const tail = lastPhrase(joinEdits(prev));
+  // Опасная сама по себе последняя фраза уже обработана при своём сообщении: её не переносим на новое.
+  if (assessRisk(tail).level === 'urgent') return assessRisk(body).level;
+  return assessRisk(`${tail}\n${body}`).level;
 }
 
 // ── Логика бота (транспорт подменяется в тестах) ─────────────────────────────

@@ -232,7 +232,8 @@ export const cleanInput = (t) => String(t ?? '').replace(/\u0000/g, '');
 /** Текст для проверки безопасности: правки читаются как продолжение рассказа, через обычный перевод строки. */
 // Правка — как новая строка, без смены регистра (решение 16.11, (б)): правило продолжения одно для новой строки,
 // нового сообщения и правки — продолжение начинается с союза («и», «а потом»…), см. HOUSEHOLD_RE в server/safety.js.
-export const joinEdits = (t) => String(t ?? '').split(EDIT_SEP).join('\n');
+// Перевод строки + U+2029 (FIELD_SEP в server/safety.js): после правки продолжение бытовой формы — только с союза.
+export const joinEdits = (t) => String(t ?? '').split(EDIT_SEP).join('\n\u2029');
 
 function sentencesOf(text, homo = true) {
   const blocks = String(text || '').split(EDIT_SEP);
