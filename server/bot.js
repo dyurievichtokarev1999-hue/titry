@@ -416,6 +416,9 @@ const lastPhrase = (t) => String(t || '').trim().split(/(?<=[.!?…])\s+|\n+/).f
 export function continuationLevel(prev, next) {
   const body = String(next || '').trim();
   if (!prev || !/^\p{Ll}/u.test(body)) return 'none';
+  // Короткое «ок / спасибо / да» (закрытый список TRIVIAL_REPLIES) — ответ, а не продолжение фразы.
+  const plain = body.toLowerCase().replace(/ё/g, 'е').replace(/[^a-zа-я0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!plain || TRIVIAL_REPLIES.has(plain)) return 'none';
   return assessRisk(`${lastPhrase(joinEdits(prev))}\n${body}`).level;
 }
 
