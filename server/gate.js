@@ -50,7 +50,7 @@ export function makeGate({ check, hasKey = () => true, ledger = null, retryDelay
   const scopes = new Map();
   const area = (scope) => {
     let a = scopes.get(scope);
-    if (!a) { a = { safety: new Set() }; scopes.set(scope, a); }
+    if (!a) { a = { safety: new Set(), concern: new Set() }; scopes.set(scope, a); }
     return a;
   };
 
@@ -71,6 +71,11 @@ export function makeGate({ check, hasKey = () => true, ledger = null, retryDelay
     area(scope).safety.add(storyDigest(story));
     if (durable(scope)) persist(ledger.put({ scope, story, kind: 'safety', reason: 'safety' }));
   }
+
+  // Concern в удержании рассказа (решение 16.11, п. 1.2): флаг или отказ модели на черновике. Только в памяти процесса;
+  // ничего не останавливает, а при «неизвестно» перед рендером считается как локальный concern.
+  const markConcern = (scope, story) => { area(scope).concern.add(storyDigest(story)); };
+  const hasConcern = (scope, story) => area(scope).concern.has(storyDigest(story));
 
   const ledgerOk = async (scope) => !durable(scope) || ledger.flush();
 
@@ -131,7 +136,7 @@ export function makeGate({ check, hasKey = () => true, ledger = null, retryDelay
     return kinds;
   }
 
-  return { status, markSafety, verify, recordsFor, versionDigest, storyDigest };
+  return { status, markSafety, markConcern, hasConcern, verify, recordsFor, versionDigest, storyDigest };
 }
 
 /** Есть ли доступ к модели по переменным окружения (как hasClaudeCredentials в server/draft.js). */

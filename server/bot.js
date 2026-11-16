@@ -517,7 +517,8 @@ export function createBot({
     }
     // Опасный черновик, пришедший после /delete или смены сессии: запрет участника записывается всё равно
     // (область — чат, а не сессия), но в чат ничего не отправляется.
-    if (r && !r.unavailable && !r.insufficient && !r.episode) gate.markSafety(`chat:${chatId}`, story);
+    if (r && !r.unavailable && !r.draftFailed && !r.insufficient && !r.episode) gate.markSafety(`chat:${chatId}`, story);
+    if (r && r.modelConcern) gate.markConcern(s.scope, story);
     if (!alive(chatId, s)) return; // удалённая сессия не оживает из отложенного ответа
     if (r.unavailable) {
       // ИР-02: проверка не завершена — техническое состояние, не остановка: рассказ не запоминается
@@ -526,6 +527,13 @@ export function createBot({
       if (!current()) return;
       s.stage = 'idle';
       return tg.send(chatId, TEXT.checkUnavailable);
+    }
+    if (r.draftFailed) {
+      // Решение 16.11, п. 1.1: черновика нет и заготовка не собирается — техническая реплика, без контактов.
+      logError('draft', { code: r.code });
+      if (!current()) return;
+      s.stage = 'idle';
+      return tg.send(chatId, TEXT.renderFail);
     }
     if (r.insufficient) return replyInsufficient(chatId, s, story, gen, current, r.risk && r.risk.level === 'concern', r.code);
     if (!r.episode) {
@@ -631,7 +639,7 @@ export function createBot({
       // «Неизвестно» и после повтора (условие 3): локально чисто — ролик делается; есть concern — ролика нет.
       logError('check', { code: g.code });
       // Отказ проверяющей модели (refusal) — как локальный concern.
-      if (g.refusal || assessEpisodeRisk(joinEdits(story), ep).level !== 'none') {
+      if (g.refusal || gate.hasConcern(s.scope, original) || assessEpisodeRisk(joinEdits(story), ep).level !== 'none') {
         s.stage = 'draft';
         return tg.send(chatId, TEXT.tryLater());
       }

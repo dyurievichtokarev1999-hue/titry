@@ -98,22 +98,22 @@ test('concern-фрагмент не попадает ни в одно поле �
 
 // ── Критерий 1: urgent или незавершённая проверка — реплика нехватки не появляется ──
 
-test('makeDraft: urgent (местный фильтр и safety_flag модели) → остановка, не нехватка', async () => {
+test('makeDraft: urgent местного фильтра → остановка, не нехватка; safety_flag модели — concern, не остановка', async () => {
   for (const c of OI.filter((x) => assessRisk(x.text).level === 'urgent')) {
     const r = await manual(c.text);
     assert.equal(r.risk.level, 'urgent', c.id); assert.ok(!r.insufficient, c.id); assert.equal(r.episode, null);
   }
   const story = byId.OI10;
   const r = await makeDraft(story, { provider: 'claude', client: modelClient(modelDraft({ safety_flag: true })) });
-  assert.equal(r.risk.level, 'urgent'); assert.ok(!r.insufficient);
+  assert.notEqual(r.risk.level, 'urgent'); assert.equal(r.modelConcern, true);
 });
 
 // ── Критерий 5: запасная заготовка при сбое модели не возвращает исключённый материал ──
 
-test('сбой модели → недоступность, не нехватка и не заготовка', async () => {
+test('сбой модели → заготовка из слов человека (решение 16.11, п. 1.1), не недоступность', async () => {
   const story = byId.OI10;
-  const r = await makeDraft(story, { provider: 'claude', client: modelClient(Object.assign(new Error('сбой'), { code: 'ECONNRESET' })) });
-  assert.equal(r.unavailable, true); assert.ok(!r.insufficient); assert.equal(r.episode, null);
+  const r = await makeDraft(story, { provider: 'claude', retryDelayMs: 0, client: modelClient(Object.assign(new Error('сбой'), { code: 'ECONNRESET' })) });
+  assert.notEqual(r.unavailable, true); assert.equal(r.provider, 'manual'); assert.equal(r.episode, null);
 });
 
 test('модель вернула меньше двух безопасных строк → заготовка без ИИ тем же валидатором → insufficient', async () => {

@@ -83,9 +83,15 @@ safety_flag = true, если в рассказе есть желание уме�
  */
 // Предел одного запроса модельной проверки и без повторов SDK: единственный повтор делает шлюз (server/gate.js,
 // условие 3 решения 13.11 15:00). Таймаут — «неизвестно», а не ожидание по умолчанию SDK (10 минут × 3 попытки).
-export const SAFETY_TIMEOUT_MS = 20_000;
+// Решение владельца кода 16.11: у обоих клиентов (черновик и проверка перед рендером) — 30 с на попытку и без
+// повторов SDK; наш повтор ровно один (шлюз для проверки, makeDraft для черновика): итого 2 попытки, не больше ~65 с.
+export const MODEL_TIMEOUT_MS = 30_000;
+export const SAFETY_TIMEOUT_MS = MODEL_TIMEOUT_MS;
+export const CLIENT_OPTIONS = Object.freeze({ timeout: MODEL_TIMEOUT_MS, maxRetries: 0 });
+/** Клиент модели с общими параметрами (таймаут на попытку, без повторов SDK). */
+export const makeModelClient = () => new Anthropic({ ...CLIENT_OPTIONS });
 export async function modelSafetyCheck(story, { client, model = DEFAULT_MODEL } = {}) {
-  const anthropic = client || new Anthropic({ timeout: SAFETY_TIMEOUT_MS, maxRetries: 0 });
+  const anthropic = client || makeModelClient();
   const response = await anthropic.beta.messages.create({
     model,
     max_tokens: 2000,
@@ -161,7 +167,7 @@ export function groundDraft(raw, story, { date = todayIso(), period = 'day' } = 
 
 /** Черновик через Claude. client можно подменить в тестах. */
 export async function draftWithClaude(story, { tone = 'quiet', date, period = 'day', client, model = DEFAULT_MODEL } = {}) {
-  const anthropic = client || new Anthropic();
+  const anthropic = client || makeModelClient();
   const userText = [
     period === 'year' ? 'Период: год. Это титры года.' : 'Период: один день.',
     TONE_HINT[tone] || TONE_HINT.quiet,
@@ -193,8 +199,13 @@ export async function draftWithClaude(story, { tone = 'quiet', date, period = 'd
   const texts = Array.isArray(response?.content) ? response.content.filter((b) => b && b.type === 'text' && typeof b.text === 'string') : [];
   let raw, parsed = false;
   try { raw = JSON.parse(texts.map((b) => b.text).join('')); parsed = true; } catch { /* ниже */ }
+  // safety_flag: true при любом stop_reason (решение 16.11, п. 1.2): черновик не останавливается, вызывающий добавляет
+  // concern. Строки берутся, только если ответ полный и по контракту; иначе вызывающий собирает заготовку.
   if (parsed && raw && typeof raw === 'object' && !Array.isArray(raw) && raw.safety_flag === true) {
-    return { safetyFlag: true, model: response.model, usage: response.usage };
+    const complete = response?.stop_reason === 'end_turn' && texts.length === 1 && Array.isArray(raw.rows)
+      && !raw.rows.some((r) => r === null || typeof r !== 'object' || Array.isArray(r));
+    const grounded = complete ? groundDraft(raw, story, { date, period }) : null;
+    return { ...(grounded || {}), episode: grounded ? grounded.episode : null, safetyFlag: true, model: response.model, usage: response.usage };
   }
   if (response?.stop_reason === 'max_tokens') throw Object.assign(new Error('Ответ модели обрезан.'), { code: 'max_tokens' });
   if (response?.stop_reason !== 'end_turn') throw Object.assign(new Error('Ответ модели не завершён.'), { code: 'incomplete_response' });
@@ -211,7 +222,6 @@ export async function draftWithClaude(story, { tone = 'quiet', date, period = 'd
   const badResponse = () => Object.assign(new Error('Ответ модели не по контракту.'), { code: 'bad_response' });
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) throw badResponse();
   if (typeof raw.safety_flag !== 'boolean') throw badResponse();
-  if (raw.safety_flag === true) return { safetyFlag: true, model: response.model, usage: response.usage };
   if (!Array.isArray(raw.rows) || raw.rows.some((r) => r === null || typeof r !== 'object' || Array.isArray(r))) throw badResponse();
   const grounded = groundDraft(raw, story, { date, period });
   return { ...grounded, safetyFlag: false, model: response.model, usage: response.usage };
@@ -361,8 +371,10 @@ export function draftRuleBased(story, { date = todayIso(), period = 'day' } = {}
 /**
  * Главная точка входа: безопасность → черновик (Claude или заготовка) → проверка.
  * Возвращает { episode, validation, risk, provider, dropped, note }. Исходы без черновика (episode: null), по старшинству:
- * остановка { risk: urgent } → недоступность { unavailable, code } → нехватка { insufficient: true,
- * code: 'insufficient_after_exclusion' | 'insufficient_material', risk } (risk тут none/concern; это не остановка).
+ * остановка { risk: urgent } (только локальный фильтр) → техническая ошибка { draftFailed, code } (модель не ответила
+ * и заготовка не собирается) → нехватка { insufficient: true, code: 'insufficient_after_exclusion' | 'insufficient_material', risk }
+ * (risk тут none/concern; это не остановка). modelConcern: true — флаг или отказ модели (решение 16.11, п. 1.2): уровень
+ * рассказа не меняется, вызывающий держит concern до проверки перед рендером.
  */
 export async function makeDraft(story, opts = {}) {
   const text = cleanInput(story || '').trim();
@@ -375,13 +387,15 @@ export async function makeDraft(story, opts = {}) {
 
   const useClaude = opts.provider === 'claude' || (opts.provider !== 'manual' && hasClaudeCredentials());
   let result, provider, note = '';
+  // Флаг модели (safety_flag) и отказ модели не останавливают: concern в удержании рассказа (решение 16.11, п. 1.2).
+  let modelConcern = false;
   if (useClaude) {
     try {
-      result = await draftWithClaude(text, opts);
+      result = await draftWithRetry(text, opts);
       provider = 'claude';
       if (result.safetyFlag) {
-        risk = assessRisk(text, true);
-        return { risk, episode: null, provider };
+        modelConcern = true;
+        if (!result.episode) { result = (opts.fallback || draftRuleBased)(text, opts); provider = 'manual'; }
       }
       // Мало строк с опорой — или после исключения опасных частей черновик модели не собирается (название/жанр
       // опираются на угрозу, пригодных строк меньше двух): сначала заготовка без ИИ, нехватка — только если и она
@@ -400,10 +414,16 @@ export async function makeDraft(story, opts = {}) {
         provider = 'manual';
       }
     } catch (e) {
-      // ИР-02 (критик реализации): если модель не ответила, её проверка безопасности тоже не прошла.
-      // Заготовку без ИИ не показываем — только состояние «проверка недоступна», без ролика.
+      // Решение 16.11, п. 1.1 (заменяет ИР-02): модель не ответила и после нашего единственного повтора — заготовка
+      // только из слов человека; дальше та же проверка перед рендером. Отказ модели — сразу заготовка и concern.
+      // Заготовку собрать нельзя — техническая реплика (draftFailed), без контактов и без реплики нехватки.
       // Код — только из списка известных (ИР-03).
-      return { risk, episode: null, provider: null, unavailable: true, code: safeCode(e) };
+      const code = safeCode(e);
+      if (code === 'refusal') modelConcern = true;
+      try { result = (opts.fallback || draftRuleBased)(text, opts); } catch { result = null; }
+      if (!result || !result.episode) return { risk, episode: null, provider: null, draftFailed: true, code };
+      provider = 'manual';
+      note = 'Модель не ответила, показана заготовка из слов человека.';
     }
   } else {
     result = draftRuleBased(text, opts);
@@ -413,15 +433,30 @@ export async function makeDraft(story, opts = {}) {
   // не собирается обязательный элемент (title, genre, LIMITS.rowsMin строк) — внутренняя причина
   // insufficient_after_exclusion: без черновика, без исключённых строк (dropped) и без дописанных событий.
   // Сюда доходят только рассказы без stop (urgent/safety_flag) и без технической недоступности: они вернулись выше.
+  const mc = modelConcern ? { modelConcern: true } : {};
+  // modelConcern уровень рассказа не меняет (карточки помощи при черновике нет): он держится до проверки перед рендером.
   const validation = validateSafeEpisode(result.episode, text);
   if (insufficientAfterExclusion(result.episode, text, validation)) {
-    return { risk, episode: null, provider, insufficient: true, code: INSUFFICIENT_AFTER_EXCLUSION };
+    return { risk, episode: null, provider, insufficient: true, code: INSUFFICIENT_AFTER_EXCLUSION, ...mc };
   }
   // Решение владельца 11.11 12:05, п. 4: обычная нехватка у заготовки (меньше LIMITS.rowsMin строк из слов человека,
   // исключений не было) — тот же исход и та же реплика, что после исключения: без черновика с ⚠ и без ролика.
   // Модель сюда попадает только через заготовку (мало строк у модели → заготовка), поэтому реплика одна для обоих путей.
-  if (result.insufficient) return { risk, episode: null, provider, insufficient: true, code: INSUFFICIENT_MATERIAL };
-  return { ...result, validation, risk, provider, note };
+  if (result.insufficient) return { risk, episode: null, provider, insufficient: true, code: INSUFFICIENT_MATERIAL, ...mc };
+  return { ...result, validation, risk, provider, note, ...mc };
+}
+
+/** Пауза перед единственным повтором черновика. */
+export const DRAFT_RETRY_DELAY_MS = 3000;
+const pause = (ms) => new Promise((r) => { setTimeout(r, ms); });
+// Черновик: попытка и ровно один повтор (решение 16.11, п. 1.1). Отказ модели не повторяется.
+async function draftWithRetry(text, opts) {
+  const once = opts.draftOnce || draftWithClaude;
+  try { return await once(text, opts); } catch (e) {
+    if (safeCode(e) === 'refusal') throw e;
+    await (opts.sleep || pause)(opts.retryDelayMs ?? DRAFT_RETRY_DELAY_MS);
+    return once(text, opts);
+  }
 }
 
 export function hasClaudeCredentials() {

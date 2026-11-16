@@ -26,18 +26,19 @@ const INCOMPLETE = (json) => ({
   'два текстовых блока': { stop_reason: 'end_turn', content: [text(json(false)), text(json(false))] },
 });
 
-test('makeDraft: неполный ответ с false → unavailable, без черновика', async () => {
+test('makeDraft: неполный ответ с false → заготовка (решение 16.11, п. 1.1), без черновика модели', async () => {
   for (const [name, resp] of Object.entries(INCOMPLETE(draftJson))) {
-    const r = await makeDraft(STORY, { provider: 'claude', client: client(resp) });
-    assert.equal(r.unavailable, true, name);
+    const r = await makeDraft(STORY, { provider: 'claude', client: client(resp), retryDelayMs: 0 });
+    assert.notEqual(r.unavailable, true, name);
+    assert.equal(r.provider, 'manual', name);
     assert.equal(r.episode, null, name);
   }
 });
 
-test('makeDraft: max_tokens + true → остановка (обрезанное «опасно» не ослабляется)', async () => {
+test('makeDraft: max_tokens + true → concern в удержании, без остановки (решение 16.11, п. 1.2)', async () => {
   const r = await makeDraft(STORY, { provider: 'claude', client: client({ stop_reason: 'max_tokens', content: [text(draftJson(true))] }) });
-  assert.equal(r.episode, null);
-  assert.equal(r.risk.level, 'urgent');
+  assert.equal(r.modelConcern, true, 'обрезанное «опасно» не теряется');
+  assert.notEqual(r.risk.level, 'urgent');
 });
 
 test('makeDraft: контроль end_turn + false → черновик', async () => {
@@ -53,7 +54,7 @@ test('бот: неполные ответы и max_tokens+true — render и sen
     let renders = 0, videos = 0;
     const sent = [];
     const tg = { send: async (id, txt, extra) => { sent.push({ text: txt, extra }); }, action: async () => {}, answer: async () => {}, sendVideo: async () => { videos++; } };
-    const bot = createBot({ safetyCheck: async () => false, tg, metrics: makeMetrics(path.join(dir, 'm.jsonl'), 'sr-salt'), draft: (s, o) => makeDraft(s, { ...o, provider: 'claude', client: client(resp) }), render: async () => { renders++; return {}; } });
+    const bot = createBot({ safetyCheck: async () => false, tg, metrics: makeMetrics(path.join(dir, 'm.jsonl'), 'sr-salt'), draft: (s, o) => makeDraft(s, { ...o, provider: 'claude', client: client(resp), retryDelayMs: 0 }), render: async () => { renders++; return {}; } });
     try {
       const chat = { id: 776600, type: 'private' };
       await bot.handleUpdate({ message: { chat, text: STORY } });
@@ -105,9 +106,11 @@ test('text не строка, content не массив, refusal с тексто
   const arr = { stop_reason: 'end_turn', content: [{ type: 'text', text: [safetyJson(false)] }] };
   await assert.rejects(modelSafetyCheck('день', { client: client(arr) }), { code: 'bad_response' });
   const arrDraft = { stop_reason: 'end_turn', content: [{ type: 'text', text: [draftJson(false)] }] };
-  assert.equal((await makeDraft(STORY, { provider: 'claude', client: client(arrDraft) })).unavailable, true);
+  assert.equal((await makeDraft(STORY, { provider: 'claude', client: client(arrDraft), retryDelayMs: 0 })).provider, 'manual');
   await assert.rejects(modelSafetyCheck('день', { client: client({ stop_reason: 'end_turn', content: 'нет' }) }), { code: 'bad_response' });
-  assert.equal((await makeDraft(STORY, { provider: 'claude', client: client({ stop_reason: 'end_turn', content: null }) })).unavailable, true);
+  assert.equal((await makeDraft(STORY, { provider: 'claude', client: client({ stop_reason: 'end_turn', content: null }), retryDelayMs: 0 })).provider, 'manual');
   await assert.rejects(modelSafetyCheck('день', { client: client({ stop_reason: 'refusal', content: [text(safetyJson(false))] }) }), { code: 'refusal' });
-  assert.equal((await makeDraft(STORY, { provider: 'claude', client: client({ stop_reason: 'refusal', content: [text(draftJson(false))] }) })).unavailable, true);
+  const refused = await makeDraft(STORY, { provider: 'claude', client: client({ stop_reason: 'refusal', content: [text(draftJson(false))] }) });
+  assert.equal(refused.provider, 'manual', 'отказ модели — заготовка без повтора');
+  assert.equal(refused.modelConcern, true, 'отказ модели — concern в удержании');
 });

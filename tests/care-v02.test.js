@@ -40,16 +40,15 @@ test('urgent останавливает черновик даже с continueAft
   assert.equal(r.risk.level, 'urgent');
 });
 
-test('safety_flag модели останавливает черновик даже с continueAfterHelp', async () => {
+test('safety_flag модели не останавливает черновик: concern в удержании (решение 16.11, п. 1.2)', async () => {
   const client = claudeClient({
     title: 'День', genre: 'тихая драма', mood: 'sad', grammatical_gender: 'unknown', safety_flag: true,
     rows: [{ role: 'Друг', value: 'вечерний звонок', source: 'Вечером позвонил друг' }, { role: 'Ужин', value: 'был', source: 'был ужин и сериал' }],
     post: { text: '', source: '' },
   });
   const r = await makeDraft(SAFE_STORY, { provider: 'claude', client, continueAfterHelp: true });
-  assert.equal(r.episode, null);
-  assert.equal(r.risk.level, 'urgent');
-  assert.equal(r.risk.byModel, true);
+  assert.notEqual(r.risk.level, 'urgent');
+  assert.equal(r.modelConcern, true);
 });
 
 test('рендер сам отказывается, если рассказ или строки содержат опасные темы', async () => {
