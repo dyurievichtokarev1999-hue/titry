@@ -69,7 +69,7 @@ export function renderTimeoutFromEnv({ env = process.env, log = console.error } 
   const raw = env.TITRY_RENDER_TIMEOUT_MS;
   if (raw === undefined || raw === '') return RENDER_TIMEOUT_MS;
   const n = Number(raw);
-  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  if (Number.isFinite(n) && Math.round(n) > 0) return Math.round(n); // «0.4» округлилось бы до 0 — как неверное
   // Только этап и код, без значения переменной.
   log(JSON.stringify({ at: new Date().toISOString(), level: 'warn', stage: 'render.timeout', code: 'render_timeout_config', ms: RENDER_TIMEOUT_MS }));
   return RENDER_TIMEOUT_MS;

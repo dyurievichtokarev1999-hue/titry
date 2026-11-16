@@ -187,7 +187,7 @@ test('1.2 монтажная: safety_flag + «неизвестно» → 503 TRY
   }
 });
 
-test('1.1 монтажная: сбой модели → заготовка (нехватка, 422), заготовки нет → 503 без контактов', async (t) => {
+test('1.1 монтажная: сбой модели → заготовка (нехватка, 422), заготовки нет → существующая техническая реплика 500 без контактов', async (t) => {
   t.mock.method(console, 'error', () => {});
   for (const noFallback of [false, true]) {
     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-df-app2-'));
@@ -202,7 +202,8 @@ test('1.1 монтажная: сбой модели → заготовка (не
       const body = await res.json();
       assert.equal(client.calls, 2);
       if (noFallback) {
-        assert.equal(res.status, 503);
+        assert.equal(res.status, 500);
+        assert.match(body.error, /^Ошибка сервера \([a-z_A-Z]+\)\. Попробуйте ещё раз\.$/);
         assert.ok(!JSON.stringify(body).includes('112') && !body.help, 'без контактов');
         assert.notEqual(body.error, TRY_LATER_TEXT);
       } else {

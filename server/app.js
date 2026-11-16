@@ -139,8 +139,7 @@ const UNAVAILABLE = {
 };
 // Модель не ответила и после повтора, а в ролике есть локальный concern (условие 3 решения 13.11 15:00): ролика нет.
 const TRY_LATER = { unknown: true, error: TRY_LATER_TEXT };
-// Техническая ошибка без контактов (решение 16.11, п. 1.1): черновик не собрался и заготовки нет.
-const DRAFT_FAILED = 'Не получилось собрать черновик. Попробуй ещё раз чуть позже.';
+
 // Нехватка материала после исключения опасных частей (внутренняя причина insufficient_after_exclusion):
 // 422 с kind 'insufficient' и одной репликой редактора повествования, дословно. Без черновика, validation, risk
 // и подсказок организатору: ни просьбы дописать, ни повтора. Имя причины в ответ не выдаётся.
@@ -207,7 +206,7 @@ export function createApp({
       if (result.unavailable) return unavailable(result.code);
       if (result.modelConcern) gate.markConcern(SCOPE, story);
       // Решение 16.11, п. 1.1: черновика нет и заготовка не собирается — техническая ошибка, без контактов.
-      if (result.draftFailed) { logError('draft', { code: result.code }); return { status: 503, body: { error: DRAFT_FAILED, code: result.code } }; }
+      if (result.draftFailed) { logError('draft', { code: result.code }); return { status: 500, body: { error: `Ошибка сервера (${result.code}). Попробуйте ещё раз.` } }; } // существующая техническая реплика
       if (result.insufficient) {
         // Порядок исходов: stop → хранилище недоступно → нехватка. Модельной проверки здесь нет: она одна — перед
         // рендером (решение владельца кода 13.11 15:00). Остановка, пришедшая за время черновика, сильнее реплики.

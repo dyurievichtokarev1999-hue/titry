@@ -1017,7 +1017,8 @@ export function createBot({
   // модельная проверка одна — перед рендером. Текст в журнал и метрики не пишется.
   async function shortText(chatId, s, text) {
     // Запрещённый раньше текст (например, моделью в окне до отправки) — снова остановка, а не «подробнее».
-    if (assessRisk(text).level !== 'none' || isBlocked(s, text) || gate.status(s.scope, text).kind === 'safety') return handleStory(chatId, s, text, 'text');
+    // Строчное продолжение бытовой формы (решение 16.11, (б)) — и для коротких сообщений: «и ядом» после «Отравлюсь шавермой.».
+    if (assessRisk(text).level !== 'none' || continuationLevel(s.story, text) === 'urgent' || isBlocked(s, text) || gate.status(s.scope, text).kind === 'safety') return handleStory(chatId, s, text, 'text');
     return tg.send(chatId, TEXT.more);
   }
 
