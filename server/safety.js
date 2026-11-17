@@ -476,12 +476,42 @@ function assessOne(text, modelFlag) {
   if (full.level !== 'urgent' && householdDanger(String(text).replace(/ё/g, 'е').replace(/Ё/g, 'Е'))) {
     return { level: 'urgent', matches: [...(full.matches || []), 'household_continuation_danger'], byModel: false };
   }
+  // Решение 17.11 ~20:05 (PR 21): угроза другому «план или орудие + адресат» — concern: при недоступной модели ролика нет.
+  if (full.level === 'none' && threatOtherConcern(norm(text))) return { level: 'concern', matches: ['threat_to_other_plan'], byModel: false };
   // Решение 16.11 (б), п. 2: тревожный обрывок после бытовой формы — concern (решает модельная проверка перед рендером).
   if (full.level === 'none' && householdConcern(String(text).replace(/ё/g, 'е').replace(/Ё/g, 'Е'))) {
     return { level: 'concern', matches: [...(full.matches || []), 'household_continuation'], byModel: false };
   }
   return full;
 }
+
+// Узкий concern на угрозу другому (решение 17.11 ~20:05): только сочетания, не отдельные слова. Слова «топор»,
+// «бензин», «больница», «взаперти» сами по себе ничего не поднимают (решение 7.11 о гиперболах).
+//  1) расплата адресату («сосед ответит за…», «он своё получит», «поплатится») и рядом (то же или соседнее
+//     предложение) купленное или приготовленное орудие;
+//  2) насилие над человеком с последствием в том же предложении («отделал его — он в больнице»);
+//  3) держать/запереть другого человека взаперти или в комнате (о себе — «меня» — уже urgent).
+const ADDRESSEE_RE = new RegExp(String.raw`(?<![а-я])(?:${PERSON}|он|она|они)(?![а-я])`);
+const RETRIB_RE = /(?<![а-я])(?:ответ(?:ит|ят)\s+за|поплат(?:ится|ятся)|свое\s+получ(?:ит|ат)|получ(?:ит|ат)\s+свое)(?![а-я])/;
+const ARM_VERB = '(?:купил|купила|достал|достала|приготовил|приготовила|наточил|наточила)';
+const ARM_TOOL = '(?:топор|нож|канистр|бензин|ружь|пистолет|обрез|кастет|молоток|бит[уы]|монтировк)';
+// Глагол и орудие в любом порядке, до двух слов между ними: «купил топор», «канистру бензина купил».
+const ARMED_RE = new RegExp(String.raw`(?<![а-я])${ARM_VERB}(?:\s+[а-я]+){0,2}?\s+${ARM_TOOL}|(?<![а-я])${ARM_TOOL}[а-я]*(?:\s+[а-я]+){0,2}?\s+${ARM_VERB}(?![а-я])`);
+const BEATEN_RE = /(?<![а-я])(?:отделал|избил|отметелил|покалечил|отпинал|отлупил|изувечил)(?:а|и)?(?![а-я])[^.!?…]{0,60}(?:в\s+(?:больниц|реанимаци|травмпункт|травматологи)|на\s+скорой)/;
+const LOCKED_RE = new RegExp(String.raw`(?<![а-я])(?:держ|запер|запира)[а-я]*\s+(?:[а-я]+\s+)?${PERSON}\s+(?:взаперти|в\s+(?:комнате|подвале|кладовке|чулане|ванной))|(?<![а-я])взаперти\s+(?:[а-я]+\s+)?${PERSON}(?![а-я])`);
+/** Номера предложений с такой угрозой (вместе с соседним предложением-орудием); sents — уже нормализованные. */
+function threatOtherHits(sents) {
+  const hits = new Set();
+  sents.forEach((x, i) => {
+    if (RETRIB_RE.test(x) && ADDRESSEE_RE.test(x)) {
+      const armed = [i - 1, i, i + 1].filter((j) => sents[j] !== undefined && ARMED_RE.test(sents[j]));
+      if (armed.length) [i, ...armed].forEach((j) => hits.add(j));
+    }
+    if ((BEATEN_RE.test(x) && ADDRESSEE_RE.test(x)) || LOCKED_RE.test(x)) hits.add(i);
+  });
+  return [...hits];
+}
+const threatOtherConcern = (t) => threatOtherHits(t.split(/(?<=[.!?…;])\s+|\n+/)).length > 0;
 
 /**
  * Словарь угроз титров (только правило «угроза не в титрах»; уровень риска он с 13.11 не поднимает) — те же выражения (DOOM_NOUN, DOOM_PRON, THREATENED_ME), без второго списка.
@@ -905,6 +935,8 @@ export function threatSentences(story) {
   if (!out.length && householdConcern(String(story || '').replace(/ё/g, 'е').replace(/Ё/g, 'Е'))) {
     all.forEach((x, i) => { if (HOUSEHOLD_RE.some((re) => new RegExp(re.source, 'u').test(x))) out.push(flat(x), ...(all[i + 1] ? [flat(all[i + 1])] : [])); });
   }
+  // Угроза другому «план или орудие + адресат» (PR 21) — в титры не идут только её предложения, а не весь рассказ.
+  if (!out.length) out.push(...threatOtherHits(all.map((x) => norm(x))).map((i) => flat(all[i])));
   if (!out.length && (assessRisk(String(story || '')).level !== 'none' || phraseRisk(String(story || '')))) out.push(...all.map(flat));
   return out.filter(Boolean);
 }
