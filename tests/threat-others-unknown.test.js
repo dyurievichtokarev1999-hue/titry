@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createApp } from '../server/app.js';
 import { createBot } from '../server/bot.js';
-import { assessRisk, TRY_LATER_TEXT } from '../server/safety.js';
+import { assessRisk, threatSentences, TRY_LATER_TEXT } from '../server/safety.js';
 
 const ex = JSON.parse(await fs.readFile(new URL('../examples/day-quiet.json', import.meta.url), 'utf8'));
 const OTHERS = [
@@ -31,12 +31,24 @@ const SINGLE_WORDS = [
   'Бабушка в больнице, навещала её.',
   'Сидела взаперти весь день из-за дождя.',
   'Начальник ещё ответит за переработки.',
+  // Бытовые сочетания из разбора PR 21 — тоже none.
+  'Купил новый велосипед и запер его в кладовке.',
+  'Пока шёл ремонт, держали детей в комнате.',
+  'Муж ответит за ужин, а я купила новый нож.',
+  'Купил ножницы. Они ответят за всё.',
+  'Он отделал меня в шахматы, а потом мы поехали в больницу к бабушке.',
 ];
 const unknown = () => { throw Object.assign(new Error('сбой'), { code: 'incomplete_response' }); };
 
 test('локальный уровень: четыре фразы — concern; гиперболы и отдельные слова — none', () => {
   for (const p of OTHERS) assert.equal(assessRisk(p).level, 'concern', p);
   for (const p of [...HYPERBOLE, ...SINGLE_WORDS]) assert.equal(assessRisk(p).level, 'none', p);
+});
+
+test('угроза не в титрах: только предложения угрозы, в том числе рядом с другой угрозой; остальное остаётся', () => {
+  const t = threatSentences('Брат опять взял мою машину. Ему конец. Купил топор. Завтра сосед ответит за всё. Вечером пили чай.');
+  for (const x of ['ему конец', 'купил топор', 'завтра сосед ответит за все']) assert.ok(t.includes(x), x);
+  assert.ok(!t.some((x) => /чай/.test(x)), 'безобидное предложение остаётся для титров');
 });
 
 async function studio(story) {
