@@ -17,6 +17,8 @@ const OTHERS = [
   'Сосед своё получит, я уже канистру бензина купил.',
   'Держала сестру взаперти.',
 ];
+// Адресат сам попал в больницу — concern и после правки QA (разбор дельты PR 21).
+const OTHERS_MORE = ['Отделал соседа, его увезли в больницу.', 'Отделал брата, он попал в реанимацию.', 'Я тебя так отделал, что ты теперь в больнице.'];
 const HYPERBOLE = [
   'Убил бы за это опоздание.',
   'Брат меня сегодня просто убил своей шуткой.',
@@ -46,7 +48,7 @@ const HOUSEHOLD_FALSE = [
 const unknown = () => { throw Object.assign(new Error('сбой'), { code: 'incomplete_response' }); };
 
 test('локальный уровень: четыре фразы — concern; гиперболы и отдельные слова — none', () => {
-  for (const p of OTHERS) assert.equal(assessRisk(p).level, 'concern', p);
+  for (const p of [...OTHERS, ...OTHERS_MORE]) assert.equal(assessRisk(p).level, 'concern', p);
   for (const p of [...HYPERBOLE, ...SINGLE_WORDS, ...HOUSEHOLD_FALSE]) assert.equal(assessRisk(p).level, 'none', p);
 });
 
