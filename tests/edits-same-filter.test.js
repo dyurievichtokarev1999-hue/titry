@@ -825,3 +825,16 @@ test('бот: продолжение отдельным сообщением в�
   await quiet(() => b.say('а потом таблетками'));
   assert.equal(b.texts().at(-1), helpMessage('urgent'));
 });
+
+test('бот: concern-продолжение у предела длины — черновик и блок помощи, а не сбой черновика', async () => {
+  // Черновик с настоящим пределом makeDraft: длиннее STORY_MAX — ошибка too_long.
+  const b = botSetup({ draft: (st, o) => (st.length > STORY_MAX ? makeDraft(st, { ...o, provider: 'manual' }) : modelLike(st, o)) });
+  await nearLimit(b);
+  await b.say('2: Отравлюсь шавермой.');
+  assert.equal(b.texts().at(-1), TEXT.tooLong);
+  const n = b.sent.length;
+  await quiet(() => b.say('и хватит'));
+  const after = b.texts().slice(n);
+  assert.ok(after.some((t) => t.includes(helpMessage('concern'))), 'блок помощи есть');
+  assert.ok(!after.some((t) => /Не получилось собрать черновик/.test(t)), 'не сбой черновика');
+});

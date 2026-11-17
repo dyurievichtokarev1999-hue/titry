@@ -514,7 +514,8 @@ export function createBot({
     // Решение 16.11 (б): тревожный обрывок после бытовой формы прежнего текста — продолжение рассказа уровня concern:
     // черновик строится по обоим сообщениям вместе, дальше решает модельная проверка перед рендером.
     const cont = continuationLevel(prevStory, story);
-    if (cont === 'concern') story = `${prevStory}\n${story}`;
+    // У предела длины склейка целиком не поместится в черновик: тогда — последняя фраза и обрывок (как в проверке).
+    if (cont === 'concern') story = prevStory.length + story.length < STORY_MAX ? `${prevStory}\n${story}` : continuationContext(prevStory, story);
     // Новый рассказ сразу отменяет прежний черновик: его кнопки больше ничего не запускают.
     s.episode = null;
     s.skeleton = null;
