@@ -76,7 +76,9 @@ async function recognizeChunk(buf, { lang = 'ru-RU', timeoutMs = STT_TIMEOUT_MS 
     body: buf,
     signal: AbortSignal.timeout(timeoutMs),
   });
-  const data = await res.json().catch(() => ({}));
+  // Тело успешного ответа читаем без «как получится»: обрыв или таймаут чтения иначе дал бы пустой кусок,
+  // и часть рассказа молча пропала бы из расшифровки. Ошибку куска получает весь transcribeOgg.
+  const data = res.ok ? await res.json() : await res.json().catch(() => ({}));
   if (!res.ok) throw Object.assign(new Error(`SpeechKit ${res.status}: ${data.error_message || data.message || 'ошибка'}`), { status: res.status });
   return String(data.result || '').trim();
 }

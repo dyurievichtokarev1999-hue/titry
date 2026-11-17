@@ -60,6 +60,32 @@ test('п. 7: зависший SpeechKit — отказ по пределу, го
   }
 });
 
+test('п. 7: второй кусок завис после HTTP 200 — ошибка без частичной расшифровки, голос удалён', async () => {
+  const saved = { k: process.env.YANDEX_API_KEY, f: process.env.YANDEX_FOLDER_ID, fetch: globalThis.fetch };
+  process.env.YANDEX_API_KEY = 'dummy-not-a-key'; process.env.YANDEX_FOLDER_ID = 'dummy';
+  let calls = 0;
+  globalThis.fetch = async (url, { signal }) => {
+    calls++;
+    if (calls === 1) return new Response(JSON.stringify({ result: 'Утром я пила чай.' }), { status: 200 });
+    // Заголовки пришли (200), тело так и не дочитывается — до отмены сигналом.
+    return { ok: true, status: 200, json: () => new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason))) };
+  };
+  const base = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-a57-stt2-'));
+  const keep = setInterval(() => {}, 1000); // таймер AbortSignal.timeout не держит процесс
+  const split = async (src, dir) => Promise.all(['part-000.ogg', 'part-001.ogg'].map(async (n) => { const p = path.join(dir, n); await fs.writeFile(p, 'ogg'); return p; }));
+  try {
+    await assert.rejects(transcribeOgg(Buffer.from('ogg'), { runtimeDir: base, timeoutMs: 50, duration: 60, split }), { name: 'TimeoutError' });
+    assert.equal(calls, 2);
+    assert.deepEqual((await fs.readdir(base)).filter((n) => n.startsWith('titry-voice-')), [], 'голос и куски удалены');
+  } finally {
+    clearInterval(keep);
+    globalThis.fetch = saved.fetch;
+    if (saved.k === undefined) delete process.env.YANDEX_API_KEY; else process.env.YANDEX_API_KEY = saved.k;
+    if (saved.f === undefined) delete process.env.YANDEX_FOLDER_ID; else process.env.YANDEX_FOLDER_ID = saved.f;
+    await fs.rm(base, { recursive: true, force: true });
+  }
+});
+
 test('п. 7: распознавание не удалось — обычный ответ «не получилось разобрать»', async () => {
   const sent = [];
   const tg = { send: async (id, text) => { sent.push(text); }, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from('ogg'), sendVideo: async () => {} };
