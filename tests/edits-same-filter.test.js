@@ -816,3 +816,12 @@ test('бот: отклонённая по длине правка видна п�
   await b.press(`play:${b.s().draftId}`);
   assert.match(b.checked.at(-1), /огни моста/);
 });
+
+test('бот: продолжение отдельным сообщением видит правку, отклонённую по длине', async () => {
+  const b = botSetup();
+  await nearLimit(b);
+  await b.say('2: Отравлюсь шавермой.');
+  assert.equal(b.texts().at(-1), TEXT.tooLong);
+  await quiet(() => b.say('а потом таблетками'));
+  assert.equal(b.texts().at(-1), helpMessage('urgent'));
+});

@@ -510,7 +510,7 @@ export function createBot({
   const isBlocked = (s, story) => !!(s.blocked && s.blocked.has(storyKey(story)));
 
   async function handleStory(chatId, s, story, source) {
-    const prevStory = s.story;
+    const prevStory = seenStory(s); // с правками, отклонёнными по длине: продолжение видит и их
     // Решение 16.11 (б): тревожный обрывок после бытовой формы прежнего текста — продолжение рассказа уровня concern:
     // черновик строится по обоим сообщениям вместе, дальше решает модельная проверка перед рендером.
     const cont = continuationLevel(prevStory, story);
@@ -838,12 +838,12 @@ export function createBot({
       body = known ? (m[2] || '').trim() : body.replace(/^\/+/, '').trim();
     }
     const own = body ? assessRisk(body).level : 'none';
-    const cont = body ? continuationLevel(s.story, body) : 'none';
+    const cont = body ? continuationLevel(seenStory(s), body) : 'none';
     const level = cont !== 'none' ? cont : own;
     if (level === 'none' && trivial(body)) return sendSafe(chatId, TEXT.rendering);
     const epoch = s.deliveryEpoch || 0;
     // Самостоятельное сообщение проверяется без прежнего рассказа (QA PR 16, п. 2).
-    const hold = decide(chatId, s, body, level, cont !== 'none' ? continuationContext(s.story, body) : body);
+    const hold = decide(chatId, s, body, level, cont !== 'none' ? continuationContext(seenStory(s), body) : body);
     holdDelivery(s, hold, level); // синхронно, до первого await
     const r = await hold;
     if (!alive(chatId, s)) return; // /delete во время проверки: ничего не отвечаем (запрет, если был, остаётся)
@@ -1057,7 +1057,7 @@ export function createBot({
   async function shortText(chatId, s, text) {
     // Запрещённый раньше текст (например, моделью в окне до отправки) — снова остановка, а не «подробнее».
     // Строчное продолжение бытовой формы (решение 16.11, (б)) — и для коротких сообщений: «и ядом» после «Отравлюсь шавермой.».
-    if (assessRisk(text).level !== 'none' || continuationLevel(s.story, text) !== 'none' || isBlocked(s, text) || gate.status(s.scope, text).kind === 'safety') return handleStory(chatId, s, text, 'text');
+    if (assessRisk(text).level !== 'none' || continuationLevel(seenStory(s), text) !== 'none' || isBlocked(s, text) || gate.status(s.scope, text).kind === 'safety') return handleStory(chatId, s, text, 'text');
     return tg.send(chatId, TEXT.more);
   }
 
