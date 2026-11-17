@@ -766,29 +766,53 @@ test('восьмой разбор: рассказ запрещён, пока п�
 
 // ── Аудит 17.11, п. 8: рассказ с правками не длиннее STORY_MAX ──
 
-test('бот: правки не удлиняют рассказ сверх 6000 знаков; остановка и помощь у длинного рассказа работают', async () => {
-  const b = botSetup();
+// Рассказ правками — вплотную к пределу: длинная правка уже отклонена, затем короткая тоже.
+async function nearLimit(b) {
   await b.say(SAFE);
   const edit = '1: вечером я долго гуляла в парке у реки и смотрела на воду';
   let tries = 0;
-  while (b.texts().at(-1) !== TEXT.tooLong && tries++ < 300) await b.say(edit);
+  do await b.say(edit); while (b.texts().at(-1) !== TEXT.tooLong && ++tries < 300);
   assert.equal(b.texts().at(-1), TEXT.tooLong, 'длинная правка отклонена');
   assert.ok(tries > 10, 'обычные правки до предела проходят');
-  const story = b.s().story;
-  assert.ok(story.length <= STORY_MAX && story.length > STORY_MAX - 200);
-  await b.say(edit);
-  assert.equal(b.s().story, story, 'отклонённая правка рассказ не удлиняет');
-  // Короткими правками — вплотную к пределу: короткая concern-правка ниже его уже превышает.
   let i = 0;
   do await b.say('1: пила чай утром'); while (b.texts().at(-1) !== TEXT.tooLong && ++i < 20);
   assert.ok(i > 0 && i < 20);
+  const story = b.s().story;
+  assert.ok(story.length <= STORY_MAX && story.length > STORY_MAX - 30);
+  return story;
+}
+
+test('бот: правки не удлиняют рассказ сверх 6000 знаков; concern и urgent у предела — помощь и остановка', async () => {
+  const b = botSetup();
+  const story = await nearLimit(b);
   // concern-правка сверх предела: тот же блок помощи, что у исключённой правки, рассказ прежний.
-  const near = b.s().story;
   await b.say('2: хочу его ударить');
   assert.equal(b.texts().at(-1), `${editNotInTitlesText('rows.1')}\n\n${helpMessage('concern')}`);
-  assert.equal(b.s().story, near);
+  assert.deepEqual(b.events.at(-1), { event: 'edit_excluded', level: 'concern' });
+  assert.equal(b.s().story, story, 'отклонённая правка рассказ не удлиняет');
   // urgent-правка сверх предела — остановка, а не «слишком длинный».
   await quiet(() => b.say('2: не хочу больше жить'));
   assert.equal(b.texts().at(-1), helpMessage('urgent'));
   assert.equal(b.s().episode, null);
+});
+
+test('бот: угроза, разбитая на две правки у предела, останавливает в любом порядке', async () => {
+  for (const [first, second] of [['2: хочу его ударить', '2: у меня есть нож'], ['2: у меня есть нож', '2: хочу его ударить']]) {
+    const b = botSetup();
+    await nearLimit(b);
+    await b.say(first);
+    assert.notEqual(b.texts().at(-1), helpMessage('urgent'), first);
+    await quiet(() => b.say(second));
+    assert.equal(b.texts().at(-1), helpMessage('urgent'), `${first} → ${second}`);
+    assert.equal(b.s().episode, null);
+  }
+});
+
+test('бот: отклонённая по длине правка видна проверке перед рендером', async () => {
+  const b = botSetup();
+  await nearLimit(b);
+  await b.say('2: вечером я долго смотрела на огни моста');
+  assert.equal(b.texts().at(-1), TEXT.tooLong);
+  await b.press(`play:${b.s().draftId}`);
+  assert.match(b.checked.at(-1), /огни моста/);
 });

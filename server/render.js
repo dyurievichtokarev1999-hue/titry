@@ -40,7 +40,7 @@ function serveEngine() {
 /** Проверка при старте бота: Playwright находится, ffmpeg запускается. Иначе ни один ролик не соберётся. */
 export function checkRenderer({ env = process.env } = {}) {
   try { createRequire(import.meta.url).resolve('playwright'); } catch { throw Object.assign(new Error('playwright'), { code: 'browser' }); }
-  if (spawnSync(env.FFMPEG || 'ffmpeg', ['-version'], { stdio: 'ignore' }).status !== 0) throw Object.assign(new Error('ffmpeg'), { code: 'ffmpeg' });
+  if (spawnSync(env.FFMPEG || 'ffmpeg', ['-version'], { stdio: 'ignore', timeout: 10_000 }).status !== 0) throw Object.assign(new Error('ffmpeg'), { code: 'ffmpeg' });
 }
 
 let browserPromise = null;
