@@ -23,12 +23,26 @@ const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 const ledgerError = () => Object.assign(new Error('Хранилище запретов недоступно.'), { code: 'ledger' });
 
+// У каждого процесса свой файл: каждый держит записи в памяти и переписывает свой файл целиком, поэтому общий файл
+// бота и монтажной терял остановки другого процесса (аудит 17.11, п. 2). Монтажная до 17.11 писала в blocked-v1.json
+// — читает его при загрузке, чтобы прежние остановки монтажной не пропали; писать туда продолжает только бот.
+export const LEDGER_FILES = Object.freeze({ bot: 'blocked-v1.json', studio: 'blocked-studio-v1.json' });
+export function processLedger(name, stateDir, opts = {}) {
+  if (!Object.hasOwn(LEDGER_FILES, name)) throw ledgerError();
+  return makeLedger({
+    file: path.join(stateDir, LEDGER_FILES[name]),
+    alsoRead: name === 'studio' ? [path.join(stateDir, LEDGER_FILES.bot)] : [],
+    key: process.env[KEY_ENV], keyVersion: process.env[KEY_VERSION_ENV] || 'v1',
+    ...opts,
+  });
+}
+
 /**
- * file — путь к blocked-v1.json; key — секрет HMAC (Buffer/строка); keyVersion — версия ключа и нормализации.
+ * file — путь к файлу запретов (LEDGER_FILES); alsoRead — файлы другого процесса, только для чтения; key — секрет HMAC (Buffer/строка); keyVersion — версия ключа и нормализации.
  * ttlMs — срок хранения записи. Производственный срок не выбран (карта обработки), поэтому по умолчанию
  * null: запись без срока. Короткий ttlMs допускается только как параметр теста.
  */
-export function makeLedger({ file, key, keyVersion, ttlMs = null, wallNow = () => Date.now(), fsImpl = fs } = {}) {
+export function makeLedger({ file, alsoRead = [], key, keyVersion, ttlMs = null, wallNow = () => Date.now(), fsImpl = fs } = {}) {
   const dir = path.dirname(file);
   const base = path.basename(file);
   let records = [];
@@ -77,6 +91,13 @@ export function makeLedger({ file, key, keyVersion, ttlMs = null, wallNow = () =
       let main = [];
       try { main = parse(await fsImpl.readFile(file, 'utf8')); }
       catch (e) { if (e?.code !== 'ENOENT') throw ledgerError(); }
+      // Чужие файлы (alsoRead) только читаются и объединяются (только строже); пишем всегда лишь в свой file.
+      for (const f of alsoRead) {
+        let extra = [];
+        try { extra = parse(await fsImpl.readFile(f, 'utf8')); }
+        catch (e) { if (e?.code !== 'ENOENT') throw ledgerError(); }
+        for (const r of extra) if (!main.some((m) => same(m, r))) main.push(r);
+      }
       const tmps = (await fsImpl.readdir(dir)).filter((n) => n.startsWith(`${base}.tmp-`));
       for (const n of tmps) {
         // tmp содержит полный документ или ничего полезного: недописанный — закрытый отказ (могла пропасть остановка).
