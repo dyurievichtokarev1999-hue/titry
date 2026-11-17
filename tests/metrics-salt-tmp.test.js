@@ -114,3 +114,24 @@ test('замечания разбора: граница 15/16 знаков, со
     if (prev.d === undefined) delete process.env.TITRY_DEV_METRICS; else process.env.TITRY_DEV_METRICS = prev.d;
   }
 });
+
+// Аудит 17.11, п. 9: без Playwright или ffmpeg бот не стартует — ни один ролик всё равно не собрался бы.
+test('prepareBot: не находится Playwright или не запускается ffmpeg — отказ старта, в журнале этап и код', async () => {
+  const lines = []; const orig = console.error; console.error = (l) => lines.push(String(l));
+  let touched = 0;
+  const spy = async () => { touched++; return 0; };
+  try {
+    // Настоящая проверка: ffmpeg по несуществующему пути.
+    await assert.rejects(prepareBot({ env: { METRICS_SALT: SALT, FFMPEG: '/nonexistent/titry-ffmpeg' }, cleanupTmp: spy, cleanup: spy, ledger: { load: spy } }),
+      { stage: 'render.check', code: 'ffmpeg' });
+    // Playwright не установлен: подставная проверка с тем же кодом, что у checkRenderer.
+    await assert.rejects(prepareBot({ env: { METRICS_SALT: SALT }, checkRender: () => { throw Object.assign(new Error('playwright'), { code: 'browser' }); }, cleanupTmp: spy, cleanup: spy, ledger: { load: spy } }),
+      { stage: 'render.check', code: 'browser' });
+  } finally { console.error = orig; }
+  assert.equal(touched, 0, 'до очистки и хранилища дело не доходит');
+  const render = lines.map((l) => JSON.parse(l)).filter((j) => j.stage === 'render.check'); // без ключа модели есть ещё строка model.key
+  assert.deepEqual(render.map((j) => `${j.stage}:${j.code}`), ['render.check:ffmpeg', 'render.check:browser']);
+  assert.ok(!lines.join('\n').includes('nonexistent'), 'путь в журнал не попадает');
+  // В этом окружении Playwright и ffmpeg есть — проверка проходит.
+  assert.equal(await prepareBot({ env: { METRICS_SALT: SALT }, cleanupTmp: async () => 0, cleanup: async () => 0, ledger: okLedger }), okLedger);
+});

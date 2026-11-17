@@ -2,7 +2,7 @@
 import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { TRACKS, validateEpisode } from '../engine/episode.js';
@@ -35,6 +35,12 @@ function serveEngine() {
     } catch { res.writeHead(404).end(); }
   });
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server)));
+}
+
+/** Проверка при старте бота: Playwright находится, ffmpeg запускается. Иначе ни один ролик не соберётся. */
+export function checkRenderer({ env = process.env } = {}) {
+  try { createRequire(import.meta.url).resolve('playwright'); } catch { throw Object.assign(new Error('playwright'), { code: 'browser' }); }
+  if (spawnSync(env.FFMPEG || 'ffmpeg', ['-version'], { stdio: 'ignore' }).status !== 0) throw Object.assign(new Error('ffmpeg'), { code: 'ffmpeg' });
 }
 
 let browserPromise = null;

@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { makeDraft, draftRuleBased, groundDraft } from '../server/draft.js';
+import { makeDraft, draftRuleBased, groundDraft, STORY_MAX } from '../server/draft.js';
 import { assessRisk, threatErrors, threatPhrase, threatSentences, threatPronounFilter, helpMessage, validateSafeEpisode,
   INSUFFICIENT_TEXT, INSUFFICIENT_INVITE_TEXT, INSUFFICIENT_MATERIAL, INSUFFICIENT_AFTER_EXCLUSION, EDIT_NOT_IN_TITLES_TEXT, EDIT_NOT_IN_TITLES, editNotInTitlesText } from '../server/safety.js';
 import { createBot, TEXT, editExcludedMessages } from '../server/bot.js';
@@ -762,4 +762,33 @@ test('восьмой разбор: рассказ запрещён, пока п�
   assert.equal(s.episode, null);
   assert.notEqual(s.originalStory, SAFE);
   assert.ok(!sent.some((t) => /Похоже на твой день/.test(t)));
+});
+
+// ── Аудит 17.11, п. 8: рассказ с правками не длиннее STORY_MAX ──
+
+test('бот: правки не удлиняют рассказ сверх 6000 знаков; остановка и помощь у длинного рассказа работают', async () => {
+  const b = botSetup();
+  await b.say(SAFE);
+  const edit = '1: вечером я долго гуляла в парке у реки и смотрела на воду';
+  let tries = 0;
+  while (b.texts().at(-1) !== TEXT.tooLong && tries++ < 300) await b.say(edit);
+  assert.equal(b.texts().at(-1), TEXT.tooLong, 'длинная правка отклонена');
+  assert.ok(tries > 10, 'обычные правки до предела проходят');
+  const story = b.s().story;
+  assert.ok(story.length <= STORY_MAX && story.length > STORY_MAX - 200);
+  await b.say(edit);
+  assert.equal(b.s().story, story, 'отклонённая правка рассказ не удлиняет');
+  // Короткими правками — вплотную к пределу: короткая concern-правка ниже его уже превышает.
+  let i = 0;
+  do await b.say('1: пила чай утром'); while (b.texts().at(-1) !== TEXT.tooLong && ++i < 20);
+  assert.ok(i > 0 && i < 20);
+  // concern-правка сверх предела: тот же блок помощи, что у исключённой правки, рассказ прежний.
+  const near = b.s().story;
+  await b.say('2: хочу его ударить');
+  assert.equal(b.texts().at(-1), `${editNotInTitlesText('rows.1')}\n\n${helpMessage('concern')}`);
+  assert.equal(b.s().story, near);
+  // urgent-правка сверх предела — остановка, а не «слишком длинный».
+  await quiet(() => b.say('2: не хочу больше жить'));
+  assert.equal(b.texts().at(-1), helpMessage('urgent'));
+  assert.equal(b.s().episode, null);
 });
