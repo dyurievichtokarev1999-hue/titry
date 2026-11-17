@@ -96,6 +96,10 @@ export function makeLedger({ file, alsoRead = [], key, keyVersion, ttlMs = null,
         let extra = [];
         try { extra = parse(await fsImpl.readFile(f, 'utf8')); }
         catch (e) { if (e?.code !== 'ENOENT') throw ledgerError(); }
+        // Остатки tmp чужого файла тоже читаются (не удаляются — это делает владелец файла); недописанный — отказ.
+        for (const n of (await fsImpl.readdir(dir)).filter((x) => x.startsWith(`${path.basename(f)}.tmp-`))) {
+          extra.push(...parse(await fsImpl.readFile(path.join(dir, n), 'utf8')));
+        }
         for (const r of extra) if (!main.some((m) => same(m, r))) main.push(r);
       }
       const tmps = (await fsImpl.readdir(dir)).filter((n) => n.startsWith(`${base}.tmp-`));

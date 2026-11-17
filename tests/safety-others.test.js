@@ -50,10 +50,10 @@ test('промпт модельной проверки: угроза и вред
   assert.match(SAFETY_PROMPT, /«убил бы за это опоздание»/);
 });
 
-test('четыре фразы аудита: локальный фильтр их не видит, остановку даёт флаг модели — 422 safety с 112', async () => {
+// Локальный фильтр на 17.11 оценивает эти фразы как none; это не закрепляется тестом, чтобы не мешать будущему правилу.
+test('четыре фразы аудита: флаг модели даёт остановку — 422 safety с 112', async () => {
   for (const phrase of OTHERS) {
     const story = `${ex.story} ${phrase}`;
-    assert.equal(assessRisk(story).level, 'none', `локально none: ${phrase}`);
     const m = fakeModel(true);
     const r = await renderWith(story, m.check);
     assert.equal(r.status, 422, phrase);

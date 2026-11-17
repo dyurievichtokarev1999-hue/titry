@@ -32,7 +32,17 @@ test('остановка монтажной в прежнем общем фай�
     await old.put({ scope: 'studio', story: B, kind: 'safety', reason: 'safety' });
     const studio = processLedger('studio', dir, opts); await studio.load();
     assert.equal(studio.lookup('studio', B).kind, 'safety');
-    // Повреждённый файл бота — закрытый отказ и для монтажной, не пустой набор.
+    // Остановка в целом tmp прежнего файла (rename не успел) тоже действует; файл бота монтажная не трогает.
+    const good = await fs.readFile(path.join(dir, LEDGER_FILES.bot), 'utf8');
+    await fs.rm(path.join(dir, LEDGER_FILES.bot));
+    await fs.rm(path.join(dir, LEDGER_FILES.studio), { force: true });
+    await fs.writeFile(path.join(dir, `${LEDGER_FILES.bot}.tmp-1-aaaa`), good, { mode: 0o600 });
+    const s2 = processLedger('studio', dir, opts); await s2.load();
+    assert.equal(s2.lookup('studio', B).kind, 'safety', 'из tmp прежнего файла');
+    // Недописанный tmp или повреждённый файл бота — закрытый отказ и для монтажной, не пустой набор.
+    await fs.writeFile(path.join(dir, `${LEDGER_FILES.bot}.tmp-1-aaaa`), good.slice(0, 40));
+    await assert.rejects(processLedger('studio', dir, opts).load(), { code: 'ledger' });
+    await fs.rm(path.join(dir, `${LEDGER_FILES.bot}.tmp-1-aaaa`));
     await fs.writeFile(path.join(dir, LEDGER_FILES.bot), '{');
     await assert.rejects(processLedger('studio', dir, opts).load(), { code: 'ledger' });
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
