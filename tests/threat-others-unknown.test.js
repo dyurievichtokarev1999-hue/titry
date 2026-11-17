@@ -38,11 +38,16 @@ const SINGLE_WORDS = [
   'Купил ножницы. Они ответят за всё.',
   'Он отделал меня в шахматы, а потом мы поехали в больницу к бабушке.',
 ];
+// QA PR 21: подлежащее перед глаголом и «поехали в больницу к …» — не насилие с последствием; ролик при недоступной модели.
+const HOUSEHOLD_FALSE = [
+  'Брат отделал меня в шахматы, потом поехали в больницу к бабушке.',
+  'Тренер отлупил нас на тренировке, а вечером я навещала деда в больнице.',
+];
 const unknown = () => { throw Object.assign(new Error('сбой'), { code: 'incomplete_response' }); };
 
 test('локальный уровень: четыре фразы — concern; гиперболы и отдельные слова — none', () => {
   for (const p of OTHERS) assert.equal(assessRisk(p).level, 'concern', p);
-  for (const p of [...HYPERBOLE, ...SINGLE_WORDS]) assert.equal(assessRisk(p).level, 'none', p);
+  for (const p of [...HYPERBOLE, ...SINGLE_WORDS, ...HOUSEHOLD_FALSE]) assert.equal(assessRisk(p).level, 'none', p);
 });
 
 test('угроза не в титрах: только предложения угрозы, в том числе рядом с другой угрозой; остальное остаётся', () => {
@@ -72,8 +77,8 @@ test('монтажная, модель недоступна: четыре фра
   }
 });
 
-test('монтажная, модель недоступна: гиперболы → ролик, как раньше', async () => {
-  for (const p of HYPERBOLE) {
+test('монтажная, модель недоступна: гиперболы и бытовые примеры QA → ролик, как раньше', async () => {
+  for (const p of [...HYPERBOLE, ...HOUSEHOLD_FALSE]) {
     const r = await studio(`${ex.story} ${p}`);
     assert.equal(r.status, 200, p); assert.equal(r.n.render, 1, p);
   }
@@ -106,8 +111,8 @@ test('бот, модель недоступна: четыре фразы → TRY
   }
 });
 
-test('бот, модель недоступна: гиперболы → ролик, как раньше', async () => {
-  for (const p of HYPERBOLE) {
+test('бот, модель недоступна: гиперболы и бытовые примеры QA → ролик, как раньше', async () => {
+  for (const p of [...HYPERBOLE, ...HOUSEHOLD_FALSE]) {
     const r = await bot(`${ex.story} ${p}`);
     assert.equal(r.n.video, 1, p);
   }
