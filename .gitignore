@@ -3,3 +3,4 @@ node_modules/
 dist/
 data/*
 !data/.gitkeep
+out-i2/
