@@ -447,6 +447,8 @@ export function createBot({
   renderGraceMs = KILL_GRACE_MS, // запасной предел: renderTimeoutMs + 2×renderGraceMs — слот освобождается принудительно
 } = {}) {
   const sessions = new Map();
+  // Метрики «как получится»: сбой записи (например, ENOSPC) не должен ломать ответ человеку. В журнал — только код.
+  const logMetric = (chatId, event, data) => Promise.resolve().then(() => metrics.log(chatId, event, data)).catch((e) => logError('metrics', e));
   // Незавершённые черновики и отдельные проверки участника: их результат может создать запрет уже после /delete.
   const inFlight = new Map();
   const track = async (chatId, p) => {
@@ -586,7 +588,7 @@ export function createBot({
         && (isBlocked(s, story) || gate.status(s.scope, story).kind === 'safety')) return stopForSafety(chatId, s, 'urgent', { at: 'late' });
       return;
     }
-    await metrics.log(chatId, 'story', { source, period: s.period, chars: Math.round(story.length / 50) * 50 });
+    await logMetric(chatId, 'story', { source, period: s.period, chars: Math.round(story.length / 50) * 50 });
     if (!current()) return;
     if (r.risk.level === 'concern') await tg.send(chatId, helpMessage('concern'));
     // Решение 16.11 (в): флаг модели — мягкий блок с контактами рядом с черновиком, без остановки ролика.
@@ -596,7 +598,7 @@ export function createBot({
     s.verdict = 'ok';
     s.edits = 0;
     s.stage = 'draft';
-    await metrics.log(chatId, 'draft', { provider: r.provider, rows: r.episode.rows.length, dropped: (r.dropped || []).length });
+    await logMetric(chatId, 'draft', { provider: r.provider, rows: r.episode.rows.length, dropped: (r.dropped || []).length });
     if (!current()) return;
     await showDraft(chatId, s);
   }
@@ -627,7 +629,7 @@ export function createBot({
     const st = gate.status(s.scope, story);
     if (st.kind) { logError('check', { code: st.code }); s.stage = 'idle'; return tg.send(chatId, TEXT.checkUnavailable); }
     s.stage = 'idle'; // заготовка появится только перед самой отправкой реплики (восьмой разбор)
-    await metrics.log(chatId, code === INSUFFICIENT_MATERIAL ? INSUFFICIENT_MATERIAL : INSUFFICIENT_AFTER_EXCLUSION);
+    await logMetric(chatId, code === INSUFFICIENT_MATERIAL ? INSUFFICIENT_MATERIAL : INSUFFICIENT_AFTER_EXCLUSION);
     if (!current()) {
       // Пока писалась метрика, тот же рассказ остановлен (например, проверкой прежней сессии): карточка помощи, не тишина.
       if (stoppedNow() && sameStoryInWork()) return stopForSafety(chatId, s, 'urgent', { at: 'late' });
@@ -738,7 +740,7 @@ export function createBot({
       await tg.sendVideo(chatId, r.outPath, { caption: 'Конец сцены.', width: 720, height: 1280, duration: Math.round(r.duration), reply_markup: FEEDBACK_KB });
       // /delete во время отправки: после metrics.forget новая запись о человеке не появляется.
       if (!alive(chatId, s)) return;
-      await metrics.log(chatId, 'render', { seconds: Math.round(r.seconds), mood: ep.mood, music: ep.music, edits: s.edits || 0 });
+      await logMetric(chatId, 'render', { seconds: Math.round(r.seconds), mood: ep.mood, music: ep.music, edits: s.edits || 0 });
       if (current()) s.stage = 'watched';
     } catch (e) {
       release(); // следующая задача и новые запросы — сразу
@@ -875,8 +877,8 @@ export function createBot({
     // Подпись к голосовому разбирается вместе с расшифровкой ниже. Разделитель правок не может прийти от человека.
     const text = cleanInput(msg.text || (msg.voice ? '' : msg.caption) || '').trim();
 
-    if (text === '/start') { s.stage = 'idle'; s.period = 'day'; await metrics.log(chatId, 'start'); return tg.send(chatId, TEXT.start); }
-    if (text === '/year') { s.stage = 'idle'; s.period = 'year'; await metrics.log(chatId, 'year'); return tg.send(chatId, TEXT.year); }
+    if (text === '/start') { s.stage = 'idle'; s.period = 'day'; await logMetric(chatId, 'start'); return tg.send(chatId, TEXT.start); }
+    if (text === '/year') { s.stage = 'idle'; s.period = 'year'; await logMetric(chatId, 'year'); return tg.send(chatId, TEXT.year); }
     if (text === '/delete') {
       sessions.delete(chatId);
       // Честный ответ (редактор 16:24): «удалены» — только если удаление сессии и статистики подтверждено.
@@ -1009,7 +1011,7 @@ export function createBot({
           // остановка сейчас, а не обещание «черновик на месте» и остановка на «Смотреть».
           if (assessEpisodeRisk(joined, s.episode).level === 'urgent') return stopForSafety(chatId, s, 'urgent', { at: 'edit' });
           if (excluded) {
-            await metrics.log(chatId, 'edit_excluded', { level: concern ? 'concern' : 'none' });
+            await logMetric(chatId, 'edit_excluded', { level: concern ? 'concern' : 'none' });
             for (const t of editExcludedMessages(concern, { path })) await tg.send(chatId, t);
             return;
           }
@@ -1051,7 +1053,7 @@ export function createBot({
     const data = q.data || '';
     if (data.startsWith('fb:')) {
       const v = data.slice(3);
-      await metrics.log(chatId, 'feedback', { value: v });
+      await logMetric(chatId, 'feedback', { value: v });
       if (v === 'heavier') { await tg.send(chatId, TEXT.heavier); return tg.send(chatId, helpMessage('concern')); }
       return tg.send(chatId, v === 'fit' ? TEXT.fit : TEXT.miss);
     }

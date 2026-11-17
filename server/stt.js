@@ -65,12 +65,16 @@ export async function splitOgg(file, dir) {
   return parts;
 }
 
-async function recognizeChunk(buf, { lang = 'ru-RU' } = {}) {
+// Предел ожидания одного куска: зависший SpeechKit не должен держать человека и голос на диске.
+const STT_TIMEOUT_MS = 30_000;
+
+async function recognizeChunk(buf, { lang = 'ru-RU', timeoutMs = STT_TIMEOUT_MS } = {}) {
   const url = `${ENDPOINT}?lang=${encodeURIComponent(lang)}&format=oggopus&folderId=${encodeURIComponent(process.env.YANDEX_FOLDER_ID)}`;
   const res = await fetch(url, {
     method: 'POST',
     headers: { Authorization: `Api-Key ${process.env.YANDEX_API_KEY}` },
     body: buf,
+    signal: AbortSignal.timeout(timeoutMs),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw Object.assign(new Error(`SpeechKit ${res.status}: ${data.error_message || data.message || 'ошибка'}`), { status: res.status });
