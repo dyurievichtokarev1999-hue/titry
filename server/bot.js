@@ -540,11 +540,19 @@ export function createBot({
       return tg.send(chatId, parts.at(-1), { reply_markup: consentKb([[[CONSENT_TEXT.pdYes, 'cs:pd:yes'], [CONSENT_TEXT.pdNo, 'cs:pd:no']]]) });
     }
     if (step === 'age') return tg.send(chatId, CONSENT_TEXT.age, { reply_markup: consentKb([[[CONSENT_TEXT.ageYes, 'cs:age:yes'], [CONSENT_TEXT.ageNo, 'cs:age:no']]]) });
-    // 6Ж — единственное приглашение; для /year — приглашение года (TEXT.year), рассказ будет за год.
-    return tg.send(chatId, s.period === 'year' ? TEXT.year : CONSENT_TEXT.ready);
+    // 6Ж — единственное приглашение, и после /year (решение Claude 18.11, п. 5); период года сохраняется в s.period.
+    return tg.send(chatId, CONSENT_TEXT.ready);
   }
+  // Рассказ и черновик из памяти сессии: при повторных подтверждениях и при отказе (решение Claude 18.11, пп. 7, 8).
+  // Новое поколение draftId: начатый черновик больше не покажется. Запреты safety (s.blocked) не трогаем.
+  const forgetStory = (s) => {
+    s.story = s.originalStory = s.overflow = s.episode = s.skeleton = s.verdict = null;
+    if (s.draftId) s.draftId += 1; // черновик уже начинался — его поколение больше не текущее
+    if (!s.delivering) s.stage = 'idle';
+  };
   // 6А с начала; прежние нажатия не засчитываются (2.1: «Повторный /start начинает с 6А»).
   function startConsent(chatId, s) {
+    if (!s.delivering) forgetStory(s); // идущая доставка — по прежним правилам, её проверки не трогаем
     s.consent = { step: 'intro', given: {}, notified: null };
     return tg.send(chatId, CONSENT_TEXT.intro, { reply_markup: consentKb([[[CONSENT_TEXT.introNext, 'cs:intro:next']]]) });
   }
@@ -558,6 +566,7 @@ export function createBot({
       return consentScreen(chatId, s, next);
     }
     c.step = 'declined'; // отказ как событие не храним; дальше бот ничего не спрашивает и не напоминает
+    if (!s.delivering) forgetStory(s);
     if (step === 'pd') return tg.send(chatId, CONSENT_TEXT.pdDeclined);
     // 6Г «Нет»: отметки о согласии удаляются (в памяти — всегда успешно); отметку «младше 18» не храним.
     const had = Object.keys(c.given).length > 0;
@@ -969,7 +978,13 @@ export function createBot({
     if (text === '/help') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });
     // До 6Ж и после отказа — ничего из сообщения не обрабатывается. Исключение — уже идущая доставка ролика
     // (согласие дано раньше, повторный /start сбросил его): сообщения во время подготовки проверяются, как прежде.
-    if (!consentDone(s) && !s.delivering) return preConsent(chatId, s);
+    if (!consentDone(s) && !s.delivering) {
+      // Решение Claude 18.11, п. 6: явная опасность и до подтверждений получает экран остановки с 112 и контактами.
+      // Только локальный фильтр: без модели, без записи в сессию, журнал и метрики.
+      const caption = msg.voice && typeof msg.caption === 'string' ? cleanInput(msg.caption).trim() : '';
+      if (assessRisk(text || caption).level === 'urgent') return tg.send(chatId, helpMessage('urgent'));
+      return preConsent(chatId, s);
+    }
 
     if (msg.voice) {
       const voiceRefused = !sttAvailable() && transcribe === transcribeOgg ? TEXT.voiceOff : msg.voice.duration > MAX_VOICE_SECONDS ? TEXT.voiceLong : null;
@@ -1167,7 +1182,8 @@ export function createBot({
     const text = cleanInput(msg.text || msg.caption || '').trim();
     if (!text || assessRisk(text).level !== 'urgent') return;
     const prev = sessions.get(chatId);
-    if (!prev || (!consentDone(prev) && !prev.delivering)) return; // до подтверждений правка не обрабатывается
+    // До подтверждений — только экран остановки (п. 6), без записи в сессию, журнал и метрики.
+    if (!prev || (!consentDone(prev) && !prev.delivering)) return tg.send(chatId, helpMessage('urgent'));
     const s = session(chatId);
     s.story = text; s.originalStory = text;
     return stopForSafety(chatId, s, 'urgent', { at: s.delivering ? 'edited_rendering' : 'edited' });

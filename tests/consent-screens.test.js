@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import { createBot, TEXT, splitForTelegram, TELEGRAM_TEXT_LIMIT } from '../server/bot.js';
 import { CONSENT_TEXT, consentSteps } from '../server/consent.js';
+import { helpMessage } from '../server/safety.js';
 
 const ex = JSON.parse(await fs.readFile(new URL('../examples/day-quiet.json', import.meta.url), 'utf8'));
 const ORDERS = [['pd', 'age'], ['age', 'pd']];
@@ -20,7 +21,8 @@ function setup(order, { draftGate, renderGate } = {}) {
     fileBuffer: async () => { n.download++; return Buffer.from('ogg'); },
     sendVideo: async () => { n.video++; },
   };
-  const metrics = { hash: () => 'qa-fictional', log: async (c, event) => { if (event === 'story') n.story++; }, forget: async () => {} };
+  const events = [];
+  const metrics = { hash: () => 'qa-fictional', log: async (c, event) => { events.push(event); if (event === 'story') n.story++; }, forget: async () => {} };
   const bot = createBot({
     tg, metrics, consentOrder: order,
     transcribe: async () => { n.stt++; return STORY; },
@@ -36,7 +38,7 @@ function setup(order, { draftGate, renderGate } = {}) {
   const voiceCaption = () => bot.handleUpdate({ message: { chat, voice: { file_id: 'f2', duration: 5 }, caption: STORY } });
   const photoCaption = () => bot.handleUpdate({ message: { chat, photo: [{ file_id: 'p1' }], caption: STORY } });
   const s = () => bot.sessions.get(chat.id);
-  return { bot, sent, n, say, press, voice, voiceCaption, photoCaption, s, texts: () => sent.map((m) => m.text) };
+  return { bot, sent, n, events, say, press, voice, voiceCaption, photoCaption, s, texts: () => sent.map((m) => m.text) };
 }
 
 // Все входящие с рассказом: текст, голосовое, голосовое с подписью, фото с подписью — ничего не обрабатывается.
@@ -126,12 +128,13 @@ test('порядок экранов: по умолчанию как в комп�
   assert.deepEqual(consentSteps({ TITRY_CONSENT_ORDER: 'age_first' }), ['age', 'pd']);
 });
 
-test('/year без подтверждений — 6А; после подтверждений приглашение — за год; голос после подтверждений расшифровывается', async () => {
+test('/year без подтверждений — 6А; после подтверждений — 6Ж (решение Claude, п. 5), период года сохранён; голос расшифровывается', async () => {
   const b = setup(['pd', 'age']);
   await b.say('/year');
   assert.equal(b.texts()[0], CONSENT_TEXT.intro);
   for (const d of ['cs:intro:next', 'cs:pd:yes', 'cs:age:yes']) await b.press(d);
-  assert.equal(b.texts().at(-1), TEXT.year);
+  assert.equal(b.texts().at(-1), CONSENT_TEXT.ready);
+  assert.equal(b.s().period, 'year');
   await b.voice();
   assert.equal(b.n.download, 1); assert.equal(b.n.stt, 1); assert.equal(b.n.draft, 1);
 });
@@ -148,12 +151,65 @@ test('6Б — частями в пределах лимита Telegram, кноп
   assert.ok(shown.slice(0, -1).every((m) => !m.extra), 'остальные части без кнопок');
 });
 
-test('исправленное сообщение до подтверждений не обрабатывается', async () => {
+test('исправленное сообщение до подтверждений: в рассказ не попадает; явная опасность — экран остановки (п. 6)', async () => {
   const b = setup(['pd', 'age']);
   await b.say('/start');
+  await b.bot.handleUpdate({ edited_message: { chat: { id: 88001, type: 'private' }, text: 'Утром пила чай.' } });
   await b.bot.handleUpdate({ edited_message: { chat: { id: 88001, type: 'private' }, text: 'Не хочу жить.' } });
   assert.ok(!b.s().story);
-  assert.deepEqual(b.texts(), [CONSENT_TEXT.intro]);
+  assert.deepEqual(b.texts(), [CONSENT_TEXT.intro, helpMessage('urgent')]);
+});
+
+// Решение Claude 18.11, п. 6: до подтверждений явная опасность — экран остановки с 112, только локальный фильтр.
+test('опасное сообщение до подтверждений — экран остановки с 112; модель, сохранение и метрики не вызываются (п. 6)', async () => {
+  for (const order of ORDERS) {
+    const b = setup(order);
+    await b.say('Не хочу жить.'); // без начатого диалога
+    assert.equal(b.texts().at(-1), helpMessage('urgent'));
+    assert.match(b.texts().at(-1), /112/);
+    await b.say('/start');
+    await b.press('cs:intro:next');
+    await b.say('Не хочу жить.'); // на шаге 6Б/6Г — снова экран, а не 6З
+    assert.equal(b.texts().at(-1), helpMessage('urgent'));
+    await b.photoCaption(); // безопасная подпись — 6З, как раньше
+    assert.equal(b.texts().at(-1), CONSENT_TEXT.notYet);
+    await b.bot.handleUpdate({ message: { chat: { id: 88001, type: 'private' }, voice: { file_id: 'f3', duration: 5 }, caption: 'Не хочу жить.' } });
+    assert.equal(b.texts().at(-1), helpMessage('urgent'), 'подпись к голосовому — тоже текст');
+    await b.press(`cs:${order[0]}:no`);
+    await b.say('Не хочу жить.'); // после отказа бот молчит, но не на опасность
+    assert.equal(b.texts().at(-1), helpMessage('urgent'));
+    assert.deepEqual({ ...b.n }, { download: 0, stt: 0, draft: 0, check: 0, story: 0, render: 0, video: 0 });
+    assert.ok(!b.s().story && !b.s().blocked, 'текст и запрет в сессию не пишутся');
+    assert.deepEqual(b.events, ['start'], 'в метриках только /start: опасные сообщения не записаны');
+  }
+});
+
+test('«Нет» на 6Г после повторного /start: рассказ и черновик удалены из памяти сессии (п. 7)', async () => {
+  const b = setup(['pd', 'age']);
+  await b.say('/start');
+  for (const d of ['cs:intro:next', 'cs:pd:yes', 'cs:age:yes']) await b.press(d);
+  await b.say(STORY);
+  assert.ok(b.s().story && b.s().episode);
+  await b.say('/start');
+  for (const d of ['cs:intro:next', 'cs:pd:yes', 'cs:age:no']) await b.press(d);
+  for (const k of ['story', 'originalStory', 'episode', 'skeleton', 'overflow']) assert.ok(!b.s()[k], k);
+});
+
+test('черновик, начатый до повторного /start, не появляется после нового 6Ж (п. 8)', async () => {
+  let release;
+  const b = setup(['pd', 'age'], { draftGate: new Promise((r) => { release = r; }) });
+  await b.say('/start');
+  for (const d of ['cs:intro:next', 'cs:pd:yes', 'cs:age:yes']) await b.press(d);
+  const pending = b.say(STORY);
+  await new Promise((r) => setImmediate(r));
+  await b.say('/start');
+  for (const d of ['cs:intro:next', 'cs:pd:yes', 'cs:age:yes']) await b.press(d);
+  release();
+  await pending;
+  assert.equal(b.texts().at(-1), CONSENT_TEXT.ready, 'после 6Ж черновик не показан');
+  assert.ok(!b.sent.some((m) => m.extra?.reply_markup?.inline_keyboard?.flat().some((k) => /^play:/.test(k.callback_data))));
+  assert.ok(!b.s().story && !b.s().episode);
+  assert.equal(b.n.story, 0);
 });
 
 test('/delete стирает отметку о согласии вместе с сессией: рассказ снова не принимается', async () => {
