@@ -7,7 +7,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
-import { createBot, TEXT } from '../server/bot.js';
+import { TEXT } from '../server/bot.js';
+import { createBot } from './helpers/consent.js'; // подтверждения 6А–6Ж пройдены (хелпер)
 import { killWithGrace, renderTimeoutFromEnv, RENDER_TIMEOUT_MS } from '../server/render.js';
 
 const ex = JSON.parse(await fs.readFile(new URL('../examples/day-quiet.json', import.meta.url), 'utf8'));

@@ -9,7 +9,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { makeDraft, makeModelClient, CLIENT_OPTIONS, MODEL_TIMEOUT_MS, SAFETY_TIMEOUT_MS } from '../server/draft.js';
-import { createBot, makeMetrics, TEXT } from '../server/bot.js';
+import { makeMetrics, TEXT } from '../server/bot.js';
+import { createBot } from './helpers/consent.js'; // подтверждения 6А–6Ж пройдены (хелпер)
 import { createApp } from '../server/app.js';
 import { prepareHelp, TRY_LATER_TEXT, STOP_SCREEN_TEXT, MODEL_CONCERN_TEXT, helpMessage } from '../server/safety.js';
 import { fakeModelClient } from './helpers/fake-model.js';

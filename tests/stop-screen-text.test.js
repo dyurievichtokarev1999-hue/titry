@@ -7,7 +7,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { helpMessage, loadHelp } from '../server/safety.js';
-import { createBot, makeMetrics } from '../server/bot.js';
+import { makeMetrics } from '../server/bot.js';
+import { createBot } from './helpers/consent.js'; // подтверждения 6А–6Ж пройдены (хелпер)
 import { createApp } from '../server/app.js';
 
 const APPROVED = 'Для этого рассказа ролика не будет. Если тебе или кому-то рядом сейчас угрожает опасность, звони 112.';

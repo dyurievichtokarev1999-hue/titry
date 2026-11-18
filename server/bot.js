@@ -13,6 +13,7 @@ import { renderEpisode, ROOT, RENDER_TIMEOUT_MS, KILL_GRACE_MS, renderTimeoutFro
 import { logError, safeCode, logRenderTimeout } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS, cleanupVoiceOrphans } from './stt.js';
 import { processLedger, KEY_ENV, KEY_VERSION_ENV } from './ledger.js';
+import { CONSENT_TEXT, CONSENT_VERSION, consentSteps } from './consent.js';
 
 const MOOD_ORDER = ['warm', 'sad', 'anger', 'quiet'];
 const MUSIC_ORDER = ['warm', 'sad', 'anger', 'quiet', 'none'];
@@ -121,6 +122,17 @@ export function editExcludedMessages(concern, { help, log = logError, path = 'ro
   log('edit', { code: 'message_too_long' });
   return [block, text];
 }
+
+/** Длинный экран (6Б) — частями по абзацам в пределах лимита Telegram; кнопки — под последней частью. */
+export function splitForTelegram(text, limit = TELEGRAM_TEXT_LIMIT) {
+  const parts = [];
+  for (const p of String(text).split('\n\n')) {
+    if (parts.length && parts[parts.length - 1].length + 2 + p.length <= limit) parts[parts.length - 1] += `\n\n${p}`;
+    else parts.push(p);
+  }
+  return parts;
+}
+const consentKb = (rows) => ({ inline_keyboard: rows.map((r) => r.map(([text, data]) => ({ text, callback_data: data }))) });
 
 // ── Чистые функции: разбор правок ────────────────────────────────────────────
 
@@ -445,6 +457,7 @@ export function createBot({
   holdWaitMs = HOLD_WAIT_MS, // жёсткий общий предел ожидания проверок сообщений, пришедших во время подготовки ролика
   renderTimeoutMs = RENDER_TIMEOUT_MS, // предел активного рендера от старта задачи в слоте (server/render.js)
   renderGraceMs = KILL_GRACE_MS, // запасной предел: renderTimeoutMs + 2×renderGraceMs — слот освобождается принудительно
+  consentOrder = consentSteps(), // порядок 6Б/6Г после 6А (TITRY_CONSENT_ORDER), не утверждён до правовой проверки
 } = {}) {
   const sessions = new Map();
   // Незавершённые черновики и отдельные проверки участника: их результат может создать запрет уже после /delete.
@@ -503,6 +516,54 @@ export function createBot({
 
   // Сессия ещё та же: не удалена через /delete и не заменена новой после истечения срока.
   const alive = (chatId, s) => sessions.get(chatId) === s;
+
+  // ── Подтверждения до приёма рассказа (комплект для юриста v2, пакет согласия v8, 2.1) ──
+  // Отметка о согласии — только в памяти сессии (s.consent): регистрация согласия в карте v4 запланирована, хранилище не
+  // выбрано. Сессия стирается по /delete, через три часа без сообщений и при перезапуске — тогда подтверждения заново.
+  // До 6Ж и после отказа рассказ не принимается: голос не скачивается, SpeechKit, модель, метрика story и рендер не
+  // вызываются, содержание в сессию не пишется (QA «Приём рассказа до подтверждений», критерии 1–3).
+  const consentDone = (s) => s.consent?.step === 'done';
+  async function consentScreen(chatId, s, step) {
+    s.consent.step = step;
+    if (step === 'pd') {
+      const parts = splitForTelegram(CONSENT_TEXT.pd);
+      for (const p of parts.slice(0, -1)) await tg.send(chatId, p);
+      return tg.send(chatId, parts.at(-1), { reply_markup: consentKb([[[CONSENT_TEXT.pdYes, 'cs:pd:yes'], [CONSENT_TEXT.pdNo, 'cs:pd:no']]]) });
+    }
+    if (step === 'age') return tg.send(chatId, CONSENT_TEXT.age, { reply_markup: consentKb([[[CONSENT_TEXT.ageYes, 'cs:age:yes'], [CONSENT_TEXT.ageNo, 'cs:age:no']]]) });
+    // 6Ж — единственное приглашение; для /year — приглашение года (TEXT.year), рассказ будет за год.
+    return tg.send(chatId, s.period === 'year' ? TEXT.year : CONSENT_TEXT.ready);
+  }
+  // 6А с начала; прежние нажатия не засчитываются (2.1: «Повторный /start начинает с 6А»).
+  function startConsent(chatId, s) {
+    s.consent = { step: 'intro', given: {}, notified: null };
+    return tg.send(chatId, CONSENT_TEXT.intro, { reply_markup: consentKb([[[CONSENT_TEXT.introNext, 'cs:intro:next']]]) });
+  }
+  async function onConsent(chatId, s, data) {
+    const c = s.consent;
+    const [, step, answer] = data.split(':');
+    if (!c || c.step !== step) return; // кнопка не текущего шага (устаревшая или после отказа) — ничего не засчитываем
+    const next = step === 'intro' ? consentOrder[0] : consentOrder[consentOrder.indexOf(step) + 1] || 'done';
+    if (answer === 'next' || answer === 'yes') {
+      if (step === 'pd') c.given.pd = { at: now().toISOString(), version: CONSENT_VERSION };
+      return consentScreen(chatId, s, next);
+    }
+    c.step = 'declined'; // отказ как событие не храним; дальше бот ничего не спрашивает и не напоминает
+    if (step === 'pd') return tg.send(chatId, CONSENT_TEXT.pdDeclined);
+    // 6Г «Нет»: отметки о согласии удаляются (в памяти — всегда успешно); отметку «младше 18» не храним.
+    const had = Object.keys(c.given).length > 0;
+    c.given = {};
+    await tg.send(chatId, CONSENT_TEXT.ageDeclined);
+    if (had) return tg.send(chatId, CONSENT_TEXT.ageDeleted);
+  }
+  // Сообщение до конца подтверждений: 6З не чаще раза на шаг; без начатого диалога — 6З и 6А; после отказа — тишина.
+  async function preConsent(chatId, s) {
+    const c = s.consent;
+    if (!c) { s.consent = null; await tg.send(chatId, CONSENT_TEXT.notYet); await startConsent(chatId, s); s.consent.notified = 'intro'; return; }
+    if (c.step === 'declined' || c.notified === c.step) return;
+    c.notified = c.step;
+    return tg.send(chatId, CONSENT_TEXT.notYet);
+  }
   const isBlocked = (s, story) => !!(s.blocked && s.blocked.has(storyKey(story)));
 
   async function handleStory(chatId, s, story, source) {
@@ -875,8 +936,8 @@ export function createBot({
     // Подпись к голосовому разбирается вместе с расшифровкой ниже. Разделитель правок не может прийти от человека.
     const text = cleanInput(msg.text || (msg.voice ? '' : msg.caption) || '').trim();
 
-    if (text === '/start') { s.stage = 'idle'; s.period = 'day'; await metrics.log(chatId, 'start'); return tg.send(chatId, TEXT.start); }
-    if (text === '/year') { s.stage = 'idle'; s.period = 'year'; await metrics.log(chatId, 'year'); return tg.send(chatId, TEXT.year); }
+    if (text === '/start') { s.stage = 'idle'; s.period = 'day'; await metrics.log(chatId, 'start'); return startConsent(chatId, s); }
+    if (text === '/year') { s.stage = 'idle'; s.period = 'year'; await metrics.log(chatId, 'year'); return consentDone(s) ? tg.send(chatId, TEXT.year) : startConsent(chatId, s); }
     if (text === '/delete') {
       sessions.delete(chatId);
       // Честный ответ (редактор 16:24): «удалены» — только если удаление сессии и статистики подтверждено.
@@ -895,6 +956,9 @@ export function createBot({
       return tg.send(chatId, lines.join('\n'));
     }
     if (text === '/help') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });
+    // До 6Ж и после отказа — ничего из сообщения не обрабатывается. Исключение — уже идущая доставка ролика
+    // (согласие дано раньше, повторный /start сбросил его): сообщения во время подготовки проверяются, как прежде.
+    if (!consentDone(s) && !s.delivering) return preConsent(chatId, s);
 
     if (msg.voice) {
       const voiceRefused = !sttAvailable() && transcribe === transcribeOgg ? TEXT.voiceOff : msg.voice.duration > MAX_VOICE_SECONDS ? TEXT.voiceLong : null;
@@ -1049,6 +1113,7 @@ export function createBot({
     if (!chatId) return;
     const s = session(chatId);
     const data = q.data || '';
+    if (data.startsWith('cs:')) return onConsent(chatId, s, data);
     if (data.startsWith('fb:')) {
       const v = data.slice(3);
       await metrics.log(chatId, 'feedback', { value: v });
@@ -1074,6 +1139,8 @@ export function createBot({
     const chatId = msg.chat.id;
     const text = cleanInput(msg.text || msg.caption || '').trim();
     if (!text || assessRisk(text).level !== 'urgent') return;
+    const prev = sessions.get(chatId);
+    if (!prev || (!consentDone(prev) && !prev.delivering)) return; // до подтверждений правка не обрабатывается
     const s = session(chatId);
     s.story = text; s.originalStory = text;
     return stopForSafety(chatId, s, 'urgent', { at: s.delivering ? 'edited_rendering' : 'edited' });

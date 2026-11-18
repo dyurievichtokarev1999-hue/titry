@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { TEXT, applyEdit, createBot, draftMessage, makeMetrics, parseEdit } from '../server/bot.js';
+import { TEXT, applyEdit, draftMessage, makeMetrics, parseEdit } from '../server/bot.js';
+import { createBot } from './helpers/consent.js'; // подтверждения 6А–6Ж пройдены (хелпер)
 import { draftRuleBased } from '../server/draft.js';
 import { helpMessage } from '../server/safety.js';
 
