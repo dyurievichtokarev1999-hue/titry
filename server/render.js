@@ -45,20 +45,18 @@ function serveEngine() {
 export async function checkRenderer({ env = process.env, launchMs = 15_000 } = {}) {
   try { createRequire(import.meta.url).resolve('playwright'); } catch { throw Object.assign(new Error('playwright'), { code: 'browser' }); }
   if (spawnSync(env.FFMPEG || 'ffmpeg', ['-version'], { stdio: 'ignore', timeout: 10_000 }).status !== 0) throw Object.assign(new Error('ffmpeg'), { code: 'ffmpeg' });
-  let timer;
-  const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error('browser'), { code: 'browser' })), launchMs); });
-  try { await Promise.race([getBrowser(), timeout]); } catch (e) { closeRenderer().catch(() => {}); throw e; } finally { clearTimeout(timer); }
+  await getBrowser({ timeout: launchMs }); // неудача или предел запуска — ошибка code: 'browser', кэш сброшен
   await closeRenderer(); // первый рендер запустит браузер заново: проверка не держит процесс
 }
 
 let browserPromise = null;
-async function getBrowser() {
+async function getBrowser({ timeout } = {}) {
   if (!browserPromise) {
     const require = createRequire(import.meta.url);
     const { chromium } = require('playwright');
     const executablePath = process.env.TITRY_CHROMIUM || undefined;
     // Неудачный запуск не кэшируем: следующий рендер попробует снова, а ошибка понятна без стека Playwright.
-    browserPromise = chromium.launch(executablePath ? { executablePath } : {}).catch((cause) => {
+    browserPromise = chromium.launch({ ...(executablePath ? { executablePath } : {}), ...(timeout ? { timeout } : {}) }).catch((cause) => {
       browserPromise = null;
       const where = executablePath ? `TITRY_CHROMIUM=${executablePath}` : 'браузер Playwright по умолчанию';
       throw Object.assign(new Error(`Chromium не запустился (${where}). Укажите установленный Chromium в TITRY_CHROMIUM или установите браузер под версию Playwright из package-lock.json.`), { code: 'browser', cause });
