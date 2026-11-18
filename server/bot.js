@@ -6,10 +6,10 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS, episodeToText, EDIT_SEP, cleanInput, joinEdits } from '../engine/episode.js';
-import { makeDraft, draftRuleBased, modelSafetyCheck, hasClaudeCredentials, pairFromSentence, SAFETY_TIMEOUT_MS } from './draft.js';
+import { makeDraft, draftRuleBased, modelSafetyCheck, hasClaudeCredentials, pairFromSentence, SAFETY_TIMEOUT_MS, STORY_MAX, TOO_LONG_TEXT } from './draft.js';
 import { makeGate, modelModeAtStart, RETRY_DELAY_MS } from './gate.js';
 import { startsWithContinuation, modelConcernMessage, helpMessage, tryLaterMessage, NOT_HEARD_TEXT, prepareHelp, assessRisk, assessEpisodeRisk, validateSafeEpisode, threatErrors, threatPronounFilter, INSUFFICIENT_TEXT, INSUFFICIENT_INVITE_TEXT, INSUFFICIENT_AFTER_EXCLUSION, INSUFFICIENT_MATERIAL, EDIT_NOT_IN_TITLES_TEXT, editNotInTitlesText, TELEGRAM_TEXT_LIMIT } from './safety.js';
-import { renderEpisode, ROOT, RENDER_TIMEOUT_MS, KILL_GRACE_MS, renderTimeoutFromEnv, withRenderTimeout, removeQuiet } from './render.js';
+import { renderEpisode, checkRenderer, ROOT, RENDER_TIMEOUT_MS, KILL_GRACE_MS, renderTimeoutFromEnv, withRenderTimeout, removeQuiet } from './render.js';
 import { logError, safeCode, logRenderTimeout } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS, cleanupVoiceOrphans } from './stt.js';
 import { processLedger, KEY_ENV, KEY_VERSION_ENV } from './ledger.js';
@@ -49,6 +49,7 @@ export const TEXT = {
   voiceOff: 'Голосовые пока не подключены. Напиши, пожалуйста, текстом.',
   voiceLong: `Голосовое длиннее ${Math.round(MAX_VOICE_SECONDS / 60)} минут. Для одной сцены хватит минуты.`,
   voiceEmpty: 'Не получилось разобрать голосовое. Можно повторить или написать текстом.',
+  tooLong: TOO_LONG_TEXT, // тот же текст, что у draft.js и монтажной
   editExcluded: EDIT_NOT_IN_TITLES_TEXT, // текст — в server/safety.js; окончательный утверждает редактор
   editHelp: [
     'Как поправить:',
@@ -463,6 +464,11 @@ export function createBot({
   consentOrder = consentSteps(), // порядок 6Б/6Г после 6А (TITRY_CONSENT_ORDER), не утверждён до правовой проверки
 } = {}) {
   const sessions = new Map();
+  // Рассказ для проверок безопасности: вместе с правками, отклонёнными по длине (s.overflow, только в памяти).
+  // Иначе угрозу можно разбить на две правки у предела: первая отклонена и выпала бы из контекста фильтра.
+  const seenStory = (s) => (s.overflow?.length ? `${s.story}${EDIT_SEP}${s.overflow.join(EDIT_SEP)}` : s.story);
+  // Метрики «как получится»: сбой записи (например, ENOSPC) не должен ломать ответ человеку. В журнал — только код.
+  const logMetric = (chatId, event, data) => Promise.resolve().then(() => metrics.log(chatId, event, data)).catch((e) => logError('metrics', e));
   // Незавершённые черновики и отдельные проверки участника: их результат может создать запрет уже после /delete.
   const inFlight = new Map();
   const track = async (chatId, p) => {
@@ -570,11 +576,12 @@ export function createBot({
   const isBlocked = (s, story) => !!(s.blocked && s.blocked.has(storyKey(story)));
 
   async function handleStory(chatId, s, story, source) {
-    const prevStory = s.story;
+    const prevStory = seenStory(s); // с правками, отклонёнными по длине: продолжение видит и их
     // Решение 16.11 (б): тревожный обрывок после бытовой формы прежнего текста — продолжение рассказа уровня concern:
     // черновик строится по обоим сообщениям вместе, дальше решает модельная проверка перед рендером.
     const cont = continuationLevel(prevStory, story);
-    if (cont === 'concern') story = `${prevStory}\n${story}`;
+    // У предела длины склейка целиком не поместится в черновик: тогда — последняя фраза и обрывок (как в проверке).
+    if (cont === 'concern') story = prevStory.length + story.length < STORY_MAX ? `${prevStory}\n${story}` : continuationContext(prevStory, story);
     // Новый рассказ сразу отменяет прежний черновик: его кнопки больше ничего не запускают.
     s.episode = null;
     s.skeleton = null;
@@ -583,6 +590,7 @@ export function createBot({
     const gen = s.draftId; // поколение: результат ожидания применяется, только если оно всё ещё текущее
     s.story = story;
     s.originalStory = story;
+    s.overflow = null;
     s.stage = 'drafting';
     // Решение 16.11 (б): однозначное продолжение бытовой формы прежнего текста — остановка. Собственный urgent нового
     // сообщения после рассказа — тоже сразу, до любых отправок (как до разбора QA PR 16).
@@ -650,7 +658,7 @@ export function createBot({
         && (isBlocked(s, story) || gate.status(s.scope, story).kind === 'safety')) return stopForSafety(chatId, s, 'urgent', { at: 'late' });
       return;
     }
-    await metrics.log(chatId, 'story', { source, period: s.period, chars: Math.round(story.length / 50) * 50 });
+    await logMetric(chatId, 'story', { source, period: s.period, chars: Math.round(story.length / 50) * 50 });
     if (!current()) return;
     if (r.risk.level === 'concern') await tg.send(chatId, helpMessage('concern'));
     // Решение 16.11 (в): флаг модели — мягкий блок с контактами рядом с черновиком, без остановки ролика.
@@ -660,7 +668,7 @@ export function createBot({
     s.verdict = 'ok';
     s.edits = 0;
     s.stage = 'draft';
-    await metrics.log(chatId, 'draft', { provider: r.provider, rows: r.episode.rows.length, dropped: (r.dropped || []).length });
+    await logMetric(chatId, 'draft', { provider: r.provider, rows: r.episode.rows.length, dropped: (r.dropped || []).length });
     if (!current()) return;
     await showDraft(chatId, s);
   }
@@ -691,7 +699,7 @@ export function createBot({
     const st = gate.status(s.scope, story);
     if (st.kind) { logError('check', { code: st.code }); s.stage = 'idle'; return tg.send(chatId, TEXT.checkUnavailable); }
     s.stage = 'idle'; // заготовка появится только перед самой отправкой реплики (восьмой разбор)
-    await metrics.log(chatId, code === INSUFFICIENT_MATERIAL ? INSUFFICIENT_MATERIAL : INSUFFICIENT_AFTER_EXCLUSION);
+    await logMetric(chatId, code === INSUFFICIENT_MATERIAL ? INSUFFICIENT_MATERIAL : INSUFFICIENT_AFTER_EXCLUSION);
     if (!current()) {
       // Пока писалась метрика, тот же рассказ остановлен (например, проверкой прежней сессии): карточка помощи, не тишина.
       if (stoppedNow() && sameStoryInWork()) return stopForSafety(chatId, s, 'urgent', { at: 'late' });
@@ -707,7 +715,7 @@ export function createBot({
   async function doRender(chatId, s) {
     // Правки после черновика тоже проверяются: опасная строка не попадёт в ролик.
     if (s.verdict !== 'ok' || !s.episode) return tg.send(chatId, TEXT.noDraft);
-    const risk = assessEpisodeRisk(joinEdits(s.story), s.episode); // правки — продолжение рассказа для проверки безопасности
+    const risk = assessEpisodeRisk(joinEdits(seenStory(s)), s.episode); // правки — продолжение рассказа для проверки безопасности
     if (risk.level === 'urgent') return stopForSafety(chatId, s, 'urgent', { at: 'render' });
     const v = validateSafeEpisode(s.episode, s.story);
     if (!v.ok) { await showDraft(chatId, s); return; }
@@ -717,7 +725,7 @@ export function createBot({
     // ИР-04 (критик реализации): один рендер идёт, до трёх ждут. Дальше — явный ответ «занято», без долговечной очереди.
     if (waiting >= 1 + MAX_RENDER_WAITING) return tg.send(chatId, TEXT.busy); // состояние сессии не меняется
     const ep = structuredClone(s.episode);
-    const story = s.story;
+    const story = seenStory(s);
     // Модельная проверка перед рендером — одна, на всём, что попадёт в ролик (условие 1): рассказ со всеми правками
     // (расшифровки, подписи, «/текст» уже в нём) и итоговые строки титров. Рендер стартует только после её результата.
     s.stage = 'rendering';
@@ -802,7 +810,7 @@ export function createBot({
       await tg.sendVideo(chatId, r.outPath, { caption: 'Конец сцены.', width: 720, height: 1280, duration: Math.round(r.duration), reply_markup: FEEDBACK_KB });
       // /delete во время отправки: после metrics.forget новая запись о человеке не появляется.
       if (!alive(chatId, s)) return;
-      await metrics.log(chatId, 'render', { seconds: Math.round(r.seconds), mood: ep.mood, music: ep.music, edits: s.edits || 0 });
+      await logMetric(chatId, 'render', { seconds: Math.round(r.seconds), mood: ep.mood, music: ep.music, edits: s.edits || 0 });
       if (current()) s.stage = 'watched';
     } catch (e) {
       release(); // следующая задача и новые запросы — сразу
@@ -897,12 +905,12 @@ export function createBot({
       body = known ? (m[2] || '').trim() : body.replace(/^\/+/, '').trim();
     }
     const own = body ? assessRisk(body).level : 'none';
-    const cont = body ? continuationLevel(s.story, body) : 'none';
+    const cont = body ? continuationLevel(seenStory(s), body) : 'none';
     const level = cont !== 'none' ? cont : own;
     if (level === 'none' && trivial(body)) return sendSafe(chatId, TEXT.rendering);
     const epoch = s.deliveryEpoch || 0;
     // Самостоятельное сообщение проверяется без прежнего рассказа (QA PR 16, п. 2).
-    const hold = decide(chatId, s, body, level, cont !== 'none' ? continuationContext(s.story, body) : body);
+    const hold = decide(chatId, s, body, level, cont !== 'none' ? continuationContext(seenStory(s), body) : body);
     holdDelivery(s, hold, level); // синхронно, до первого await
     const r = await hold;
     if (!alive(chatId, s)) return; // /delete во время проверки: ничего не отвечаем (запрет, если был, остаётся)
@@ -939,8 +947,8 @@ export function createBot({
     // Подпись к голосовому разбирается вместе с расшифровкой ниже. Разделитель правок не может прийти от человека.
     const text = cleanInput(msg.text || (msg.voice ? '' : msg.caption) || '').trim();
 
-    if (text === '/start') { s.stage = 'idle'; s.period = 'day'; await metrics.log(chatId, 'start'); return startConsent(chatId, s); }
-    if (text === '/year') { s.stage = 'idle'; s.period = 'year'; await metrics.log(chatId, 'year'); return consentDone(s) ? tg.send(chatId, TEXT.year) : startConsent(chatId, s); }
+    if (text === '/start') { s.stage = 'idle'; s.period = 'day'; await logMetric(chatId, 'start'); return startConsent(chatId, s); }
+    if (text === '/year') { s.stage = 'idle'; s.period = 'year'; await logMetric(chatId, 'year'); return consentDone(s) ? tg.send(chatId, TEXT.year) : startConsent(chatId, s); }
     if (text === '/delete') {
       sessions.delete(chatId);
       // Честный ответ (редактор 16:24): «удалены» — только если удаление сессии и статистики подтверждено.
@@ -1044,18 +1052,31 @@ export function createBot({
         const own = editCorpus(cmd);
         // Правка — отдельная фраза контекста: без точки она склеилась бы с соседним текстом в одну часть; от рассказа она
         // отделена EDIT_SEP (PR 13): признаки рассказа на неё не переходят, фильтр видит рассказ и правку вместе.
-        const ctx = own ? `${s.story}${EDIT_SEP}${/[.!?…]$/.test(own) ? own : `${own}.`}` : s.story;
+        const ownDot = own && (/[.!?…]$/.test(own) ? own : `${own}.`);
+        const ctx = own ? `${s.story}${EDIT_SEP}${ownDot}` : s.story; // хранимый рассказ, предел длины — по нему
+        const seen = own ? `${seenStory(s)}${EDIT_SEP}${ownDot}` : seenStory(s); // проверки безопасности — по нему
         let concern = false;
         if (own) {
           // Для проверок безопасности правки — продолжение рассказа (joinEdits, PR 13): «Я хочу» + правка «умереть».
-          const prevLevel = assessRisk(joinEdits(s.story)).level;
-          const risk = assessRisk(joinEdits(ctx));
-          if (risk.level === 'urgent') { s.story = ctx; return stopForSafety(chatId, s, 'urgent', { at: 'edit' }); }
+          const prevLevel = assessRisk(joinEdits(seenStory(s))).level;
+          const risk = assessRisk(joinEdits(seen));
+          if (risk.level === 'urgent') { s.story = seen; return stopForSafety(chatId, s, 'urgent', { at: 'edit' }); }
           // concern, который внесла сама правка: строка не берётся, рядом — тот же блок помощи, что у рассказа с concern
           // (одним сообщением, как в PR 11). Реплики нехватки здесь нет: прежний черновик остаётся.
           // Если рассказ уже был concern, блок помощи человек видел вместе с черновиком: правка, которая сама по себе
           // none, отклоняется ниже правилом титров без повторного блока (четвёртый разбор, мелочь 3).
           concern = risk.level === 'concern' && (prevLevel === 'none' || assessRisk(own).level !== 'none');
+          // Предел рассказа (6000, как у draft.js) действует и с правками: иначе каждая правка удлиняет то, что проверяет
+          // фильтр. Остановка выше уже отработала; concern-правка получает тот же блок помощи, что исключённая.
+          if (ctx.length > STORY_MAX) {
+            // Окно отклонённых правок — целые правки, не длиннее STORY_MAX: проверки остаются ограниченными по времени.
+            s.overflow = [...(s.overflow || []), ownDot];
+            while (s.overflow.length > 1 && s.overflow.join(EDIT_SEP).length > STORY_MAX) s.overflow.shift();
+            if (!concern) return tg.send(chatId, TEXT.tooLong);
+            await logMetric(chatId, 'edit_excluded', { level: 'concern' });
+            for (const t of editExcludedMessages(true, { path: editedPath(cmd, s.episode) })) await tg.send(chatId, t);
+            return;
+          }
         }
         const before = structuredClone(s.episode);
         if (!concern) {
@@ -1068,7 +1089,7 @@ export function createBot({
           // п. 2: «угроза не в титрах» — и для фраз из словаря угроз, которые фильтр остановки пропустил как гиперболу;
           // п. 3 для правок: местоимение в строке правки, указывающее на человека из исключённой угрозы.
           const path = editedPath(cmd, s.episode);
-          const joined = joinEdits(ctx);
+          const joined = joinEdits(seen);
           if (!excluded && path && (threatErrors(joined, s.episode).some((e) => e.path === path)
             || (/^(?:rows\.|post$)/.test(path) && threatPronounFilter(joined)(own)))) excluded = true;
           if (excluded) s.episode = before;
@@ -1076,7 +1097,7 @@ export function createBot({
           // остановка сейчас, а не обещание «черновик на месте» и остановка на «Смотреть».
           if (assessEpisodeRisk(joined, s.episode).level === 'urgent') return stopForSafety(chatId, s, 'urgent', { at: 'edit' });
           if (excluded) {
-            await metrics.log(chatId, 'edit_excluded', { level: concern ? 'concern' : 'none' });
+            await logMetric(chatId, 'edit_excluded', { level: concern ? 'concern' : 'none' });
             for (const t of editExcludedMessages(concern, { path })) await tg.send(chatId, t);
             return;
           }
@@ -1106,7 +1127,7 @@ export function createBot({
   async function shortText(chatId, s, text) {
     // Запрещённый раньше текст (например, моделью в окне до отправки) — снова остановка, а не «подробнее».
     // Строчное продолжение бытовой формы (решение 16.11, (б)) — и для коротких сообщений: «и ядом» после «Отравлюсь шавермой.».
-    if (assessRisk(text).level !== 'none' || continuationLevel(s.story, text) !== 'none' || isBlocked(s, text) || gate.status(s.scope, text).kind === 'safety') return handleStory(chatId, s, text, 'text');
+    if (assessRisk(text).level !== 'none' || continuationLevel(seenStory(s), text) !== 'none' || isBlocked(s, text) || gate.status(s.scope, text).kind === 'safety') return handleStory(chatId, s, text, 'text');
     return tg.send(chatId, TEXT.more);
   }
 
@@ -1119,7 +1140,7 @@ export function createBot({
     if (data.startsWith('cs:')) return onConsent(chatId, s, data);
     if (data.startsWith('fb:')) {
       const v = data.slice(3);
-      await metrics.log(chatId, 'feedback', { value: v });
+      await logMetric(chatId, 'feedback', { value: v });
       if (v === 'heavier') { await tg.send(chatId, TEXT.heavier); return tg.send(chatId, helpMessage('concern')); }
       return tg.send(chatId, v === 'fit' ? TEXT.fit : TEXT.miss);
     }
@@ -1233,7 +1254,7 @@ export async function purgeBotTmp(dir = botTmpDir()) {
   return removed;
 }
 
-export async function prepareBot({ cleanup = cleanupVoiceOrphans, cleanupTmp = purgeBotTmp, ledger, helpFile, env = process.env, log = console.error } = {}) {
+export async function prepareBot({ checkRender = checkRenderer, cleanup = cleanupVoiceOrphans, cleanupTmp = purgeBotTmp, ledger, helpFile, env = process.env, log = console.error } = {}) {
   if (!env.METRICS_SALT || String(env.METRICS_SALT).trim().length < METRICS_SALT_MIN) {
     logError('metrics.salt', { code: 'metrics_salt' });
     throw Object.assign(new Error('startup'), { code: 'metrics_salt', stage: 'metrics.salt' });
@@ -1242,6 +1263,8 @@ export async function prepareBot({ cleanup = cleanupVoiceOrphans, cleanupTmp = p
   try { modelModeAtStart({ env, log }); } catch (e) { logError('model.key', e); throw e; }
   // Контакты помощи: без проверенного блока помощи бот не стартует (решение владельца 11:05).
   try { prepareHelp(helpFile); } catch (e) { logError('help.load', e); throw Object.assign(new Error('startup'), { code: 'help_config', stage: 'help.load' }); }
+  // Без Playwright или ffmpeg бот принял бы рассказы, но не собрал бы ни одного ролика.
+  try { await checkRender({ env }); } catch (e) { logError('render.check', e); throw Object.assign(new Error('startup'), { code: safeCode(e), stage: 'render.check' }); }
   try { await cleanup(); } catch (e) { logError('voice.cleanup', e); throw Object.assign(new Error('startup'), { code: safeCode(e), stage: 'voice.cleanup' }); }
   try {
     const removed = await cleanupTmp();
@@ -1258,7 +1281,7 @@ async function main() {
   if (!token) { console.error('Задайте TELEGRAM_BOT_TOKEN (выдаёт @BotFather).'); process.exit(2); }
   let ledger;
   try { ledger = await prepareBot(); } catch {
-    console.error(`Запуск остановлен: не задана METRICS_SALT (не короче ${METRICS_SALT_MIN} знаков), нет ключа модели при TITRY_RELEASE_REAL_DATA=1, не проверены контакты помощи (config/help.json), не подтверждена очистка временных файлов или хранилище запретов (${KEY_ENV}, ${KEY_VERSION_ENV}). Задачи не принимаются. Остатки tmp и файл хранилища не удаляйте вручную без владельца кода.`);
+    console.error(`Запуск остановлен: не задана METRICS_SALT (не короче ${METRICS_SALT_MIN} знаков), нет ключа модели при TITRY_RELEASE_REAL_DATA=1, не проверены контакты помощи (config/help.json), не найден Playwright, не запускается Chromium (TITRY_CHROMIUM) или ffmpeg (FFMPEG), не подтверждена очистка временных файлов или хранилище запретов (${KEY_ENV}, ${KEY_VERSION_ENV}). Задачи не принимаются. Остатки tmp и файл хранилища не удаляйте вручную без владельца кода.`);
     process.exit(3);
   }
   const tg = telegram(token);

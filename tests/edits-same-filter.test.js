@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { makeDraft, draftRuleBased, groundDraft } from '../server/draft.js';
+import { makeDraft, draftRuleBased, groundDraft, STORY_MAX } from '../server/draft.js';
 import { assessRisk, threatErrors, threatPhrase, threatSentences, threatPronounFilter, helpMessage, validateSafeEpisode,
   INSUFFICIENT_TEXT, INSUFFICIENT_INVITE_TEXT, INSUFFICIENT_MATERIAL, INSUFFICIENT_AFTER_EXCLUSION, EDIT_NOT_IN_TITLES_TEXT, EDIT_NOT_IN_TITLES, editNotInTitlesText } from '../server/safety.js';
 import { TEXT, editExcludedMessages } from '../server/bot.js';
@@ -763,4 +763,79 @@ test('восьмой разбор: рассказ запрещён, пока п�
   assert.equal(s.episode, null);
   assert.notEqual(s.originalStory, SAFE);
   assert.ok(!sent.some((t) => /Похоже на твой день/.test(t)));
+});
+
+// ── Аудит 17.11, п. 8: рассказ с правками не длиннее STORY_MAX ──
+
+// Рассказ правками — вплотную к пределу: длинная правка уже отклонена, затем короткая тоже.
+async function nearLimit(b) {
+  await b.say(SAFE);
+  const edit = '1: вечером я долго гуляла в парке у реки и смотрела на воду';
+  let tries = 0;
+  do await b.say(edit); while (b.texts().at(-1) !== TEXT.tooLong && ++tries < 300);
+  assert.equal(b.texts().at(-1), TEXT.tooLong, 'длинная правка отклонена');
+  assert.ok(tries > 10, 'обычные правки до предела проходят');
+  let i = 0;
+  do await b.say('1: пила чай утром'); while (b.texts().at(-1) !== TEXT.tooLong && ++i < 20);
+  assert.ok(i > 0 && i < 20);
+  const story = b.s().story;
+  assert.ok(story.length <= STORY_MAX && story.length > STORY_MAX - 30);
+  return story;
+}
+
+test('бот: правки не удлиняют рассказ сверх 6000 знаков; concern и urgent у предела — помощь и остановка', async () => {
+  const b = botSetup();
+  const story = await nearLimit(b);
+  // concern-правка сверх предела: тот же блок помощи, что у исключённой правки, рассказ прежний.
+  await b.say('2: хочу его ударить');
+  assert.equal(b.texts().at(-1), `${editNotInTitlesText('rows.1')}\n\n${helpMessage('concern')}`);
+  assert.deepEqual(b.events.at(-1), { event: 'edit_excluded', level: 'concern' });
+  assert.equal(b.s().story, story, 'отклонённая правка рассказ не удлиняет');
+  // urgent-правка сверх предела — остановка, а не «слишком длинный».
+  await quiet(() => b.say('2: не хочу больше жить'));
+  assert.equal(b.texts().at(-1), helpMessage('urgent'));
+  assert.equal(b.s().episode, null);
+});
+
+test('бот: угроза, разбитая на две правки у предела, останавливает в любом порядке', async () => {
+  for (const [first, second] of [['2: хочу его ударить', '2: у меня есть нож'], ['2: у меня есть нож', '2: хочу его ударить']]) {
+    const b = botSetup();
+    await nearLimit(b);
+    await b.say(first);
+    assert.notEqual(b.texts().at(-1), helpMessage('urgent'), first);
+    await quiet(() => b.say(second));
+    assert.equal(b.texts().at(-1), helpMessage('urgent'), `${first} → ${second}`);
+    assert.equal(b.s().episode, null);
+  }
+});
+
+test('бот: отклонённая по длине правка видна проверке перед рендером', async () => {
+  const b = botSetup();
+  await nearLimit(b);
+  await b.say('2: вечером я долго смотрела на огни моста');
+  assert.equal(b.texts().at(-1), TEXT.tooLong);
+  await b.press(`play:${b.s().draftId}`);
+  assert.match(b.checked.at(-1), /огни моста/);
+});
+
+test('бот: продолжение отдельным сообщением видит правку, отклонённую по длине', async () => {
+  const b = botSetup();
+  await nearLimit(b);
+  await b.say('2: Отравлюсь шавермой.');
+  assert.equal(b.texts().at(-1), TEXT.tooLong);
+  await quiet(() => b.say('а потом таблетками'));
+  assert.equal(b.texts().at(-1), helpMessage('urgent'));
+});
+
+test('бот: concern-продолжение у предела длины — черновик и блок помощи, а не сбой черновика', async () => {
+  // Черновик с настоящим пределом makeDraft: длиннее STORY_MAX — ошибка too_long.
+  const b = botSetup({ draft: (st, o) => (st.length > STORY_MAX ? makeDraft(st, { ...o, provider: 'manual' }) : modelLike(st, o)) });
+  await nearLimit(b);
+  await b.say('2: Отравлюсь шавермой.');
+  assert.equal(b.texts().at(-1), TEXT.tooLong);
+  const n = b.sent.length;
+  await quiet(() => b.say('и хватит'));
+  const after = b.texts().slice(n);
+  assert.ok(after.some((t) => t.includes(helpMessage('concern'))), 'блок помощи есть');
+  assert.ok(!after.some((t) => /Не получилось собрать черновик/.test(t)), 'не сбой черновика');
 });

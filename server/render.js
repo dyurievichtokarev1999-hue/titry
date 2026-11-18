@@ -2,7 +2,7 @@
 import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { TRACKS, validateEpisode } from '../engine/episode.js';
@@ -37,18 +37,35 @@ function serveEngine() {
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server)));
 }
 
+/**
+ * Проверка при старте бота: Playwright находится, ffmpeg запускается, Chromium (TITRY_CHROMIUM или браузер из поставки
+ * Playwright) запускается и закрывается. Иначе ни один ролик не соберётся. Путь к Chromium берётся, как у рендера,
+ * из process.env.TITRY_CHROMIUM.
+ */
+export async function checkRenderer({ env = process.env, launchMs = 15_000 } = {}) {
+  try { createRequire(import.meta.url).resolve('playwright'); } catch { throw Object.assign(new Error('playwright'), { code: 'browser' }); }
+  if (spawnSync(env.FFMPEG || 'ffmpeg', ['-version'], { stdio: 'ignore', timeout: 10_000 }).status !== 0) throw Object.assign(new Error('ffmpeg'), { code: 'ffmpeg' });
+  await getBrowser({ timeout: launchMs }); // неудача или предел запуска — ошибка code: 'browser', кэш сброшен
+  await closeRenderer(); // первый рендер запустит браузер заново: проверка не держит процесс
+}
+
 let browserPromise = null;
-async function getBrowser() {
+export async function getBrowser({ timeout } = {}) {
   if (!browserPromise) {
     const require = createRequire(import.meta.url);
     const { chromium } = require('playwright');
     const executablePath = process.env.TITRY_CHROMIUM || undefined;
     // Неудачный запуск не кэшируем: следующий рендер попробует снова, а ошибка понятна без стека Playwright.
-    browserPromise = chromium.launch(executablePath ? { executablePath } : {}).catch((cause) => {
+    const launching = chromium.launch({ ...(executablePath ? { executablePath } : {}), ...(timeout ? { timeout } : {}) }).then((b) => {
+      // Упавший или закрытый браузер не держим в кэше: следующий рендер запустит новый.
+      b.on('disconnected', () => { if (browserPromise === launching) browserPromise = null; });
+      return b;
+    }, (cause) => {
       browserPromise = null;
       const where = executablePath ? `TITRY_CHROMIUM=${executablePath}` : 'браузер Playwright по умолчанию';
       throw Object.assign(new Error(`Chromium не запустился (${where}). Укажите установленный Chromium в TITRY_CHROMIUM или установите браузер под версию Playwright из package-lock.json.`), { code: 'browser', cause });
     });
+    browserPromise = launching;
   }
   return browserPromise;
 }

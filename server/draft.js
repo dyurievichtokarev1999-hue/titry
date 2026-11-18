@@ -7,6 +7,10 @@ import Anthropic from '@anthropic-ai/sdk';
 import { LIMITS, MOODS, blankEpisode, cleanInput, detectGender, isMarkerWord, rowWordProblems, rowWordsGrounded, sanitizeEpisode, sourceFound, todayIso, validateEpisode, wordsOf } from '../engine/episode.js';
 import { assessRisk, threatSentences, touchesThreat, threatPhrase, threatPronounFilter, validateSafeEpisode, insufficientAfterExclusion, INSUFFICIENT_AFTER_EXCLUSION, INSUFFICIENT_MATERIAL } from './safety.js';
 
+// Предел рассказа в знаках; тот же предел действует для рассказа с правками (server/bot.js).
+export const STORY_MAX = 6000;
+export const TOO_LONG_TEXT = 'Рассказ слишком длинный для одного эпизода.';
+
 export const DEFAULT_MODEL = process.env.TITRY_MODEL || 'claude-opus-5-5';
 
 const TONE_HINT = {
@@ -384,7 +388,7 @@ export async function makeDraft(story, opts = {}) {
   // Проверка безопасности — до проверки длины: длинный опасный рассказ тоже останавливается.
   let risk = assessRisk(text);
   if (risk.level === 'urgent') return { risk, episode: null, provider: null };
-  if (text.length > 6000) throw Object.assign(new Error('Рассказ слишком длинный для одного эпизода.'), { code: 'too_long' });
+  if (text.length > STORY_MAX) throw Object.assign(new Error(TOO_LONG_TEXT), { code: 'too_long' });
 
   const useClaude = opts.provider === 'claude' || (opts.provider !== 'manual' && hasClaudeCredentials());
   let result, provider, note = '';
