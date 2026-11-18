@@ -1125,7 +1125,8 @@ export function createBot({
     }
     if (data === 'edit') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });
     // Кнопки черновика до 6Ж и после отказа (повторный /start, /delete, истёкшая сессия) — ничего не делают.
-    if (!consentDone(s) && !s.delivering) return;
+    // Остановленный рассказ (stage help) по-прежнему отвечает экраном помощи.
+    if (!consentDone(s) && !s.delivering && s.stage !== 'help') return;
     const [action, idPart] = data.split(':');
     if (s.stage === 'rendering') return tg.send(chatId, TEXT.rendering);
     // Кнопка работает только для текущего черновика, прошедшего проверку безопасности.

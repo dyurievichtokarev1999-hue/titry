@@ -195,12 +195,12 @@ test('/start во время подготовки ролика: согласие
   const id = b.s().draftId;
   const playing = b.press(`play:${id}`);
   try {
-    await new Promise((r) => setTimeout(r, 20));
+    for (let i = 0; i < 200 && !(b.n.render === 1 && b.s().delivering); i++) await new Promise((r) => setImmediate(r));
     assert.ok(b.s().delivering, 'доставка идёт');
     await b.say('/start');
     assert.notEqual(b.s().consent.step, 'done');
     const q = b.say('Сдохну'); // локально urgent (решение 16.11): ролик отменяется
-    await new Promise((r) => setTimeout(r, 20));
+    for (let i = 0; i < 200 && !b.texts().some((t) => /112/.test(String(t))); i++) await new Promise((r) => setImmediate(r));
     release();
     await q;
   } finally { release(); await playing; }
