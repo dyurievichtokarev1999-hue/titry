@@ -13,7 +13,7 @@ const ORDERS = [['pd', 'age'], ['age', 'pd']];
 const INVITES = [CONSENT_TEXT.ready, TEXT.year, TEXT.start];
 const STORY = ex.story;
 
-function setup(order, { draftGate, renderGate } = {}) {
+function setup(order, { draftGate, renderGate, unsafe } = {}) {
   const sent = [];
   const n = { download: 0, stt: 0, draft: 0, check: 0, story: 0, render: 0, video: 0 };
   const tg = {
@@ -26,7 +26,7 @@ function setup(order, { draftGate, renderGate } = {}) {
   const bot = createBot({
     tg, metrics, consentOrder: order,
     transcribe: async () => { n.stt++; return STORY; },
-    draft: async () => { n.draft++; await draftGate; return { episode: structuredClone(ex.episode), risk: { level: 'none' }, provider: 'claude', dropped: [] }; },
+    draft: async () => { n.draft++; await draftGate; if (unsafe) return { episode: null, risk: { level: 'urgent', byModel: true } }; return { episode: structuredClone(ex.episode), risk: { level: 'none' }, provider: 'claude', dropped: [] }; },
     safetyCheck: async () => { n.check++; return false; },
     checkRetryMs: 0,
     render: async (e, o) => { n.render++; await renderGate; return { seconds: 1, duration: 24, outPath: o.outPath }; },
@@ -262,4 +262,52 @@ test('/start во время подготовки ролика: согласие
   } finally { release(); await playing; }
   assert.equal(b.n.video, 0, 'ролик не отправлен');
   assert.ok(b.texts().some((t) => /112/.test(String(t))), 'экран остановки с 112');
+});
+
+// Разбор правок пп. 5–8: сброс во время доставки ролика — после её конца; опасный сброшенный черновик — экран остановки.
+const ticks = async (k = 50) => { for (let i = 0; i < k; i++) await new Promise((r) => setImmediate(r)); };
+async function delivering(b) {
+  await b.say('/start');
+  for (const d of ['cs:intro:next', 'cs:pd:yes', 'cs:age:yes']) await b.press(d);
+  await b.say(STORY);
+  const id = b.s().draftId;
+  const p = b.press(`play:${id}`); await ticks();
+  assert.ok(b.s().delivering, 'ролик готовится');
+  return { id, p };
+}
+
+test('«Нет» на 6Г во время доставки ролика: рассказ и черновик стираются после доставки (п. 7)', async () => {
+  let release;
+  const b = setup(['pd', 'age'], { renderGate: new Promise((r) => { release = r; }) });
+  const { p } = await delivering(b);
+  await b.say('/start');
+  for (const d of ['cs:intro:next', 'cs:pd:yes', 'cs:age:no']) await b.press(d);
+  release(); await p; await ticks();
+  for (const k of ['story', 'originalStory', 'episode']) assert.ok(!b.s()[k], k);
+});
+
+test('повторные подтверждения во время доставки: старый черновик после неё не работает (п. 8)', async () => {
+  let release;
+  const b = setup(['pd', 'age'], { renderGate: new Promise((r) => { release = r; }) });
+  const { id, p } = await delivering(b);
+  await b.say('/start');
+  for (const d of ['cs:intro:next', 'cs:pd:yes', 'cs:age:yes']) await b.press(d);
+  release(); await p; await ticks();
+  const renders = b.n.render;
+  for (const d of [`play:${id}`, `mood:${id}`, `music:${id}`]) await b.press(d);
+  await ticks();
+  assert.equal(b.n.render, renders, 'старая ▶ не рендерит');
+  assert.ok(!b.s().episode && !b.s().story);
+});
+
+test('черновик опасен по модели, во время ожидания пришёл /start: экран остановки и запрет — всё равно (п. 8)', async () => {
+  let release;
+  const b = setup(['pd', 'age'], { draftGate: new Promise((r) => { release = r; }), unsafe: true });
+  await b.say('/start');
+  for (const d of ['cs:intro:next', 'cs:pd:yes', 'cs:age:yes']) await b.press(d);
+  const p = b.say(STORY); await ticks(5);
+  await b.say('/start');
+  release(); await p; await ticks();
+  assert.equal(b.texts().at(-1), helpMessage('urgent'));
+  assert.ok(b.s().blocked?.size, 'рассказ запомнен как запрещённый');
 });

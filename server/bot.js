@@ -545,14 +545,19 @@ export function createBot({
   }
   // Рассказ и черновик из памяти сессии: при повторных подтверждениях и при отказе (решение Claude 18.11, пп. 7, 8).
   // Новое поколение draftId: начатый черновик больше не покажется. Запреты safety (s.blocked) не трогаем.
+  // forgotGen — поколение сброшенного черновика: его опасный ответ модели всё равно показывает экран остановки.
+  // Во время доставки ролика сброс откладывается до её конца (forgetAfter, см. doRender).
   const forgetStory = (s) => {
+    if (s.delivering) { s.forgetAfter = true; return; }
+    s.forgetAfter = false;
+    s.forgotGen = s.draftId;
     s.story = s.originalStory = s.overflow = s.episode = s.skeleton = s.verdict = null;
     if (s.draftId) s.draftId += 1; // черновик уже начинался — его поколение больше не текущее
-    if (!s.delivering) s.stage = 'idle';
+    s.stage = 'idle';
   };
   // 6А с начала; прежние нажатия не засчитываются (2.1: «Повторный /start начинает с 6А»).
   function startConsent(chatId, s) {
-    if (!s.delivering) forgetStory(s); // идущая доставка — по прежним правилам, её проверки не трогаем
+    forgetStory(s); // идущая доставка — по прежним правилам, сброс после неё
     s.consent = { step: 'intro', given: {}, notified: null };
     return tg.send(chatId, CONSENT_TEXT.intro, { reply_markup: consentKb([[[CONSENT_TEXT.introNext, 'cs:intro:next']]]) });
   }
@@ -566,7 +571,7 @@ export function createBot({
       return consentScreen(chatId, s, next);
     }
     c.step = 'declined'; // отказ как событие не храним; дальше бот ничего не спрашивает и не напоминает
-    if (!s.delivering) forgetStory(s);
+    forgetStory(s);
     if (step === 'pd') return tg.send(chatId, CONSENT_TEXT.pdDeclined);
     // 6Г «Нет»: отметки о согласии удаляются (в памяти — всегда успешно); отметку «младше 18» не храним.
     const had = Object.keys(c.given).length > 0;
@@ -654,8 +659,8 @@ export function createBot({
       s.blocked = s.blocked || new Set();
       s.blocked.add(storyKey(story));
       gate.markSafety(s.scope, story);
-      // Если сейчас в работе тот же рассказ, его черновик тоже уничтожается.
-      if (s.verdict !== 'blocked' && s.originalStory && storyKey(s.originalStory) === storyKey(story)) {
+      // Если сейчас в работе тот же рассказ или его сбросил повторный /start / отказ, — экран остановки.
+      if (s.forgotGen === gen || (s.verdict !== 'blocked' && s.originalStory && storyKey(s.originalStory) === storyKey(story))) {
         return stopForSafety(chatId, s, r.risk.level, { byModel: r.risk.byModel, at: 'late' });
       }
       return;
@@ -663,7 +668,7 @@ export function createBot({
     if (!current()) {
       // Устаревший «можно» молча отбрасывается. Но если тот же рассказ этой сессии тем временем остановлен
       // (например, проверкой прежней сессии до /delete), человек получает карточку помощи, а не тишину.
-      if (alive(chatId, s) && s.verdict !== 'blocked' && s.originalStory && storyKey(s.originalStory) === storyKey(story)
+      if (alive(chatId, s) && (s.forgotGen === gen || (s.verdict !== 'blocked' && s.originalStory && storyKey(s.originalStory) === storyKey(story)))
         && (isBlocked(s, story) || gate.status(s.scope, story).kind === 'safety')) return stopForSafety(chatId, s, 'urgent', { at: 'late' });
       return;
     }
@@ -697,7 +702,7 @@ export function createBot({
     // Тот же рассказ сейчас в работе и ещё не остановлен: поздняя остановка (как в ветке !r.episode, at: 'late').
     // Без этого два подряд одинаковых рассказа, у первого из которых проверка вернула true, оставляли человека
     // без карточки помощи: первый ответ устарел, у второго current() уже false из-за safety — оба молча выходили.
-    const sameStoryInWork = () => alive(chatId, s) && s.verdict !== 'blocked' && !!s.originalStory && storyKey(s.originalStory) === storyKey(story);
+    const sameStoryInWork = () => alive(chatId, s) && (s.forgotGen === gen || (s.verdict !== 'blocked' && !!s.originalStory && storyKey(s.originalStory) === storyKey(story)));
     const stoppedNow = () => isBlocked(s, story) || gate.status(s.scope, story).kind === 'safety';
     if (!current()) {
       if (stoppedNow() && sameStoryInWork()) return stopForSafety(chatId, s, 'urgent', { at: 'late' });
@@ -836,7 +841,7 @@ export function createBot({
       release();
       await removeQuiet([out]); // ошибка удаления — в журнал только код
     }
-    } finally { s.delivering--; }
+    } finally { s.delivering--; if (!s.delivering && s.forgetAfter) forgetStory(s); }
   }
 
   // Сообщение, пришедшее во время подготовки ролика: окно «после проверки — до отправки» (решение владельца кода
