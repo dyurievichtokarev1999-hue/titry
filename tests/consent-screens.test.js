@@ -33,7 +33,9 @@ function setup(order, { draftGate, renderGate, unsafe } = {}) {
   });
   const chat = { id: 88001, type: 'private' };
   const say = (text) => bot.handleUpdate({ message: { chat, text } });
-  const press = (data) => bot.handleUpdate({ callback_query: { id: 'q', data, message: { chat } } });
+  // Кнопки согласия привязаны к прохождению: «cs:шаг:ответ» дополняется меткой текущего цикла, как на экране.
+  const cs = (data) => (/^cs:[a-z]+:[a-z]+$/.test(data) ? `${data}:${bot.sessions.get(chat.id)?.consent?.cycle}` : data);
+  const press = (data) => bot.handleUpdate({ callback_query: { id: 'q', data: cs(data), message: { chat } } });
   const voice = () => bot.handleUpdate({ message: { chat, voice: { file_id: 'f1', duration: 5 } } });
   const voiceCaption = () => bot.handleUpdate({ message: { chat, voice: { file_id: 'f2', duration: 5 }, caption: STORY } });
   const photoCaption = () => bot.handleUpdate({ message: { chat, photo: [{ file_id: 'p1' }], caption: STORY } });
@@ -325,4 +327,28 @@ test('/start во время доставки: старые кнопки чер�
   await b.press(`play:${id}`); await ticks();
   assert.equal(b.n.render, renders, 'вторая доставка не началась');
   release(); await p;
+});
+
+// Критик реализации 18.11 21:40: кнопка с экрана прежнего прохождения не засчитывается в новом.
+test('кнопки 6Б и 6Г прежнего прохождения после /start ничего не меняют; кнопки нового экрана работают (оба порядка)', async () => {
+  for (const order of ORDERS) {
+    for (const answer of ['yes', 'no']) {
+      const b = setup(order);
+      await b.say('/start');
+      const buttons = () => b.sent.flatMap((m) => m.extra?.reply_markup?.inline_keyboard?.flat() || []).map((k) => k.callback_data);
+      for (const st of ['intro:next', `${order[0]}:yes`]) await b.press(`cs:${st}`);
+      const old = buttons().filter((d) => /^cs:(pd|age):/.test(d)); // кнопки первого прохождения
+      await b.say('/start');
+      for (const st of ['intro:next', `${order[0]}:yes`]) await b.press(`cs:${st}`); // новый цикл на том же шаге
+      const before = structuredClone(b.s().consent);
+      const sentBefore = b.sent.length;
+      for (const d of old.filter((x) => x.includes(`:${answer}:`))) {
+        await b.bot.handleUpdate({ callback_query: { id: 'q', data: d, message: { chat: { id: 88001, type: 'private' } } } });
+      }
+      assert.deepEqual(b.s().consent, before, `${order} ${answer}: состояние и отметки не изменились`);
+      assert.equal(b.sent.length, sentBefore, 'ни 6Ж, ни ответа на отказ');
+      await b.press(`cs:${order[1]}:yes`);
+      assert.equal(b.texts().at(-1), CONSENT_TEXT.ready, 'кнопка нового экрана работает');
+    }
+  }
 });

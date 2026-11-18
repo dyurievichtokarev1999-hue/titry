@@ -537,9 +537,9 @@ export function createBot({
     if (step === 'pd') {
       const parts = splitForTelegram(CONSENT_TEXT.pd);
       for (const p of parts.slice(0, -1)) await tg.send(chatId, p);
-      return tg.send(chatId, parts.at(-1), { reply_markup: consentKb([[[CONSENT_TEXT.pdYes, 'cs:pd:yes'], [CONSENT_TEXT.pdNo, 'cs:pd:no']]]) });
+      return tg.send(chatId, parts.at(-1), { reply_markup: consentKb([[[CONSENT_TEXT.pdYes, `cs:pd:yes:${s.consent.cycle}`], [CONSENT_TEXT.pdNo, `cs:pd:no:${s.consent.cycle}`]]]) });
     }
-    if (step === 'age') return tg.send(chatId, CONSENT_TEXT.age, { reply_markup: consentKb([[[CONSENT_TEXT.ageYes, 'cs:age:yes'], [CONSENT_TEXT.ageNo, 'cs:age:no']]]) });
+    if (step === 'age') return tg.send(chatId, CONSENT_TEXT.age, { reply_markup: consentKb([[[CONSENT_TEXT.ageYes, `cs:age:yes:${s.consent.cycle}`], [CONSENT_TEXT.ageNo, `cs:age:no:${s.consent.cycle}`]]]) });
     // 6Ж — единственное приглашение, и после /year (решение Claude 18.11, п. 5); период года сохраняется в s.period.
     return tg.send(chatId, CONSENT_TEXT.ready);
   }
@@ -558,13 +558,15 @@ export function createBot({
   // 6А с начала; прежние нажатия не засчитываются (2.1: «Повторный /start начинает с 6А»).
   function startConsent(chatId, s) {
     forgetStory(s); // идущая доставка — по прежним правилам, сброс после неё
-    s.consent = { step: 'intro', given: {}, notified: null };
-    return tg.send(chatId, CONSENT_TEXT.intro, { reply_markup: consentKb([[[CONSENT_TEXT.introNext, 'cs:intro:next']]]) });
+    // cycle — метка этого прохождения в кнопках: кнопка со старого экрана (до /start, /delete, перезапуска) не засчитывается.
+    s.consent = { step: 'intro', given: {}, notified: null, cycle: crypto.randomBytes(4).toString('hex') };
+    return tg.send(chatId, CONSENT_TEXT.intro, { reply_markup: consentKb([[[CONSENT_TEXT.introNext, `cs:intro:next:${s.consent.cycle}`]]]) });
   }
   async function onConsent(chatId, s, data) {
     const c = s.consent;
-    const [, step, answer] = data.split(':');
-    if (!c || c.step !== step) return; // кнопка не текущего шага (устаревшая или после отказа) — ничего не засчитываем
+    const [, step, answer, cycle] = data.split(':');
+    // Кнопка не текущего шага или прежнего прохождения (Критик реализации 18.11 21:40) — ничего не засчитываем.
+    if (!c || c.step !== step || cycle !== c.cycle) return;
     const next = step === 'intro' ? consentOrder[0] : consentOrder[consentOrder.indexOf(step) + 1] || 'done';
     if (answer === 'next' || answer === 'yes') {
       if (step === 'pd') c.given.pd = { at: now().toISOString(), version: CONSENT_VERSION };
