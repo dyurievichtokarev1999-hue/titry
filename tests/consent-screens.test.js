@@ -12,22 +12,22 @@ const ORDERS = [['pd', 'age'], ['age', 'pd']];
 const INVITES = [CONSENT_TEXT.ready, TEXT.year, TEXT.start];
 const STORY = ex.story;
 
-function setup(order) {
+function setup(order, { draftGate, renderGate } = {}) {
   const sent = [];
-  const n = { download: 0, stt: 0, draft: 0, check: 0, story: 0, render: 0 };
+  const n = { download: 0, stt: 0, draft: 0, check: 0, story: 0, render: 0, video: 0 };
   const tg = {
     send: async (c, text, extra) => { sent.push({ text, extra }); }, action: async () => {}, answer: async () => {},
     fileBuffer: async () => { n.download++; return Buffer.from('ogg'); },
-    sendVideo: async () => {},
+    sendVideo: async () => { n.video++; },
   };
   const metrics = { hash: () => 'qa-fictional', log: async (c, event) => { if (event === 'story') n.story++; }, forget: async () => {} };
   const bot = createBot({
     tg, metrics, consentOrder: order,
     transcribe: async () => { n.stt++; return STORY; },
-    draft: async () => { n.draft++; return { episode: structuredClone(ex.episode), risk: { level: 'none' }, provider: 'claude', dropped: [] }; },
+    draft: async () => { n.draft++; await draftGate; return { episode: structuredClone(ex.episode), risk: { level: 'none' }, provider: 'claude', dropped: [] }; },
     safetyCheck: async () => { n.check++; return false; },
     checkRetryMs: 0,
-    render: async (e, o) => { n.render++; return { seconds: 1, duration: 24, outPath: o.outPath }; },
+    render: async (e, o) => { n.render++; await renderGate; return { seconds: 1, duration: 24, outPath: o.outPath }; },
   });
   const chat = { id: 88001, type: 'private' };
   const say = (text) => bot.handleUpdate({ message: { chat, text } });
@@ -44,7 +44,7 @@ async function sendAllKinds(b) {
   await b.say(STORY); await b.voice(); await b.voiceCaption(); await b.photoCaption();
 }
 function assertNothingProcessed(b, label) {
-  assert.deepEqual(b.n, { download: 0, stt: 0, draft: 0, check: 0, story: 0, render: 0 }, `счётчики: ${label}`);
+  assert.deepEqual(b.n, { download: 0, stt: 0, draft: 0, check: 0, story: 0, render: 0, video: 0 }, `счётчики: ${label}`);
   const s = b.s();
   assert.ok(!s.story && !s.originalStory && !s.episode, `содержание рассказа не в сессии: ${label}`);
   for (const t of b.texts()) assert.ok(!INVITES.includes(t), `нет приглашения рассказать раньше 6Ж: ${label}`);
@@ -164,4 +164,46 @@ test('/delete стирает отметку о согласии вместе с 
   await b.say(STORY);
   assert.equal(b.n.draft, 0);
   assert.deepEqual(b.texts().slice(-2), [CONSENT_TEXT.notYet, CONSENT_TEXT.intro]);
+});
+
+test('черновик, который готовился до повторного /start и отказа на 6Г, не показывается и не ставит рендер (разбор, п. 1)', async () => {
+  let release;
+  const b = setup(['pd', 'age'], { draftGate: new Promise((r) => { release = r; }) });
+  await b.say('/start');
+  for (const d of ['cs:intro:next', 'cs:pd:yes', 'cs:age:yes']) await b.press(d);
+  const pending = b.say(STORY); // рассказ принят после подтверждений, черновик ещё у модели
+  await new Promise((r) => setImmediate(r));
+  await b.say('/start');
+  for (const d of ['cs:intro:next', 'cs:pd:yes', 'cs:age:no']) await b.press(d);
+  release();
+  await pending;
+  for (let id = 0; id <= 3; id++) { await b.press(`play:${id}`); await b.press(`mood:${id}`); await b.press(`music:${id}`); }
+  assert.equal(b.n.draft, 1);
+  assert.equal(b.n.render, 0, 'рендер не поставлен');
+  assert.equal(b.n.story, 0, 'метрика story не записана');
+  assert.equal(b.s().consent.step, 'declined');
+  assert.ok(!b.sent.some((m) => m.extra?.reply_markup?.inline_keyboard?.flat().some((k) => /^play:/.test(k.callback_data))), 'черновик не показан');
+  assert.ok(!b.texts().includes(TEXT.noDraft), 'старые кнопки не приглашают рассказать (разбор, п. 2)');
+});
+
+test('/start во время подготовки ролика: согласие сброшено, но сообщения проверяются, как прежде — «Сдохну» отменяет ролик', async () => {
+  let release;
+  const b = setup(['pd', 'age'], { renderGate: new Promise((r) => { release = r; }) });
+  await b.say('/start');
+  for (const d of ['cs:intro:next', 'cs:pd:yes', 'cs:age:yes']) await b.press(d);
+  await b.say(STORY);
+  const id = b.s().draftId;
+  const playing = b.press(`play:${id}`);
+  try {
+    await new Promise((r) => setTimeout(r, 20));
+    assert.ok(b.s().delivering, 'доставка идёт');
+    await b.say('/start');
+    assert.notEqual(b.s().consent.step, 'done');
+    const q = b.say('Сдохну'); // локально urgent (решение 16.11): ролик отменяется
+    await new Promise((r) => setTimeout(r, 20));
+    release();
+    await q;
+  } finally { release(); await playing; }
+  assert.equal(b.n.video, 0, 'ролик не отправлен');
+  assert.ok(b.texts().some((t) => /112/.test(String(t))), 'экран остановки с 112');
 });

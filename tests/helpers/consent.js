@@ -18,14 +18,15 @@ export async function passConsent(handle, chat, { order = consentSteps(), begin 
 
 export function createBot(opts = {}) {
   const muted = new Set();
-  const quiet = (obj) => obj && new Proxy(obj, {
+  // Глушатся только ответы шагов подтверждения (send, answer) и метрика log; остальное (sendVideo, hash…) — как есть.
+  const quiet = (obj, names) => obj && new Proxy(obj, {
     get(t, k) {
       const v = t[k];
-      if (typeof v !== 'function') return v;
+      if (typeof v !== 'function' || !names.includes(k)) return v;
       return (...a) => (muted.has(a[0]) || a[0] === HELPER_QUERY ? Promise.resolve() : v.apply(t, a));
     },
   });
-  const bot = realCreateBot({ ...opts, tg: quiet(opts.tg), ...(opts.metrics ? { metrics: quiet(opts.metrics) } : {}) });
+  const bot = realCreateBot({ ...opts, tg: quiet(opts.tg, ['send', 'answer']), ...(opts.metrics ? { metrics: quiet(opts.metrics, ['log']) } : {}) });
   const handle = bot.handleUpdate;
   const ready = new Map();
   const silently = async (chat, fn) => { muted.add(chat.id); try { await fn(); } finally { muted.delete(chat.id); } };

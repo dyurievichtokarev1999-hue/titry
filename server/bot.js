@@ -127,8 +127,11 @@ export function editExcludedMessages(concern, { help, log = logError, path = 'ro
 export function splitForTelegram(text, limit = TELEGRAM_TEXT_LIMIT) {
   const parts = [];
   for (const p of String(text).split('\n\n')) {
-    if (parts.length && parts[parts.length - 1].length + 2 + p.length <= limit) parts[parts.length - 1] += `\n\n${p}`;
-    else parts.push(p);
+    const last = parts[parts.length - 1];
+    if (last !== undefined && last.length + 2 + p.length <= limit) { parts[parts.length - 1] += `\n\n${p}`; continue; }
+    // Заголовок на «:» не отрывается от следующего абзаца: переносится в новую часть вместе с ним.
+    const cut = last !== undefined && last.endsWith(':') ? last.lastIndexOf('\n\n') : -1;
+    if (cut > 0) { parts[parts.length - 1] = last.slice(0, cut); parts.push(`${last.slice(cut + 2)}\n\n${p}`); } else parts.push(p);
   }
   return parts;
 }
@@ -559,7 +562,7 @@ export function createBot({
   // Сообщение до конца подтверждений: 6З не чаще раза на шаг; без начатого диалога — 6З и 6А; после отказа — тишина.
   async function preConsent(chatId, s) {
     const c = s.consent;
-    if (!c) { s.consent = null; await tg.send(chatId, CONSENT_TEXT.notYet); await startConsent(chatId, s); s.consent.notified = 'intro'; return; }
+    if (!c) { await tg.send(chatId, CONSENT_TEXT.notYet); await startConsent(chatId, s); s.consent.notified = 'intro'; return; }
     if (c.step === 'declined' || c.notified === c.step) return;
     c.notified = c.step;
     return tg.send(chatId, CONSENT_TEXT.notYet);
@@ -594,7 +597,7 @@ export function createBot({
       s.stage = 'idle';
       return tg.send(chatId, TEXT.checkUnavailable);
     }
-    const current = () => alive(chatId, s) && s.draftId === gen && !isBlocked(s, story) && gate.status(s.scope, story).kind !== 'safety';
+    const current = () => alive(chatId, s) && s.draftId === gen && consentDone(s) && !isBlocked(s, story) && gate.status(s.scope, story).kind !== 'safety';
     await tg.action(chatId, 'typing');
     await tg.send(chatId, TEXT.working);
     let r;
@@ -1121,6 +1124,8 @@ export function createBot({
       return tg.send(chatId, v === 'fit' ? TEXT.fit : TEXT.miss);
     }
     if (data === 'edit') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });
+    // Кнопки черновика до 6Ж и после отказа (повторный /start, /delete, истёкшая сессия) — ничего не делают.
+    if (!consentDone(s) && !s.delivering) return;
     const [action, idPart] = data.split(':');
     if (s.stage === 'rendering') return tg.send(chatId, TEXT.rendering);
     // Кнопка работает только для текущего черновика, прошедшего проверку безопасности.
