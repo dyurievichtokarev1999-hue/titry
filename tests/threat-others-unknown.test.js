@@ -17,6 +17,8 @@ const OTHERS = [
   'Сосед своё получит, я уже канистру бензина купил.',
   'Держала сестру взаперти.',
 ];
+// Возврат QA b54fbdb8: пострадавший-местоимение в больнице после глагола насилия; «увезли в больницу к хирургу».
+const QA_RETURN = ['Соседа я так отделал, что он в больнице.', 'Отделал соседа, его увезли в больницу к хирургу.'];
 // Адресат сам попал в больницу — concern и после правки QA (разбор дельты PR 21).
 const OTHERS_MORE = ['Отделал соседа, его увезли в больницу.', 'Отделал брата, он попал в реанимацию.', 'Я тебя так отделал, что ты теперь в больнице.'];
 const HYPERBOLE = [
@@ -42,13 +44,14 @@ const SINGLE_WORDS = [
 ];
 // QA PR 21: подлежащее перед глаголом и «поехали в больницу к …» — не насилие с последствием; ролик при недоступной модели.
 const HOUSEHOLD_FALSE = [
+  'Отделал брата в шахматы, потом поехали в больницу к бабушке.',
   'Брат отделал меня в шахматы, потом поехали в больницу к бабушке.',
   'Тренер отлупил нас на тренировке, а вечером я навещала деда в больнице.',
 ];
 const unknown = () => { throw Object.assign(new Error('сбой'), { code: 'incomplete_response' }); };
 
 test('локальный уровень: четыре фразы — concern; гиперболы и отдельные слова — none', () => {
-  for (const p of [...OTHERS, ...OTHERS_MORE]) assert.equal(assessRisk(p).level, 'concern', p);
+  for (const p of [...OTHERS, ...OTHERS_MORE, ...QA_RETURN]) assert.equal(assessRisk(p).level, 'concern', p);
   for (const p of [...HYPERBOLE, ...SINGLE_WORDS, ...HOUSEHOLD_FALSE]) assert.equal(assessRisk(p).level, 'none', p);
 });
 
@@ -70,7 +73,7 @@ async function studio(story) {
 }
 
 test('монтажная, модель недоступна: четыре фразы → TRY_LATER с 112, рендера нет', async () => {
-  for (const p of OTHERS) {
+  for (const p of [...OTHERS, ...QA_RETURN]) {
     const r = await studio(`${ex.story} ${p}`);
     assert.equal(r.status, 503, p); assert.equal(r.body.unknown, true, p);
     assert.notEqual(r.body.kind, 'safety', p);
@@ -104,7 +107,7 @@ async function bot(storyText) {
 }
 
 test('бот, модель недоступна: четыре фразы → TRY_LATER с контактами, ролика нет', async () => {
-  for (const p of OTHERS) {
+  for (const p of [...OTHERS, ...QA_RETURN]) {
     const r = await bot(`${ex.story} ${p}`);
     assert.equal(r.n.render, 0, p); assert.equal(r.n.video, 0, p);
     const all = r.sent.join('\n');
