@@ -38,17 +38,22 @@ function serveEngine() {
 }
 
 let browserPromise = null;
-async function getBrowser() {
+export async function getBrowser() {
   if (!browserPromise) {
     const require = createRequire(import.meta.url);
     const { chromium } = require('playwright');
     const executablePath = process.env.TITRY_CHROMIUM || undefined;
     // Неудачный запуск не кэшируем: следующий рендер попробует снова, а ошибка понятна без стека Playwright.
-    browserPromise = chromium.launch(executablePath ? { executablePath } : {}).catch((cause) => {
+    const launching = chromium.launch(executablePath ? { executablePath } : {}).then((b) => {
+      // Упавший или закрытый браузер не держим в кэше: следующий рендер запустит новый.
+      b.on('disconnected', () => { if (browserPromise === launching) browserPromise = null; });
+      return b;
+    }, (cause) => {
       browserPromise = null;
       const where = executablePath ? `TITRY_CHROMIUM=${executablePath}` : 'браузер Playwright по умолчанию';
       throw Object.assign(new Error(`Chromium не запустился (${where}). Укажите установленный Chromium в TITRY_CHROMIUM или установите браузер под версию Playwright из package-lock.json.`), { code: 'browser', cause });
     });
+    browserPromise = launching;
   }
   return browserPromise;
 }
