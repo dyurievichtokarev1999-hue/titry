@@ -12,7 +12,7 @@ import { startsWithContinuation, modelConcernMessage, helpMessage, tryLaterMessa
 import { renderEpisode, ROOT, RENDER_TIMEOUT_MS, KILL_GRACE_MS, renderTimeoutFromEnv, withRenderTimeout, removeQuiet } from './render.js';
 import { logError, safeCode, logRenderTimeout } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS, cleanupVoiceOrphans } from './stt.js';
-import { makeLedger, KEY_ENV, KEY_VERSION_ENV } from './ledger.js';
+import { processLedger, KEY_ENV, KEY_VERSION_ENV } from './ledger.js';
 
 const MOOD_ORDER = ['warm', 'sad', 'anger', 'quiet'];
 const MUSIC_ORDER = ['warm', 'sad', 'anger', 'quiet', 'none'];
@@ -1177,7 +1177,7 @@ export async function prepareBot({ cleanup = cleanupVoiceOrphans, cleanupTmp = p
     // Только этап и число, без путей и имён; формат строки — как у журнала ошибок.
     if (removed) log(JSON.stringify({ at: new Date().toISOString(), level: 'info', stage: 'tmp.cleanup', removed }));
   } catch (e) { logError('tmp.cleanup', e); throw Object.assign(new Error('startup'), { code: safeCode(e), stage: 'tmp.cleanup' }); }
-  const l = ledger || makeLedger({ file: path.join(ROOT, 'data', 'state', 'blocked-v1.json'), key: process.env[KEY_ENV], keyVersion: process.env[KEY_VERSION_ENV] || 'v1' });
+  const l = ledger || processLedger('bot', path.join(ROOT, 'data', 'state'));
   try { await l.load(); } catch (e) { logError('ledger.load', e); throw Object.assign(new Error('startup'), { code: 'ledger', stage: 'ledger.load' }); }
   return l;
 }

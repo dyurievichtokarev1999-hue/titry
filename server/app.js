@@ -12,7 +12,7 @@ import { renderEpisode, ROOT, RENDER_TIMEOUT_MS, renderTimeoutFromEnv, withRende
 import { logError, safeCode } from './errlog.js';
 import { currentHelp, prepareHelp, helpMessage, modelConcernMessage, assessEpisodeRisk, validateSafeEpisode, INSUFFICIENT_TEXT, TRY_LATER_TEXT, helpContactList } from './safety.js';
 import { makeGate, modelModeAtStart, RETRY_DELAY_MS } from './gate.js';
-import { makeLedger, KEY_ENV, KEY_VERSION_ENV } from './ledger.js';
+import { processLedger, KEY_ENV, KEY_VERSION_ENV } from './ledger.js';
 
 const STATIC = {
   '/': 'studio/index.html',
@@ -379,15 +379,15 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     console.error('Запуск остановлен: контакты помощи (config/help.json) не читаются или не прошли проверку. Задачи не принимаются.');
     process.exit(3);
   }
-  // Хранилище запретов: data/state/blocked-v1.json; пустой набор запретов не подставляется никогда.
+  // Хранилище запретов: data/state/blocked-studio-v1.json (+ чтение прежнего blocked-v1.json); пустой набор запретов не подставляется никогда.
   // Если хранилище сломается уже во время работы — ролики не выдаются (503 ledger).
-  const ledger = makeLedger({ file: path.join(ROOT, 'data', 'state', 'blocked-v1.json'), key: process.env[KEY_ENV], keyVersion: process.env[KEY_VERSION_ENV] || 'v1' });
+  const ledger = processLedger('studio', path.join(ROOT, 'data', 'state'));
   // Отказ запуска, а не тихий режим (решение владельца 17:10): без ключа или при неисправном файле монтажная
   // не начинает принимать задачи.
   try { await ledger.load(); } catch (e) {
     logError('ledger.load', e);
     console.error(`Запуск остановлен: хранилище запретов недоступно. Проверьте ${KEY_ENV} (не короче 16 символов) и ${KEY_VERSION_ENV}.`);
-    console.error('Остатки blocked-v1.json.tmp-* или повреждённый файл не удаляйте: это может снять подтверждённые остановки. Сохраните копию каталога data/state и обратитесь к владельцу кода.');
+    console.error('Остатки blocked-*.json.tmp-* или повреждённый файл не удаляйте: это может снять подтверждённые остановки. Сохраните копию каталога data/state и обратитесь к владельцу кода.');
     process.exit(3);
   }
   // Стартовая очистка роликов и постеров прежнего запуска — до приёма задач (B09.6, решение владельца 18:05/20:05).
