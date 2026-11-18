@@ -7,7 +7,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { MOODS, TRACKS, sanitizeEpisode, validateEpisode, episodeToText, cleanInput } from '../engine/episode.js';
-import { makeDraft, hasClaudeCredentials, DEFAULT_MODEL, modelSafetyCheck } from './draft.js';
+import { makeDraft, hasClaudeCredentials, DEFAULT_MODEL, modelSafetyCheck, STORY_MAX, TOO_LONG_TEXT as TOO_LONG } from './draft.js';
 import { renderEpisode, ROOT, RENDER_TIMEOUT_MS, renderTimeoutFromEnv, withRenderTimeout } from './render.js';
 import { logError, safeCode } from './errlog.js';
 import { currentHelp, prepareHelp, helpMessage, modelConcernMessage, assessEpisodeRisk, validateSafeEpisode, INSUFFICIENT_TEXT, TRY_LATER_TEXT, helpContactList } from './safety.js';
@@ -42,9 +42,6 @@ function send(res, code, body, type = 'application/json; charset=utf-8') {
   res.end(buf);
 }
 
-/** Предел длины рассказа — как в makeDraft (server/draft.js). */
-const STORY_MAX = 6000;
-const TOO_LONG = 'Рассказ слишком длинный для одного эпизода.';
 
 async function readJson(req, limit = 200_000) {
   let size = 0; const chunks = [];
