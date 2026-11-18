@@ -13,11 +13,11 @@ const ORDERS = [['pd', 'age'], ['age', 'pd']];
 const INVITES = [CONSENT_TEXT.ready, TEXT.year, TEXT.start];
 const STORY = ex.story;
 
-function setup(order, { draftGate, renderGate, unsafe } = {}) {
+function setup(order, { draftGate, renderGate, unsafe, sendGate } = {}) {
   const sent = [];
   const n = { download: 0, stt: 0, draft: 0, check: 0, story: 0, render: 0, video: 0 };
   const tg = {
-    send: async (c, text, extra) => { sent.push({ text, extra }); }, action: async () => {}, answer: async () => {},
+    send: async (c, text, extra) => { sent.push({ text, extra }); if (sendGate) await sendGate(text); }, action: async () => {}, answer: async () => {},
     fileBuffer: async () => { n.download++; return Buffer.from('ogg'); },
     sendVideo: async () => { n.video++; },
   };
@@ -351,4 +351,21 @@ test('кнопки 6Б и 6Г прежнего прохождения после
       assert.equal(b.texts().at(-1), CONSENT_TEXT.ready, 'кнопка нового экрана работает');
     }
   }
+});
+
+test('/start, пока отправляется первая часть 6Б: кнопки старого 6Б несут метку прежнего прохождения и не засчитываются', async () => {
+  const [first, ...rest] = splitForTelegram(CONSENT_TEXT.pd);
+  let hold; let held = false;
+  const gate = new Promise((r) => { hold = r; });
+  const b = setup(['pd', 'age'], { sendGate: (text) => (text === first && !held ? (held = true, gate) : undefined) });
+  await b.say('/start');
+  const pd = b.press('cs:intro:next'); // первая часть 6Б «отправляется»
+  await ticks(5);
+  await b.say('/start'); // новый цикл до того, как ушли кнопки старого 6Б
+  hold(); await pd;
+  const oldPd = b.sent.find((m) => m.text === rest.at(-1)).extra.reply_markup.inline_keyboard.flat().map((k) => k.callback_data);
+  await b.press('cs:intro:next'); // новый цикл дошёл до 6Б
+  const before = structuredClone(b.s().consent);
+  for (const d of oldPd) await b.bot.handleUpdate({ callback_query: { id: 'q', data: d, message: { chat: { id: 88001, type: 'private' } } } });
+  assert.deepEqual(b.s().consent, before, 'кнопка старого 6Б не засчитана');
 });

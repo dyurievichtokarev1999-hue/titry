@@ -534,12 +534,13 @@ export function createBot({
   const consentDone = (s) => s.consent?.step === 'done';
   async function consentScreen(chatId, s, step) {
     s.consent.step = step;
+    const { cycle } = s.consent; // до первой отправки: /start во время отправки частей 6Б не перепишет метку старого экрана
     if (step === 'pd') {
       const parts = splitForTelegram(CONSENT_TEXT.pd);
       for (const p of parts.slice(0, -1)) await tg.send(chatId, p);
-      return tg.send(chatId, parts.at(-1), { reply_markup: consentKb([[[CONSENT_TEXT.pdYes, `cs:pd:yes:${s.consent.cycle}`], [CONSENT_TEXT.pdNo, `cs:pd:no:${s.consent.cycle}`]]]) });
+      return tg.send(chatId, parts.at(-1), { reply_markup: consentKb([[[CONSENT_TEXT.pdYes, `cs:pd:yes:${cycle}`], [CONSENT_TEXT.pdNo, `cs:pd:no:${cycle}`]]]) });
     }
-    if (step === 'age') return tg.send(chatId, CONSENT_TEXT.age, { reply_markup: consentKb([[[CONSENT_TEXT.ageYes, `cs:age:yes:${s.consent.cycle}`], [CONSENT_TEXT.ageNo, `cs:age:no:${s.consent.cycle}`]]]) });
+    if (step === 'age') return tg.send(chatId, CONSENT_TEXT.age, { reply_markup: consentKb([[[CONSENT_TEXT.ageYes, `cs:age:yes:${cycle}`], [CONSENT_TEXT.ageNo, `cs:age:no:${cycle}`]]]) });
     // 6Ж — единственное приглашение, и после /year (решение Claude 18.11, п. 5); период года сохраняется в s.period.
     return tg.send(chatId, CONSENT_TEXT.ready);
   }
