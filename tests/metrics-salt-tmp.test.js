@@ -127,10 +127,16 @@ test('prepareBot: не находится Playwright или не запуска�
     // Playwright не установлен: подставная проверка с тем же кодом, что у checkRenderer.
     await assert.rejects(prepareBot({ env: { METRICS_SALT: SALT }, checkRender: () => { throw Object.assign(new Error('playwright'), { code: 'browser' }); }, cleanupTmp: spy, cleanup: spy, ledger: { load: spy } }),
       { stage: 'render.check', code: 'browser' });
+    // Неверный TITRY_CHROMIUM: пакет и ffmpeg есть, а браузер не запускается — тоже отказ старта (QA PR 23).
+    const savedChromium = process.env.TITRY_CHROMIUM;
+    process.env.TITRY_CHROMIUM = '/nonexistent/titry-chromium';
+    try {
+      await assert.rejects(prepareBot({ env: { METRICS_SALT: SALT }, cleanupTmp: spy, cleanup: spy, ledger: { load: spy } }), { stage: 'render.check', code: 'browser' });
+    } finally { if (savedChromium === undefined) delete process.env.TITRY_CHROMIUM; else process.env.TITRY_CHROMIUM = savedChromium; }
   } finally { console.error = orig; }
   assert.equal(touched, 0, 'до очистки и хранилища дело не доходит');
   const render = lines.map((l) => JSON.parse(l)).filter((j) => j.stage === 'render.check'); // без ключа модели есть ещё строка model.key
-  assert.deepEqual(render.map((j) => `${j.stage}:${j.code}`), ['render.check:ffmpeg', 'render.check:browser']);
+  assert.deepEqual(render.map((j) => `${j.stage}:${j.code}`), ['render.check:ffmpeg', 'render.check:browser', 'render.check:browser']);
   assert.ok(!lines.join('\n').includes('nonexistent'), 'путь в журнал не попадает');
   // В этом окружении Playwright и ffmpeg есть — проверка проходит.
   assert.equal(await prepareBot({ env: { METRICS_SALT: SALT }, cleanupTmp: async () => 0, cleanup: async () => 0, ledger: okLedger }), okLedger);

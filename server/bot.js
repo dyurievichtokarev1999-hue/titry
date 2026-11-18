@@ -1189,7 +1189,7 @@ export async function prepareBot({ checkRender = checkRenderer, cleanup = cleanu
   // Контакты помощи: без проверенного блока помощи бот не стартует (решение владельца 11:05).
   try { prepareHelp(helpFile); } catch (e) { logError('help.load', e); throw Object.assign(new Error('startup'), { code: 'help_config', stage: 'help.load' }); }
   // Без Playwright или ffmpeg бот принял бы рассказы, но не собрал бы ни одного ролика.
-  try { checkRender({ env }); } catch (e) { logError('render.check', e); throw Object.assign(new Error('startup'), { code: safeCode(e), stage: 'render.check' }); }
+  try { await checkRender({ env }); } catch (e) { logError('render.check', e); throw Object.assign(new Error('startup'), { code: safeCode(e), stage: 'render.check' }); }
   try { await cleanup(); } catch (e) { logError('voice.cleanup', e); throw Object.assign(new Error('startup'), { code: safeCode(e), stage: 'voice.cleanup' }); }
   try {
     const removed = await cleanupTmp();

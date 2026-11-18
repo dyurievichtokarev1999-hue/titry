@@ -37,10 +37,18 @@ function serveEngine() {
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server)));
 }
 
-/** Проверка при старте бота: Playwright находится, ffmpeg запускается. Иначе ни один ролик не соберётся. */
-export function checkRenderer({ env = process.env } = {}) {
+/**
+ * Проверка при старте бота: Playwright находится, ffmpeg запускается, Chromium (TITRY_CHROMIUM или браузер из поставки
+ * Playwright) запускается и закрывается. Иначе ни один ролик не соберётся. Путь к Chromium берётся, как у рендера,
+ * из process.env.TITRY_CHROMIUM.
+ */
+export async function checkRenderer({ env = process.env, launchMs = 15_000 } = {}) {
   try { createRequire(import.meta.url).resolve('playwright'); } catch { throw Object.assign(new Error('playwright'), { code: 'browser' }); }
   if (spawnSync(env.FFMPEG || 'ffmpeg', ['-version'], { stdio: 'ignore', timeout: 10_000 }).status !== 0) throw Object.assign(new Error('ffmpeg'), { code: 'ffmpeg' });
+  let timer;
+  const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error('browser'), { code: 'browser' })), launchMs); });
+  try { await Promise.race([getBrowser(), timeout]); } catch (e) { closeRenderer().catch(() => {}); throw e; } finally { clearTimeout(timer); }
+  await closeRenderer(); // первый рендер запустит браузер заново: проверка не держит процесс
 }
 
 let browserPromise = null;
