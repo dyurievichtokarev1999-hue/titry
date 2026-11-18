@@ -300,14 +300,29 @@ test('повторные подтверждения во время достав
   assert.ok(!b.s().episode && !b.s().story);
 });
 
-test('черновик опасен по модели, во время ожидания пришёл /start: экран остановки и запрет — всё равно (п. 8)', async () => {
+test('черновик опасен по модели, во время ожидания — /start (и второй сброс): экран остановки и запрет — всё равно (п. 8)', async () => {
+  const after = [['/start'], ['/start', '/start'], ['/start', 'cs:intro:next', 'cs:pd:no']];
+  for (const steps of after) {
+    let release;
+    const b = setup(['pd', 'age'], { draftGate: new Promise((r) => { release = r; }), unsafe: true });
+    await b.say('/start');
+    for (const d of ['cs:intro:next', 'cs:pd:yes', 'cs:age:yes']) await b.press(d);
+    const p = b.say(STORY); await ticks(5);
+    for (const x of steps) await (x.startsWith('/') ? b.say(x) : b.press(x));
+    release(); await p; await ticks();
+    assert.equal(b.texts().at(-1), helpMessage('urgent'), steps.join(' → '));
+    assert.ok(b.s().blocked?.size, 'рассказ запомнен как запрещённый');
+  }
+});
+
+test('/start во время доставки: старые кнопки черновика до новых подтверждений ничего не запускают', { timeout: 5000 }, async () => {
   let release;
-  const b = setup(['pd', 'age'], { draftGate: new Promise((r) => { release = r; }), unsafe: true });
+  const b = setup(['pd', 'age'], { renderGate: new Promise((r) => { release = r; }) });
+  const { id, p } = await delivering(b);
   await b.say('/start');
-  for (const d of ['cs:intro:next', 'cs:pd:yes', 'cs:age:yes']) await b.press(d);
-  const p = b.say(STORY); await ticks(5);
-  await b.say('/start');
-  release(); await p; await ticks();
-  assert.equal(b.texts().at(-1), helpMessage('urgent'));
-  assert.ok(b.s().blocked?.size, 'рассказ запомнен как запрещённый');
+  b.s().stage = 'draft'; // окно, когда проверка сообщения вернула стадию черновика (duringRender)
+  const renders = b.n.render;
+  await b.press(`play:${id}`); await ticks();
+  assert.equal(b.n.render, renders, 'вторая доставка не началась');
+  release(); await p;
 });

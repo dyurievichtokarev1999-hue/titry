@@ -550,9 +550,9 @@ export function createBot({
   const forgetStory = (s) => {
     if (s.delivering) { s.forgetAfter = true; return; }
     s.forgetAfter = false;
-    s.forgotGen = s.draftId;
+    // Поколение меняется, только если есть что забыть: повторный сброс (/start, затем «Нет») не затирает forgotGen.
+    if (s.story) { s.forgotGen = s.draftId; s.draftId += 1; }
     s.story = s.originalStory = s.overflow = s.episode = s.skeleton = s.verdict = null;
-    if (s.draftId) s.draftId += 1; // черновик уже начинался — его поколение больше не текущее
     s.stage = 'idle';
   };
   // 6А с начала; прежние нажатия не засчитываются (2.1: «Повторный /start начинает с 6А»).
@@ -1165,9 +1165,9 @@ export function createBot({
       return tg.send(chatId, v === 'fit' ? TEXT.fit : TEXT.miss);
     }
     if (data === 'edit') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });
-    // Кнопки черновика до 6Ж и после отказа (повторный /start, /delete, истёкшая сессия) — ничего не делают.
-    // Остановленный рассказ (stage help) по-прежнему отвечает экраном помощи.
-    if (!consentDone(s) && !s.delivering && s.stage !== 'help') return;
+    // Кнопки черновика до 6Ж и после отказа (повторный /start, /delete, истёкшая сессия) — ничего не делают,
+    // и во время доставки тоже: старая ▶ не запускает второй ролик. Остановленный рассказ (stage help) — экран помощи.
+    if (!consentDone(s) && s.stage !== 'help') return;
     const [action, idPart] = data.split(':');
     if (s.stage === 'rendering') return tg.send(chatId, TEXT.rendering);
     // Кнопка работает только для текущего черновика, прошедшего проверку безопасности.
