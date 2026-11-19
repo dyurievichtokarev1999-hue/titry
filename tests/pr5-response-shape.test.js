@@ -8,7 +8,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { makeDraft } from '../server/draft.js';
-import { createBot, makeMetrics } from '../server/bot.js';
+import { makeMetrics } from '../server/bot.js';
+import { createBot } from './helpers/consent.js'; // подтверждения 6А–6Ж пройдены (хелпер)
 
 const STORY = 'Утром чай у окна. На столе раскрыта книга. Вечером шёл дождь.';
 const modelReturning = (raw) => ({ beta: { messages: { create: async () => ({ stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(raw) }] }) } } });

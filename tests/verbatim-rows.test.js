@@ -10,7 +10,8 @@ import { assessEpisodeRisk } from '../server/safety.js';
 import { pairFromSentence } from '../server/draft.js';
 import { validateSafeEpisode } from '../server/safety.js';
 import { draftRuleBased, draftWithClaude, groundDraft, makeDraft, SYSTEM_PROMPT } from '../server/draft.js';
-import { applyEdit, createBot, draftMessage, makeMetrics, parseEdit } from '../server/bot.js';
+import { applyEdit, draftMessage, makeMetrics, parseEdit } from '../server/bot.js';
+import { createBot } from './helpers/consent.js'; // подтверждения 6А–6Ж пройдены (хелпер)
 import { createApp } from '../server/app.js';
 
 const fx = JSON.parse(await fs.readFile(new URL('./fixtures/verbatim-rows.json', import.meta.url), 'utf8'));

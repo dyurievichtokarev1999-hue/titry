@@ -4,7 +4,9 @@
 //  3) «/текст»: неизвестная команда — путь рассказа; у известной команды с хвостом проверяется хвост.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createBot, TEXT } from '../server/bot.js';
+import { TEXT } from '../server/bot.js';
+import { createBot } from './helpers/consent.js';
+import { CONSENT_TEXT } from '../server/consent.js'; // подтверждения 6А–6Ж пройдены (хелпер)
 import { assessRisk, helpMessage } from '../server/safety.js';
 import { makeDraft } from '../server/draft.js';
 
@@ -72,7 +74,7 @@ test('«/текст»: неизвестная команда — путь рас
   assert.equal(m.counters.check, 0);
   const k = setup();
   await k.say('/start');
-  assert.equal(k.sent.at(-1), TEXT.start, 'известная команда без хвоста — как прежде');
+  assert.equal(k.sent.at(-1), CONSENT_TEXT.intro, '«/start» без хвоста начинает подтверждения с 6А (комплект v2, 2.1)');
   const k2 = setup();
   await k2.say('/start@titry_bot');
   assert.equal(k2.sent.at(-1), TEXT.start);

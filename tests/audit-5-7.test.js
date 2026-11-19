@@ -7,7 +7,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { createBot, TEXT } from '../server/bot.js';
+import { TEXT } from '../server/bot.js';
+import { CONSENT_TEXT } from '../server/consent.js';
+import { createBot } from './helpers/consent.js'; // подтверждения 6А–6Ж пройдены (хелпер)
 import { makeDraft } from '../server/draft.js';
 import { transcribeOgg } from '../server/stt.js';
 import { renderEpisode, closeRenderer, getBrowser } from '../server/render.js';
@@ -27,7 +29,7 @@ test('п. 6: metrics.log бросает ENOSPC — человек получае
   const errs = []; const orig = console.error; console.error = (l) => errs.push(String(l));
   try {
     await bot.handleUpdate({ message: { chat, text: '/start' } });
-    assert.equal(sent.at(-1).text, TEXT.start);
+    assert.equal(sent.at(-1).text, CONSENT_TEXT.intro); // /start начинает с 6А (PR 24)
     await bot.handleUpdate({ message: { chat, text: STORY } });
     assert.ok(sent.some((m) => /Похоже на твой день/.test(m.text)), 'черновик показан');
     const m = [...sent].reverse().find((x) => x.extra?.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data?.startsWith('play:'));
