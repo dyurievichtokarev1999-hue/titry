@@ -10,8 +10,8 @@
 </head>
 <body>
 <header class="top">
-  <div class="brand"><span class="wm">ТИТРЫ</span><span class="sub">монтажная</span></div>
-  <div class="status" id="provider">…</div>
+  <h1 class="brand"><span class="wm">ТИТРЫ</span><span class="sub">монтажная</span></h1>
+  <div class="status" id="provider" role="status">…</div>
 </header>
 
 <main class="layout">
@@ -43,7 +43,7 @@
       </div>
       <div class="actions">
         <button class="primary" id="draftBtn">Собрать черновик</button>
-        <span class="hint" id="draftNote"></span>
+        <span class="hint" id="draftNote" role="status"></span>
       </div>
     </section>
 
@@ -55,7 +55,7 @@
       </div>
       <div class="field">
         <span class="lbl">Плёнка</span>
-        <div class="chips" id="moods" role="radiogroup" aria-label="Плёнка"></div>
+        <div class="chips" id="moods" role="group" aria-label="Плёнка"></div>
       </div>
       <div class="grid3">
         <label>Саундтрек
@@ -82,7 +82,7 @@
 
   <aside class="col side">
     <section class="panel stage">
-      <div class="phone"><canvas id="preview" width="540" height="960" aria-label="Предпросмотр титров"></canvas></div>
+      <div class="phone"><canvas id="preview" width="540" height="960" role="img" aria-label="Предпросмотр титров; текст — в «Текстовая версия»"></canvas></div>
       <div class="player">
         <button id="play" class="primary">Смотреть</button>
         <input type="range" id="scrub" min="0" max="1000" value="0" aria-label="Позиция">
@@ -105,7 +105,7 @@
       </div>
       <div class="actions">
         <button class="primary" id="renderBtn">Собрать MP4</button>
-        <span class="hint" id="renderNote"></span>
+        <span class="hint" id="renderNote" role="status"></span>
       </div>
       <div id="result" hidden>
         <video id="video" controls playsinline></video>
@@ -117,7 +117,7 @@
 
     <section class="panel">
       <h2>Отклик участника</h2>
-      <div class="chips" id="feedback" role="radiogroup" aria-label="Отклик">
+      <div class="chips" id="feedback" role="group" aria-label="Отклик">
         <button data-v="fit" aria-pressed="false">Попало</button>
         <button data-v="miss" aria-pressed="false">Не подходит</button>
         <button data-v="heavier" aria-pressed="false">Стало тяжелее</button>
@@ -134,7 +134,7 @@
       <p class="hint">Свободный текст и цитаты в журнал не пишутся. Наблюдения без цитат — в таблицу <code>concierge/metrics.csv</code>.</p>
       <div class="actions">
         <button id="logBtn">Сохранить в журнал</button>
-        <span class="hint" id="logNote"></span>
+        <span class="hint" id="logNote" role="status"></span>
       </div>
     </section>
   </aside>

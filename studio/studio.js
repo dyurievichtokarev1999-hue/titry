@@ -22,7 +22,7 @@ audio.volume = 0.7;
 $('date').value = todayIso();
 for (const m of Object.values(MOODS)) {
   const b = document.createElement('button');
-  b.type = 'button'; b.dataset.mood = m.id; b.setAttribute('role', 'radio');
+  b.type = 'button'; b.dataset.mood = m.id; // кнопка-переключатель (aria-pressed), как в «Отклике»
   b.innerHTML = `<span class="sw" style="background:${m.accent}"></span>`;
   b.append(m.film);
   b.addEventListener('click', () => { state.episode.mood = m.id; syncChips(); changed(); });
@@ -35,7 +35,7 @@ for (const t of Object.values(TRACKS)) {
 }
 
 function syncChips() {
-  for (const b of $('moods').children) b.setAttribute('aria-checked', String(b.dataset.mood === state.episode.mood));
+  for (const b of $('moods').children) b.setAttribute('aria-pressed', String(b.dataset.mood === state.episode.mood));
 }
 
 function fillForm(ep) {
@@ -100,11 +100,17 @@ function showChecks() {
   v.errors.forEach((e) => add('error', e.msg));
   v.warnings.forEach((w) => add('warning', w.msg));
   if (!v.errors.length && !v.warnings.length) add('ok', 'Всё в порядке: каждая строка опирается на рассказ.');
-  document.querySelectorAll('.rowline input').forEach((inp) => inp.classList.remove('err', 'warn'));
-  for (const item of [...v.errors.map((x) => [x, 'err']), ...v.warnings.map((x) => [x, 'warn'])]) {
+  document.querySelectorAll('.rowline input').forEach((inp) => { inp.classList.remove('err', 'warn'); inp.removeAttribute('aria-invalid'); inp.removeAttribute('aria-describedby'); });
+  // Ошибку видно не только цветом рамки: поле помечено aria-invalid и связано с текстом проверки в списке.
+  [...v.errors.map((x) => [x, 'err']), ...v.warnings.map((x) => [x, 'warn'])].forEach((item, i) => {
     const m = /^rows\.(\d+)\.(\w+)$/.exec(item[0].path);
-    if (m) $('rows').children[m[1]]?.querySelector(`[data-k=${m[2]}]`)?.classList.add(item[1]);
-  }
+    const inp = m && $('rows').children[m[1]]?.querySelector(`[data-k=${m[2]}]`);
+    if (!inp) return;
+    inp.classList.add(item[1]);
+    if (item[1] === 'err') inp.setAttribute('aria-invalid', 'true');
+    const li = ul.children[i];
+    if (li) { li.id = `check-${i}`; inp.setAttribute('aria-describedby', [inp.getAttribute('aria-describedby'), li.id].filter(Boolean).join(' ')); }
+  });
   $('renderBtn').disabled = !v.ok || state.insufficient;
   return v;
 }
@@ -163,9 +169,8 @@ async function api(path, body) {
 }
 
 api('/api/config').then((c) => {
-  $('provider').innerHTML = c.provider === 'claude'
-    ? `черновики: <b>Claude</b> · ${c.model}`
-    : 'черновики: <b>заготовка без ИИ</b> · ключ API не задан';
+  // textContent: имя модели приходит с сервера, разметка не нужна.
+  $('provider').textContent = c.provider === 'claude' ? `черновики: Claude · ${c.model}` : 'черновики: заготовка без ИИ · ключ API не задан';
 }).catch(() => { $('provider').textContent = 'сервер недоступен'; });
 
 async function requestDraft() {
