@@ -819,11 +819,12 @@ export function createBot({
       // Можно ли отправлять: дождаться проверок сообщений окна (в пределах того же бюджета) и применить их итог.
       // Вызывается до чтения файла и ещё раз после него, прямо перед запросом (QA PR 27): проверки, пришедшие,
       // пока читался файл, тоже учитываются.
+      let timeoutLogged = false; // таймаут проверки — одна запись в журнал на доставку, хоть вызовов два
       const clearToSend = async () => {
         const pending = await waitHolds(s, holdDeadline);
         if (pending.length) {
           // Предел ожидания истёк — как «неизвестно» (условие 3): у ждущих сообщений есть concern — ролика нет.
-          logError('check', { code: 'timeout' });
+          if (!timeoutLogged) { timeoutLogged = true; logError('check', { code: 'timeout' }); }
           if (pending.includes('concern')) {
             s.deliveryEpoch = (s.deliveryEpoch || 0) + 1;
             s.veto = s.deliveries;

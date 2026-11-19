@@ -557,6 +557,10 @@ test('telegram().sendVideo: ready() после чтения файла верн�
     assert.equal(calls, 0, 'запроса нет');
     await tg.sendVideo(1, file, {}, { ready: () => true });
     assert.equal(calls, 1, 'запрос есть');
+    assert.equal(await tg.sendVideo(1, file, {}, { ready: async () => false }), null, 'асинхронный ready: false — запроса нет');
+    assert.equal(calls, 1);
+    await tg.sendVideo(1, file, {}, { ready: async () => true });
+    assert.equal(calls, 2, 'асинхронный ready: true — запрос есть');
   } finally { globalThis.fetch = orig; await fs.rm(dir, { recursive: true, force: true }); }
 });
 
