@@ -20,11 +20,16 @@ async function* files(dir) {
   }
 }
 
-test('выпуск для реальных данных: маркеров «[срок не утверждён]», «[ждёт решения…]», «[на согласование с юристом…]» нет в выпускаемом коде', { skip: process.env.TITRY_RELEASE_REAL_DATA !== '1' && 'только при TITRY_RELEASE_REAL_DATA=1' }, async () => {
+test('выпуск для реальных данных: маркеров «[срок не утверждён]», «[ждёт решения…]», «[на согласование с юристом…]» нет в выпускаемом коде, полей в скобках нет в согласии', { skip: process.env.TITRY_RELEASE_REAL_DATA !== '1' && 'только при TITRY_RELEASE_REAL_DATA=1' }, async () => {
+  const found = [];
   for (const d of SHIPPED) {
     for await (const f of files(new URL(`../${d}/`, import.meta.url))) {
       const src = await fs.readFile(f, 'utf8').catch(() => '');
-      for (const m of MARKERS) assert.ok(!src.includes(m), `маркер «${m}» найден в ${f.pathname}: выпуск для реальных данных запрещён`);
+      for (const m of MARKERS) if (src.includes(m)) found.push(`«${m}» в ${f.pathname}`);
+      // Тексты согласия: любое поле в квадратных скобках с русским словом — незаполненное или условное
+      // («[контакт оператора]», «[если включено]», «[текстом / …]»). Людям уходит как есть.
+      if (f.pathname.endsWith('/server/consent.js')) for (const [m] of src.matchAll(/\[[А-ЯЁа-яё][^\]\n]*\]/g)) found.push(`«${m}» в ${f.pathname}`);
     }
   }
+  assert.deepEqual(found, [], 'выпуск для реальных данных запрещён');
 });
