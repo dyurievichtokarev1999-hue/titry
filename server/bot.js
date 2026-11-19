@@ -48,16 +48,17 @@ export const TEXT = {
   // ИР-04: очередь заполнена, черновик сохранён. Текст редактора повествования (10.11), дословно.
   busy: 'Сейчас очередь заполнена. Черновик остаётся здесь. Нажми «▶ Смотреть титры» ещё раз чуть позже.',
   voiceOff: 'Голосовые пока не подключены. Напиши, пожалуйста, текстом.',
-  voiceLong: `Голосовое длиннее ${Math.round(MAX_VOICE_SECONDS / 60)} минут. Для одной сцены хватит минуты.`,
+  voiceLong: `Голосовое дольше ${Math.round(MAX_VOICE_SECONDS / 60)} мин. Для одной сцены хватит минуты.`, // «мин.» — без склонения числа
   voiceEmpty: 'Не получилось разобрать голосовое. Можно повторить или написать текстом.',
   tooLong: TOO_LONG_TEXT, // тот же текст, что у draft.js и монтажной
   editExcluded: EDIT_NOT_IN_TITLES_TEXT, // текст — в server/safety.js; окончательный утверждает редактор
   editHelp: [
     'Как поправить:',
-    '<code>2: вечером гуляла в парке</code> — новая строка 2 из твоих слов',
-    '<code>2: Вечером — гуляла в парке</code> — роль и текст',
+    // Примеры без рода: род не угадываем (правило «00 База»).
+    '<code>2: вечером прогулка в парке</code> — новая строка 2 из твоих слов',
+    '<code>2: Вечером — прогулка в парке</code> — роль и текст',
     '<code>-3</code> — убрать строку 3',
-    '<code>+ Ночью — смотрела в окно</code> — добавить строку',
+    '<code>+ Ночью — окно и тишина</code> — добавить строку',
     '<code>название: Письмо, которое ушло</code>',
     '<code>жанр: тихая драма</code>',
     '<code>после: Посуда — до завтра.</code> или <code>после: -</code>',
@@ -210,7 +211,7 @@ export function applyEdit(ep, cmd) {
       ep.post = cmd.value === '-' || !cmd.value ? { text: '', source: '' } : { text: cmd.value, source: cmd.value, own: true };
       // без обрезки, как в ownRow: опора — полный текст правки; длинную сцену покажет понятная ошибка длины
       return null;
-    default: return 'Не понял правку.';
+    default: return 'Правку не получилось разобрать. Примеры — /help.';
   }
 }
 
@@ -259,7 +260,7 @@ export function draftMessage(ep, validation) {
   lines.push('', `Плёнка: ${MOODS[ep.mood].film} · музыка: ${TRACKS[ep.music].file ? TRACKS[ep.music].title : 'тишина'}`);
   const problems = validation ? validation.errors : [];
   if (problems.length) lines.push('', ...[...new Set(problems.map(personMessage))].map((m) => `⚠ ${esc(m)}`));
-  lines.push('', 'Похоже на твой день? Любую строку можно поправить.');
+  lines.push('', `Похоже на твой ${ep.period === 'year' ? 'год' : 'день'}? Любую строку можно поправить.`);
   return lines.join('\n');
 }
 
@@ -269,7 +270,8 @@ export function draftKeyboard(ep, draftId = 0) {
   return {
     inline_keyboard: [
       [{ text: '▶ Смотреть титры', callback_data: `play:${draftId}` }],
-      [{ text: `Плёнка: ${nextMood.film}`, callback_data: `mood:${draftId}` }, { text: `Музыка: ${nextMusic.file ? nextMusic.title : 'тишина'}`, callback_data: `music:${draftId}` }],
+      // Кнопки меняют на следующую плёнку и музыку; текущие — в сообщении над ними (раньше подпись «Плёнка: X» путала).
+      [{ text: `Другая плёнка: ${nextMood.film}`, callback_data: `mood:${draftId}` }, { text: `Другая музыка: ${nextMusic.file ? nextMusic.title : 'тишина'}`, callback_data: `music:${draftId}` }],
       [{ text: 'Как поправить строку', callback_data: 'edit' }],
     ],
   };

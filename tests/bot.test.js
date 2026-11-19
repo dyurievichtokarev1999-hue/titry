@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { TEXT, applyEdit, draftMessage, makeMetrics, parseEdit } from '../server/bot.js';
+import { TEXT, applyEdit, draftMessage, draftKeyboard, makeMetrics, parseEdit } from '../server/bot.js';
 import { createBot } from './helpers/consent.js'; // подтверждения 6А–6Ж пройдены (хелпер)
 import { draftRuleBased } from '../server/draft.js';
 import { helpMessage } from '../server/safety.js';
@@ -124,4 +124,15 @@ test('метрики: проверка id не путает время «:42» �
     assert.ok(!logHasValue(log, 42), 'id чата в открытом виде нет');
     assert.ok(logHasValue(log, metrics.hash(42)), 'вместо id — хэш');
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+// Разбор текстов бота 19.11 (impeccable, clarify): «день/год», примеры правки без рода, понятная ошибка правки.
+test('тексты: «Похоже на твой год» для /year; примеры правки без рода; голос — «мин.» без склонения', async () => {
+  const { episode } = JSON.parse(await fs.readFile(new URL('../examples/day-quiet.json', import.meta.url), 'utf8'));
+  assert.match(draftMessage({ ...episode, period: 'year' }), /Похоже на твой год\?/);
+  assert.match(draftMessage(episode), /Похоже на твой день\?/);
+  assert.ok(!/гуляла|смотрела/.test(TEXT.editHelp), 'в примерах нет рода');
+  assert.match(TEXT.voiceLong, /дольше \d+ мин\./);
+  const kb = draftKeyboard(episode, 1).inline_keyboard.flat().map((b) => b.text);
+  assert.ok(kb.some((t) => t.startsWith('Другая плёнка')) && kb.some((t) => t.startsWith('Другая музыка')));
 });
