@@ -829,7 +829,9 @@ export function createBot({
       // Сообщение окна с concern, по которому модель не ответила, отменило ролик (условие 3): ответ уже отправлен.
       if (cancelled()) { if (current()) s.stage = 'draft'; return; }
       if (!current()) return;
-      await tg.sendVideo(chatId, r.outPath, { caption: 'Конец сцены.', width: 720, height: 1280, duration: Math.round(r.duration), reply_markup: FEEDBACK_KB });
+      // ready — перепроверка после чтения файла, прямо перед запросом (QA PR 27, п. 2). Загрузка, уже начатая,
+      // не отзывается: Telegram не умеет отменить отправку; окно — время одного HTTP-запроса.
+      await tg.sendVideo(chatId, r.outPath, { caption: 'Конец сцены.', width: 720, height: 1280, duration: Math.round(r.duration), reply_markup: FEEDBACK_KB }, { ready: current });
       // /delete во время отправки: после metrics.forget новая запись о человеке не появляется.
       if (!alive(chatId, s)) return;
       await logMetric(chatId, 'render', { seconds: Math.round(r.seconds), mood: ep.mood, music: ep.music, edits: s.edits || 0 });
@@ -976,8 +978,14 @@ export function createBot({
 
     const cmd = parseCommand(text);
     const bare = cmd && !cmd.tail && KNOWN_COMMANDS.has(cmd.name) ? cmd.name : null; // «/DELETE», «/delete@бот» — как «/delete»
-    if (bare === 'start') { s.stage = 'idle'; s.period = 'day'; await logMetric(chatId, 'start'); return startConsent(chatId, s); }
-    if (bare === 'year') { s.stage = 'idle'; s.period = 'year'; await logMetric(chatId, 'year'); return consentDone(s) ? tg.send(chatId, TEXT.year) : startConsent(chatId, s); }
+    // Сброс согласия — синхронно, до записи метрики (QA PR 27, п. 1): идущая доставка сразу видит отзыв.
+    // startConsent меняет состояние синхронно, до первого await; метрика пишется параллельно («как получится»).
+    if (bare === 'start') { s.stage = 'idle'; s.period = 'day'; const logged = logMetric(chatId, 'start'); try { return await startConsent(chatId, s); } finally { await logged; } }
+    if (bare === 'year') {
+      s.stage = 'idle'; s.period = 'year';
+      const logged = logMetric(chatId, 'year');
+      try { return await (consentDone(s) ? tg.send(chatId, TEXT.year) : startConsent(chatId, s)); } finally { await logged; }
+    }
     if (bare === 'delete') {
       sessions.delete(chatId);
       // Честный ответ (редактор 16:24): «удалены» — только если удаление сессии и статистики подтверждено.
@@ -1204,8 +1212,9 @@ export function createBot({
     const text = cleanInput(msg.text || msg.caption || '').trim();
     if (!text || assessRisk(text).level !== 'urgent') return;
     const prev = sessions.get(chatId);
-    // До подтверждений — только экран остановки (п. 6), без записи в сессию, журнал и метрики.
-    if (!prev || (!consentDone(prev) && !prev.delivering)) return tg.send(chatId, helpMessage('urgent'));
+    // До подтверждений и после отказа (в том числе во время идущей доставки) — только экран остановки (п. 6),
+    // без записи в сессию, журнал и метрики (QA PR 27, п. 3).
+    if (!prev || !consentDone(prev)) return tg.send(chatId, helpMessage('urgent'));
     const s = session(chatId);
     s.story = text; s.originalStory = text;
     return stopForSafety(chatId, s, 'urgent', { at: s.delivering ? 'edited_rendering' : 'edited' });
@@ -1252,12 +1261,14 @@ export function telegram(token, { callMs = TELEGRAM_CALL_MS } = {}) {
       if (!res.ok) throw new Error(`Telegram file ${res.status}`);
       return Buffer.from(await res.arrayBuffer());
     },
-    async sendVideo(chat_id, file, extra = {}) {
+    // ready() — проверка актуальности после чтения файла: false — запроса нет, видео не отправляется.
+    async sendVideo(chat_id, file, extra = {}, { ready } = {}) {
       const form = new FormData();
       form.append('chat_id', String(chat_id));
       form.append('supports_streaming', 'true');
       for (const [k, v] of Object.entries(extra)) form.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
       form.append('video', new Blob([await fs.readFile(file)], { type: 'video/mp4' }), 'titry.mp4');
+      if (ready && !ready()) return null;
       return call('sendVideo', form);
     },
   };

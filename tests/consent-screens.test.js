@@ -13,16 +13,16 @@ const ORDERS = [['pd', 'age'], ['age', 'pd']];
 const INVITES = [CONSENT_TEXT.ready, TEXT.year];
 const STORY = ex.story;
 
-function setup(order, { draftGate, renderGate, unsafe, sendGate, botName, onForget, check } = {}) {
+function setup(order, { draftGate, renderGate, unsafe, sendGate, botName, onForget, check, sendVideoGate, hold } = {}) {
   const sent = [];
   const n = { download: 0, stt: 0, draft: 0, check: 0, story: 0, render: 0, video: 0 };
   const tg = {
     send: async (c, text, extra) => { sent.push({ text, extra }); if (sendGate) await sendGate(text); }, action: async () => {}, answer: async () => {},
     fileBuffer: async () => { n.download++; return Buffer.from('ogg'); },
-    sendVideo: async () => { n.video++; },
+    sendVideo: async (c, f, extra, o = {}) => { if (hold?.video) await hold.video; if (o.ready && !o.ready()) return null; n.video++; },
   };
   const events = [];
-  const metrics = { hash: () => 'qa-fictional', log: async (c, event) => { events.push(event); if (event === 'story') n.story++; }, forget: async () => { if (onForget) onForget(); } };
+  const metrics = { hash: () => 'qa-fictional', log: async (c, event) => { events.push(event); if (event === 'story') n.story++; if (hold?.[event]) await hold[event]; }, forget: async () => { if (onForget) onForget(); } };
   const bot = createBot({
     tg, metrics, consentOrder: order, botName,
     transcribe: async () => { n.stt++; return STORY; },
@@ -500,4 +500,60 @@ test('команда другому боту с хвостом: хвост ид�
     assert.equal(b.n.draft, drafts + 1, t);
     assert.ok(b.sent.length > before, `есть ответ: ${t}`);
   }
+});
+
+// QA PR 27: гонки отмены — сброс согласия до записи метрики; перепроверка перед самой отправкой; правка после отказа.
+test('/start во время доставки при зависшей записи метрики: согласие сброшено сразу, ролик не уходит', async () => {
+  const hold = {};
+  let releaseVideo; hold.video = new Promise((r) => { releaseVideo = r; }); // доставка ждёт у отправки
+  const b = setup(['pd', 'age'], { hold });
+  const { p } = await delivering(b);
+  let releaseLog; hold.start = new Promise((r) => { releaseLog = r; });
+  const start = b.say('/start'); await ticks(5); // запись метрики /start ещё не завершена
+  assert.equal(b.s().consent.step, 'intro', 'согласие сброшено до записи метрики');
+  releaseVideo(); await p; await ticks();
+  assert.equal(b.n.video, 0, 'ролик не ушёл');
+  releaseLog(); await start;
+});
+
+test('отзыв, пока файл ролика читается перед отправкой: запроса на отправку нет', async () => {
+  const hold = {};
+  let releaseVideo; hold.video = new Promise((r) => { releaseVideo = r; });
+  const b = setup(['pd', 'age'], { hold });
+  const { p } = await delivering(b); // рендер готов сразу; доставка ждёт «чтения файла» (hold.video)
+  await ticks();
+  await b.say('/start');
+  for (const d of ['cs:intro:next', 'cs:pd:no']) await b.press(d);
+  releaseVideo(); await p; await ticks();
+  assert.equal(b.n.video, 0, 'после отзыва отправки нет');
+});
+
+test('правка сообщения с опасным текстом после отказа во время доставки: экран остановки, без записи текста и метрики', async () => {
+  let release;
+  const b = setup(['pd', 'age'], { renderGate: new Promise((r) => { release = r; }) });
+  const { p } = await delivering(b);
+  await b.say('/start');
+  for (const d of ['cs:intro:next', 'cs:pd:no']) await b.press(d);
+  const ev = b.events.length;
+  await b.bot.handleUpdate({ edited_message: { chat: { id: 88001, type: 'private' }, text: 'Не хочу жить.' } });
+  assert.equal(b.texts().at(-1), helpMessage('urgent'));
+  assert.notEqual(b.s().story, 'Не хочу жить.', 'текст правки не записан в сессию');
+  assert.deepEqual(b.events.slice(ev), [], 'метрика не записана');
+  release(); await p; await ticks();
+});
+
+test('telegram().sendVideo: ready() после чтения файла вернул false — HTTP-запроса нет; true — запрос есть', async () => {
+  const { telegram } = await import('../server/bot.js');
+  const os = await import('node:os'); const path = await import('node:path');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-sv-'));
+  const file = path.join(dir, 'v.mp4'); await fs.writeFile(file, 'x');
+  const orig = globalThis.fetch; let calls = 0;
+  globalThis.fetch = async () => { calls++; return { json: async () => ({ ok: true, result: {} }) }; };
+  try {
+    const tg = telegram('dummy-not-a-token');
+    assert.equal(await tg.sendVideo(1, file, {}, { ready: () => false }), null);
+    assert.equal(calls, 0, 'запроса нет');
+    await tg.sendVideo(1, file, {}, { ready: () => true });
+    assert.equal(calls, 1, 'запрос есть');
+  } finally { globalThis.fetch = orig; await fs.rm(dir, { recursive: true, force: true }); }
 });
