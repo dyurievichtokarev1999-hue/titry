@@ -5,7 +5,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 
-const MARKER = '[срок не утверждён]';
+// Незаполненные поля текстов согласия (server/consent.js, комплект для юриста v2) — тоже не для реальных данных.
+const MARKERS = ['[срок не утверждён]', '[ждёт решения', '[на согласование с юристом'];
 
 // Все каталоги выпускаемого кода и текстов, рекурсивно.
 const SHIPPED = ['server', 'engine', 'studio', 'config', 'concierge', 'brand'];
@@ -19,11 +20,11 @@ async function* files(dir) {
   }
 }
 
-test('выпуск для реальных данных: маркера «[срок не утверждён]» нет в выпускаемом коде', { skip: process.env.TITRY_RELEASE_REAL_DATA !== '1' && 'только при TITRY_RELEASE_REAL_DATA=1' }, async () => {
+test('выпуск для реальных данных: маркеров «[срок не утверждён]», «[ждёт решения…]», «[на согласование с юристом…]» нет в выпускаемом коде', { skip: process.env.TITRY_RELEASE_REAL_DATA !== '1' && 'только при TITRY_RELEASE_REAL_DATA=1' }, async () => {
   for (const d of SHIPPED) {
     for await (const f of files(new URL(`../${d}/`, import.meta.url))) {
       const src = await fs.readFile(f, 'utf8').catch(() => '');
-      assert.ok(!src.includes(MARKER), `маркер найден в ${f.pathname}: выпуск для реальных данных запрещён`);
+      for (const m of MARKERS) assert.ok(!src.includes(m), `маркер «${m}» найден в ${f.pathname}: выпуск для реальных данных запрещён`);
     }
   }
 });
