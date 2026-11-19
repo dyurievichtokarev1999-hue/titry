@@ -14,6 +14,7 @@ import { logError, safeCode, logRenderTimeout } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS, cleanupVoiceOrphans } from './stt.js';
 import { processLedger, KEY_ENV, KEY_VERSION_ENV } from './ledger.js';
 import { CONSENT_TEXT, CONSENT_VERSION, consentSteps } from './consent.js';
+import { unfinishedTexts } from './release.js';
 
 const MOOD_ORDER = ['warm', 'sad', 'anger', 'quiet'];
 const MUSIC_ORDER = ['warm', 'sad', 'anger', 'quiet', 'none'];
@@ -1278,7 +1279,7 @@ export async function purgeBotTmp(dir = botTmpDir()) {
   return removed;
 }
 
-export async function prepareBot({ checkRender = checkRenderer, cleanup = cleanupVoiceOrphans, cleanupTmp = purgeBotTmp, ledger, helpFile, env = process.env, log = console.error } = {}) {
+export async function prepareBot({ checkRender = checkRenderer, cleanup = cleanupVoiceOrphans, cleanupTmp = purgeBotTmp, ledger, helpFile, env = process.env, log = console.error, texts = { CONSENT_TEXT, TEXT } } = {}) {
   if (!env.METRICS_SALT || String(env.METRICS_SALT).trim().length < METRICS_SALT_MIN) {
     logError('metrics.salt', { code: 'metrics_salt' });
     throw Object.assign(new Error('startup'), { code: 'metrics_salt', stage: 'metrics.salt' });
@@ -1287,6 +1288,17 @@ export async function prepareBot({ checkRender = checkRenderer, cleanup = cleanu
   try { modelModeAtStart({ env, log }); } catch (e) { logError('model.key', e); throw e; }
   // Контакты помощи: без проверенного блока помощи бот не стартует (решение владельца 11:05).
   try { prepareHelp(helpFile); } catch (e) { logError('help.load', e); throw Object.assign(new Error('startup'), { code: 'help_config', stage: 'help.load' }); }
+  // Предмортем G0, п. 1: на реальных данных тексты участнику (согласие и реплики бота) — окончательные; иначе отказ
+  // старта до очистки и приёма сообщений. После prepareHelp: реплики с блоком помощи собираются из проверенных
+  // контактов. В журнал — только код и ключи текстов, без их содержимого.
+  if (env.TITRY_RELEASE_REAL_DATA === '1') {
+    let keys;
+    try { keys = unfinishedTexts(texts); } catch (e) { logError('release.texts', e); throw Object.assign(new Error('startup'), { code: 'release_texts', stage: 'release.texts' }); }
+    if (keys.length) {
+      log(JSON.stringify({ at: new Date().toISOString(), level: 'error', stage: 'release.texts', code: 'release_texts', keys }));
+      throw Object.assign(new Error('startup'), { code: 'release_texts', stage: 'release.texts' });
+    }
+  }
   // Без Playwright или ffmpeg бот принял бы рассказы, но не собрал бы ни одного ролика.
   try { await checkRender({ env }); } catch (e) { logError('render.check', e); throw Object.assign(new Error('startup'), { code: safeCode(e), stage: 'render.check' }); }
   try { await cleanup(); } catch (e) { logError('voice.cleanup', e); throw Object.assign(new Error('startup'), { code: safeCode(e), stage: 'voice.cleanup' }); }
@@ -1305,7 +1317,7 @@ async function main() {
   if (!token) { console.error('Задайте TELEGRAM_BOT_TOKEN (выдаёт @BotFather).'); process.exit(2); }
   let ledger;
   try { ledger = await prepareBot(); } catch {
-    console.error(`Запуск остановлен: не задана METRICS_SALT (не короче ${METRICS_SALT_MIN} знаков), нет ключа модели при TITRY_RELEASE_REAL_DATA=1, не проверены контакты помощи (config/help.json), не найден Playwright, не запускается Chromium (TITRY_CHROMIUM) или ffmpeg (FFMPEG), не подтверждена очистка временных файлов или хранилище запретов (${KEY_ENV}, ${KEY_VERSION_ENV}). Задачи не принимаются. Остатки tmp и файл хранилища не удаляйте вручную без владельца кода.`);
+    console.error(`Запуск остановлен: не задана METRICS_SALT (не короче ${METRICS_SALT_MIN} знаков), нет ключа модели или тексты для участника (согласие, реплики бота) не окончательные при TITRY_RELEASE_REAL_DATA=1, не проверены контакты помощи (config/help.json), не найден Playwright, не запускается Chromium (TITRY_CHROMIUM) или ffmpeg (FFMPEG), не подтверждена очистка временных файлов или хранилище запретов (${KEY_ENV}, ${KEY_VERSION_ENV}). Задачи не принимаются. Остатки tmp и файл хранилища не удаляйте вручную без владельца кода.`);
     process.exit(3);
   }
   const tg = telegram(token);
