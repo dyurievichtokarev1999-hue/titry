@@ -60,9 +60,10 @@ test('выпуск для реальных данных: маркеров «[с�
 test('старт бота с TITRY_RELEASE_REAL_DATA=1: тексты не окончательные — отказ release_texts до очистки; в журнале только ключи', async () => {
   const lines = []; let cleaned = 0; let loaded = 0;
   const env = { METRICS_SALT: 'test-salt-fictional-0001', TITRY_RELEASE_REAL_DATA: '1', ANTHROPIC_API_KEY: 'dummy-not-a-key' };
-  const keys = unfinishedTexts({ CONSENT_TEXT, TEXT });
-  assert.ok(keys.length > 0, 'на сегодня тексты согласия не окончательные');
-  await assert.rejects(prepareBot({ env, log: (l) => lines.push(l), checkRender: async () => {}, cleanup: async () => { cleaned++; }, cleanupTmp: async () => { cleaned++; return 0; }, ledger: { load: async () => { loaded++; } } }),
+  // Контрольная заглушка: вымышленные тексты с незаполненным и условным полем (не зависят от текущих текстов).
+  const texts = { CONSENT_TEXT: { pd: 'Пишите: [контакт оператора].', ready: 'Голосом (если включено).' }, TEXT: { start: 'Привет.' } };
+  const keys = ['CONSENT_TEXT.pd', 'CONSENT_TEXT.ready'];
+  await assert.rejects(prepareBot({ env, texts, log: (l) => lines.push(l), checkRender: async () => {}, cleanup: async () => { cleaned++; }, cleanupTmp: async () => { cleaned++; return 0; }, ledger: { load: async () => { loaded++; } } }),
     { code: 'release_texts', stage: 'release.texts' });
   assert.equal(cleaned + loaded, 0, 'ни очистки, ни хранилища');
   const rec = JSON.parse(lines.find((l) => l.includes('release_texts')));
