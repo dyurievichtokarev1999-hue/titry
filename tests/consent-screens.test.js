@@ -488,3 +488,16 @@ test('«/delete@ДругойБот» — без ответа и не расск�
   assert.equal(b.n.draft, drafts);
   assert.ok(b.s());
 });
+
+test('команда другому боту с хвостом: хвост идёт по пути рассказа (проверка безопасности), не в тишину', async () => {
+  // Модель здесь подменена: проверяем маршрут — хвост дошёл до черновика (там локальный фильтр и модель), ответ есть.
+  for (const t of ['/start@OtherBot убьюсь', '/x@a\nубьюсь', '/start@OtherBot сегодня долго гуляла по парку']) {
+    const b = setupNamed('TitryBot');
+    await b.say('/start');
+    for (const d of ['cs:intro:next', 'cs:pd:yes', 'cs:age:yes']) await b.press(d);
+    const drafts = b.n.draft; const before = b.sent.length;
+    await b.say(t);
+    assert.equal(b.n.draft, drafts + 1, t);
+    assert.ok(b.sent.length > before, `есть ответ: ${t}`);
+  }
+});

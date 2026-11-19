@@ -946,10 +946,10 @@ export function createBot({
       return logSafety({ level: 'urgent', at: 'rendering', byModel: !!r.byModel });
     }
     if (r.code) logError('check', { code: r.code });
-    // Согласие отозвано, пока шла проверка: ролик не уйдёт — ни «не получилось», ни «Собираю ролик».
-    if (!consentDone(s) || s.forgetAfter) return;
+    // Согласие отозвано, пока шла проверка: ролик не уйдёт — ни «не получилось», ни «Собираю ролик» (блок помощи — да).
+    const withdrawn = !consentDone(s) || s.forgetAfter;
     if (r.kind === 'unknown') {
-      if (!r.fresh) return; // доставка уже отменена (предел ожидания или другое сообщение): ответ уже отправлен
+      if (!r.fresh || withdrawn) return; // доставка уже отменена (предел ожидания или другое сообщение): ответ уже отправлен
       if (s.delivering) s.stage = 'draft';
       return sendSafe(chatId, TEXT.tryLater());
     }
@@ -960,7 +960,7 @@ export function createBot({
       return logSafety({ level: 'concern', at: 'rendering' });
     }
     // «Собираю ролик» (и эхо) — только если ролик ещё может уйти: противоречивых обещаний нет.
-    const stillDelivering = () => s.delivering && (s.deliveryEpoch || 0) === epoch && (s.veto || 0) < (s.deliveries || 0) && s.verdict !== 'blocked';
+    const stillDelivering = () => s.delivering && consentDone(s) && !s.forgetAfter && (s.deliveryEpoch || 0) === epoch && (s.veto || 0) < (s.deliveries || 0) && s.verdict !== 'blocked';
     if (!stillDelivering()) return;
     if (echo) await sendSafe(chatId, echo); // эхо расшифровки — только при безопасном исходе и необязательно
     if (stillDelivering()) return sendSafe(chatId, TEXT.rendering);
@@ -1149,8 +1149,9 @@ export function createBot({
     let body = text;
     if (text.startsWith('/')) {
       // Известная команда без хвоста обработана выше; у известной команды с хвостом проверяется хвост.
-      if (!cmd && /^\/[A-Za-z]+@\w+/.test(text)) return; // команда другому боту — не нам и не рассказ
-      body = cmd && KNOWN_COMMANDS.has(cmd.name) ? cmd.tail : text.replace(/^\/+/, '').trim();
+      // Команда другому боту: без хвоста — не нам и не рассказ; хвост — как текст (проверка безопасности первой).
+      const foreign = !cmd && /^\/[A-Za-z]+@\w+(?:\s+([\s\S]*))?$/.exec(text);
+      body = foreign ? (foreign[1] || '').trim() : cmd && KNOWN_COMMANDS.has(cmd.name) ? cmd.tail : text.replace(/^\/+/, '').trim();
       if (!body) return; // «/», «//» — не команда и не рассказ: без ответа
     }
     if (body.length < 12) return shortText(chatId, s, body);
