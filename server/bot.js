@@ -1286,17 +1286,19 @@ export async function prepareBot({ checkRender = checkRenderer, cleanup = cleanu
   }
   // Нет ключа API: при TITRY_RELEASE_REAL_DATA=1 — отказ старта; иначе одна строка в журнал (условие 4).
   try { modelModeAtStart({ env, log }); } catch (e) { logError('model.key', e); throw e; }
+  // Контакты помощи: без проверенного блока помощи бот не стартует (решение владельца 11:05).
+  try { prepareHelp(helpFile); } catch (e) { logError('help.load', e); throw Object.assign(new Error('startup'), { code: 'help_config', stage: 'help.load' }); }
   // Предмортем G0, п. 1: на реальных данных тексты участнику (согласие и реплики бота) — окончательные; иначе отказ
-  // старта до очистки и приёма сообщений. В журнал — только код и ключи текстов, без их содержимого.
+  // старта до очистки и приёма сообщений. После prepareHelp: реплики с блоком помощи собираются из проверенных
+  // контактов. В журнал — только код и ключи текстов, без их содержимого.
   if (env.TITRY_RELEASE_REAL_DATA === '1') {
-    const keys = unfinishedTexts(texts);
+    let keys;
+    try { keys = unfinishedTexts(texts); } catch (e) { logError('release.texts', e); throw Object.assign(new Error('startup'), { code: 'release_texts', stage: 'release.texts' }); }
     if (keys.length) {
       log(JSON.stringify({ at: new Date().toISOString(), level: 'error', stage: 'release.texts', code: 'release_texts', keys }));
       throw Object.assign(new Error('startup'), { code: 'release_texts', stage: 'release.texts' });
     }
   }
-  // Контакты помощи: без проверенного блока помощи бот не стартует (решение владельца 11:05).
-  try { prepareHelp(helpFile); } catch (e) { logError('help.load', e); throw Object.assign(new Error('startup'), { code: 'help_config', stage: 'help.load' }); }
   // Без Playwright или ffmpeg бот принял бы рассказы, но не собрал бы ни одного ролика.
   try { await checkRender({ env }); } catch (e) { logError('render.check', e); throw Object.assign(new Error('startup'), { code: safeCode(e), stage: 'render.check' }); }
   try { await cleanup(); } catch (e) { logError('voice.cleanup', e); throw Object.assign(new Error('startup'), { code: safeCode(e), stage: 'voice.cleanup' }); }

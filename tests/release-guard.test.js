@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import { CONSENT_TEXT } from '../server/consent.js';
 import { TEXT } from '../server/bot.js';
-import { MARKER_RE, bracketFields, unfinishedTexts } from '../server/release.js'; // то же правило — при старте бота
+import { markerHits, bracketFields, unfinishedTexts } from '../server/release.js'; // то же правило — при старте бота
 import { prepareBot } from '../server/bot.js';
 
 // Все каталоги выпускаемого кода и текстов, рекурсивно.
@@ -37,7 +37,7 @@ test('поля в скобках: любое начало, содержимое,
   assert.deepEqual(bracketFields('(если включены) (если включён) (текстом или голосом — если включена расшифровка) (голосовые — если включено)'),
     ['(если включены)', '(если включён)', '(текстом или голосом — если включена расшифровка)', '(голосовые — если включено)']);
   assert.deepEqual(bracketFields('Окончательный текст без полей (по желанию — голосом), род (если сам об этом скажешь).'), []);
-  assert.deepEqual([...'[Ждёт решения: контакт] [ждет решения] [срок не утвержден] [На согласование с юристом]'.matchAll(MARKER_RE)].length, 4, 'маркеры без учёта регистра и «ё»');
+  assert.deepEqual(markerHits('[Ждёт решения: контакт] [ждет решения] [срок не утвержден] [На согласование с юристом]').length, 4, 'маркеры без учёта регистра и «ё»');
   assert.deepEqual(participantPart('- [ ] режим\n\n---\nТекст'), '---\nТекст', 'инструкция организатору выше «---» не проверяется');
 });
 
@@ -46,7 +46,7 @@ test('выпуск для реальных данных: маркеров «[с�
   for (const d of SHIPPED) {
     for await (const f of files(new URL(`../${d}/`, import.meta.url))) {
       const src = await fs.readFile(f, 'utf8'); // ошибка чтения — падение проверки
-      for (const [m] of src.matchAll(MARKER_RE)) found.push(`«${m}» в ${f.pathname}`);
+      for (const m of markerHits(src)) found.push(`«${m}» в ${f.pathname}`);
     }
   }
   for (const [key, text] of Object.entries(CONSENT_TEXT)) for (const m of bracketFields(text)) found.push(`«${m}» в CONSENT_TEXT.${key}`);
@@ -61,7 +61,7 @@ test('старт бота с TITRY_RELEASE_REAL_DATA=1: тексты не око
   const lines = []; let cleaned = 0; let loaded = 0;
   const env = { METRICS_SALT: 'test-salt-fictional-0001', TITRY_RELEASE_REAL_DATA: '1', ANTHROPIC_API_KEY: 'dummy-not-a-key' };
   // Контрольная заглушка: вымышленные тексты с незаполненным и условным полем (не зависят от текущих текстов).
-  const texts = { CONSENT_TEXT: { pd: 'Пишите: [контакт оператора].', ready: 'Голосом (если включено).' }, TEXT: { start: 'Привет.' } };
+  const texts = { CONSENT_TEXT: { pd: 'Пишите: [контакт оператора], срок [ждёт решения: срок].', ready: 'Голосом (если включено).' }, TEXT: { start: 'Привет.', fn: () => 'Пока.' } };
   const keys = ['CONSENT_TEXT.pd', 'CONSENT_TEXT.ready'];
   await assert.rejects(prepareBot({ env, texts, log: (l) => lines.push(l), checkRender: async () => {}, cleanup: async () => { cleaned++; }, cleanupTmp: async () => { cleaned++; return 0; }, ledger: { load: async () => { loaded++; } } }),
     { code: 'release_texts', stage: 'release.texts' });
