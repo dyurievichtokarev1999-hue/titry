@@ -93,8 +93,8 @@ function showChecks() {
   const v = validateEpisode(state.episode, story);
   const ul = $('checks');
   ul.textContent = '';
-  // Нехватка: пустая форма не превращается в список «допишите» — проверять нечего, рендер выключен.
-  if (state.insufficient) { $('renderBtn').disabled = true; return v; }
+  // Нехватка или только что открытая пустая форма: не список «допишите» — проверять нечего, рендер выключен.
+  if (state.insufficient || state.pristine) { $('renderBtn').disabled = true; return v; }
   const add = (cls, msg) => { const li = document.createElement('li'); li.className = cls; li.textContent = msg; ul.append(li); };
   v.errors.forEach((e) => add('error', e.msg));
   v.warnings.forEach((w) => add('warning', w.msg));
@@ -235,7 +235,12 @@ $('helpClose').addEventListener('click', () => { $('help').hidden = true; });
 $('example').addEventListener('change', async () => {
   const id = $('example').value;
   if (!id) return;
-  const data = await (await fetch(`/examples/${id}.json`)).json();
+  let data;
+  try {
+    const res = await fetch(`/examples/${id}.json`);
+    if (!res.ok) throw new Error(String(res.status));
+    data = await res.json();
+  } catch { $('draftNote').textContent = 'Пример не загрузился. Проверьте, что монтажная запущена, и выберите его ещё раз.'; return; }
   $('story').value = data.story;
   state.drafting++; // ответ черновика, запрошенного до выбора примера, не применяется
   $('draftBtn').disabled = false;
@@ -305,4 +310,7 @@ $('logBtn').addEventListener('click', async () => {
 });
 
 fillForm(state.episode);
+// Только что открытая форма пустая: список проверок появится после первой правки, черновика или примера.
+state.pristine = true;
 changed();
+state.pristine = false;
