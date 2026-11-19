@@ -9,7 +9,7 @@
 [hidden]{display:none!important}
 body{margin:0;background:var(--hall);color:var(--text);font:15px/1.5 var(--body)}
 .top{display:flex;justify-content:space-between;align-items:center;padding:16px 24px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--hall);z-index:5}
-.brand{display:flex;align-items:baseline;gap:14px}
+.brand{display:flex;align-items:baseline;gap:14px;margin:0;font:inherit}
 .wm{font:400 22px/1 var(--display);letter-spacing:.32em;color:var(--light)}
 .sub,.status,.tc,.lbl,.rows-head,h2{font:500 11px/1.4 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--dust)}
 .status b{color:var(--amber);font-weight:500}
