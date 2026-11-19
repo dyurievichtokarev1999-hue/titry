@@ -34,13 +34,6 @@ const TRIVIAL_REPLIES = new Set(['ок', 'окей', 'ok', 'okay', 'ага', 'д
 export const TELEGRAM_CALL_MS = 10 * 1000;
 
 export const TEXT = {
-  start: [
-    'Это «Титры».',
-    'Расскажи голосом или текстом, что было сегодня. Можно сумбурно, одного момента достаточно. В ответ придут короткие титры твоего дня с музыкой, как в конце фильма.',
-    'Ничего не публикуется. Рассказ нужен только чтобы собрать титры и не хранится после этого.',
-    'Только для взрослых (18+).',
-    '/year — титры 2026 года\n/delete — запросить удаление данных',
-  ].join('\n\n'),
   year: 'Расскажи про свой 2026 год за минуту: что случилось, кто был рядом, что осталось с тобой. Можно голосом.',
   working: 'Монтирую…',
   rendering: 'Собираю ролик. Обычно это меньше минуты.',
@@ -462,9 +455,16 @@ export function createBot({
   holdWaitMs = HOLD_WAIT_MS, // жёсткий общий предел ожидания проверок сообщений, пришедших во время подготовки ролика
   renderTimeoutMs = RENDER_TIMEOUT_MS, // предел активного рендера от старта задачи в слоте (server/render.js)
   renderGraceMs = KILL_GRACE_MS, // запасной предел: renderTimeoutMs + 2×renderGraceMs — слот освобождается принудительно
+  botName = null, // имя бота (getMe): «/команда@другой_бот» — не наша команда; без имени «@…» отрезается у любой
   consentOrder = consentSteps(), // порядок 6Б/6Г после 6А (TITRY_CONSENT_ORDER), не утверждён до правовой проверки
 } = {}) {
   const sessions = new Map();
+  // Команда: «/имя», без учёта регистра; «@имя_бота» отрезается только для своего бота. Иначе — не команда (null).
+  const parseCommand = (text) => {
+    const m = /^\/([A-Za-z]+)(?:@(\w+))?(?:\s+([\s\S]*))?$/.exec(text);
+    if (!m || (m[2] && botName && m[2].toLowerCase() !== String(botName).toLowerCase())) return null;
+    return { name: m[1].toLowerCase(), tail: (m[3] || '').trim() };
+  };
   // Рассказ для проверок безопасности: вместе с правками, отклонёнными по длине (s.overflow, только в памяти).
   // Иначе угрозу можно разбить на две правки у предела: первая отклонена и выпала бы из контекста фильтра.
   const seenStory = (s) => (s.overflow?.length ? `${s.story}${EDIT_SEP}${s.overflow.join(EDIT_SEP)}` : s.story);
@@ -739,7 +739,9 @@ export function createBot({
     if (!v.ok) { await showDraft(chatId, s); return; }
     const gen = s.draftId;
     const original = s.originalStory || s.story;
-    const current = () => alive(chatId, s) && s.draftId === gen && s.verdict === 'ok' && !isBlocked(s, original) && gate.status(s.scope, original).kind === null;
+    // Согласие отозвано или подтверждения начаты заново (/start, «Нет» на 6Б/6Г; forgetAfter) — ролик не уходит,
+    // черновик стирается после доставки по правилу отказа (решение Claude 19.11 по справке к комплекту v2.2).
+    const current = () => alive(chatId, s) && s.draftId === gen && s.verdict === 'ok' && consentDone(s) && !s.forgetAfter && !isBlocked(s, original) && gate.status(s.scope, original).kind === null;
     // ИР-04 (критик реализации): один рендер идёт, до трёх ждут. Дальше — явный ответ «занято», без долговечной очереди.
     if (waiting >= 1 + MAX_RENDER_WAITING) return tg.send(chatId, TEXT.busy); // состояние сессии не меняется
     const ep = structuredClone(s.episode);
@@ -918,9 +920,8 @@ export function createBot({
   async function duringRender(chatId, s, text, { echo } = {}) {
     let body = String(text || '').trim();
     if (body.startsWith('/')) {
-      const m = /^\/([A-Za-z]+)(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(body);
-      const known = m && KNOWN_COMMANDS.has(m[1].toLowerCase());
-      body = known ? (m[2] || '').trim() : body.replace(/^\/+/, '').trim();
+      const cmd = parseCommand(body);
+      body = cmd && KNOWN_COMMANDS.has(cmd.name) ? cmd.tail : body.replace(/^\/+/, '').trim();
     }
     const own = body ? assessRisk(body).level : 'none';
     const cont = body ? continuationLevel(seenStory(s), body) : 'none';
@@ -965,9 +966,11 @@ export function createBot({
     // Подпись к голосовому разбирается вместе с расшифровкой ниже. Разделитель правок не может прийти от человека.
     const text = cleanInput(msg.text || (msg.voice ? '' : msg.caption) || '').trim();
 
-    if (text === '/start') { s.stage = 'idle'; s.period = 'day'; await logMetric(chatId, 'start'); return startConsent(chatId, s); }
-    if (text === '/year') { s.stage = 'idle'; s.period = 'year'; await logMetric(chatId, 'year'); return consentDone(s) ? tg.send(chatId, TEXT.year) : startConsent(chatId, s); }
-    if (text === '/delete') {
+    const cmd = parseCommand(text);
+    const bare = cmd && !cmd.tail && KNOWN_COMMANDS.has(cmd.name) ? cmd.name : null; // «/DELETE», «/delete@бот» — как «/delete»
+    if (bare === 'start') { s.stage = 'idle'; s.period = 'day'; await logMetric(chatId, 'start'); return startConsent(chatId, s); }
+    if (bare === 'year') { s.stage = 'idle'; s.period = 'year'; await logMetric(chatId, 'year'); return consentDone(s) ? tg.send(chatId, TEXT.year) : startConsent(chatId, s); }
+    if (bare === 'delete') {
       sessions.delete(chatId);
       // Честный ответ (редактор 16:24): «удалены» — только если удаление сессии и статистики подтверждено.
       // Запрет safety по /delete не снимается; если они есть, полное удаление не подтверждается.
@@ -984,7 +987,7 @@ export function createBot({
       }
       return tg.send(chatId, lines.join('\n'));
     }
-    if (text === '/help') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });
+    if (bare === 'help') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });
     // До 6Ж и после отказа — ничего из сообщения не обрабатывается. Исключение — уже идущая доставка ролика
     // (согласие дано раньше, повторный /start сбросил его): сообщения во время подготовки проверяются, как прежде.
     if (!consentDone(s) && !s.delivering) {
@@ -1135,11 +1138,9 @@ export function createBot({
     // с хвостом проверяется хвост, любой другой текст на «/» — путь рассказа (проверка безопасности первой).
     let body = text;
     if (text.startsWith('/')) {
-      const m = /^\/([A-Za-z]+)(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(text);
-      const known = m && KNOWN_COMMANDS.has(m[1].toLowerCase());
-      if (known && !(m[2] || '').trim()) return tg.send(chatId, TEXT.start);
-      body = known ? m[2].trim() : text.replace(/^\/+/, '').trim();
-      if (!body) return tg.send(chatId, TEXT.start);
+      // Известная команда без хвоста обработана выше; у известной команды с хвостом проверяется хвост.
+      body = cmd && KNOWN_COMMANDS.has(cmd.name) ? cmd.tail : text.replace(/^\/+/, '').trim();
+      if (!body) return; // «/», «//» — не команда и не рассказ: без ответа
     }
     if (body.length < 12) return shortText(chatId, s, body);
     return handleStory(chatId, s, body, 'text');
@@ -1329,7 +1330,7 @@ async function main() {
     { command: 'delete', description: 'Запросить удаление данных' },
   ] }).catch(() => {});
   console.log(`Бот @${me.username} запущен. Распознавание речи: ${sttAvailable() ? 'SpeechKit' : 'выключено'}.`);
-  const bot = createBot({ tg, ledger, renderTimeoutMs: renderTimeoutFromEnv() });
+  const bot = createBot({ tg, ledger, renderTimeoutMs: renderTimeoutFromEnv(), botName: me.username });
   setInterval(bot.sweep, 10 * 60 * 1000).unref();
   let offset = 0;
   for (;;) {

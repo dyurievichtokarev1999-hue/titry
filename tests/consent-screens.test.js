@@ -10,10 +10,10 @@ import { helpMessage } from '../server/safety.js';
 
 const ex = JSON.parse(await fs.readFile(new URL('../examples/day-quiet.json', import.meta.url), 'utf8'));
 const ORDERS = [['pd', 'age'], ['age', 'pd']];
-const INVITES = [CONSENT_TEXT.ready, TEXT.year, TEXT.start];
+const INVITES = [CONSENT_TEXT.ready, TEXT.year];
 const STORY = ex.story;
 
-function setup(order, { draftGate, renderGate, unsafe, sendGate } = {}) {
+function setup(order, { draftGate, renderGate, unsafe, sendGate, botName, onForget, check } = {}) {
   const sent = [];
   const n = { download: 0, stt: 0, draft: 0, check: 0, story: 0, render: 0, video: 0 };
   const tg = {
@@ -22,12 +22,12 @@ function setup(order, { draftGate, renderGate, unsafe, sendGate } = {}) {
     sendVideo: async () => { n.video++; },
   };
   const events = [];
-  const metrics = { hash: () => 'qa-fictional', log: async (c, event) => { events.push(event); if (event === 'story') n.story++; }, forget: async () => {} };
+  const metrics = { hash: () => 'qa-fictional', log: async (c, event) => { events.push(event); if (event === 'story') n.story++; }, forget: async () => { if (onForget) onForget(); } };
   const bot = createBot({
-    tg, metrics, consentOrder: order,
+    tg, metrics, consentOrder: order, botName,
     transcribe: async () => { n.stt++; return STORY; },
     draft: async () => { n.draft++; await draftGate; if (unsafe) return { episode: null, risk: { level: 'urgent', byModel: true } }; return { episode: structuredClone(ex.episode), risk: { level: 'none' }, provider: 'claude', dropped: [] }; },
-    safetyCheck: async () => { n.check++; return false; },
+    safetyCheck: async (t) => { n.check++; return check ? check(t) : false; },
     checkRetryMs: 0,
     render: async (e, o) => { n.render++; await renderGate; return { seconds: 1, duration: 24, outPath: o.outPath }; },
   });
@@ -368,4 +368,72 @@ test('/start, пока отправляется первая часть 6Б: к�
   const before = structuredClone(b.s().consent);
   for (const d of oldPd) await b.bot.handleUpdate({ callback_query: { id: 'q', data: d, message: { chat: { id: 88001, type: 'private' } } } });
   assert.deepEqual(b.s().consent, before, 'кнопка старого 6Б не засчитана');
+});
+
+// Решение Claude 19.11 (справка к комплекту v2.2): отзыв согласия во время подготовки — ролик не уходит.
+test('отзыв согласия во время рендера (/start, «Нет» на 6Б, «Нет» на 6Г, повторные «Да»): ролик не отправляется, рассказ стёрт', async () => {
+  for (const after of [['/start'], ['/start', 'cs:intro:next', 'cs:pd:no'], ['/start', 'cs:intro:next', 'cs:pd:yes', 'cs:age:no'], ['/start', 'cs:intro:next', 'cs:pd:yes', 'cs:age:yes']]) {
+    let release;
+    const b = setup(['pd', 'age'], { renderGate: new Promise((r) => { release = r; }) });
+    const { p } = await delivering(b);
+    for (const x of after) await (x.startsWith('/') ? b.say(x) : b.press(x));
+    release(); await p; await ticks();
+    assert.equal(b.n.render, 1, after.join(' → '));
+    assert.equal(b.n.video, 0, `ролик не отправлен: ${after.join(' → ')}`);
+    for (const k of ['story', 'originalStory', 'episode']) assert.ok(!b.s()[k], `${k}: ${after.join(' → ')}`);
+  }
+});
+
+test('отзыв согласия во время доставки (рендер готов, ролик ждёт проверки сообщения окна): ролик не отправляется', async () => {
+  let releaseRender; let releaseCheck;
+  const renderGate = new Promise((r) => { releaseRender = r; });
+  const held = new Promise((r) => { releaseCheck = r; });
+  const LATE = 'Вечером ещё долго смотрела в окно на дождь.';
+  // Модельная проверка сообщения, пришедшего во время подготовки, задерживает доставку готового ролика.
+  const b = setup(['pd', 'age'], { renderGate, check: async (t) => (t.includes(LATE) ? held.then(() => false) : false) });
+  const { p } = await delivering(b);
+  const late = b.say(LATE); await ticks(); // сообщение окна: доставка ждёт его проверки
+  releaseRender(); await ticks();
+  assert.equal(b.n.video, 0, 'ролик ещё ждёт проверки');
+  await b.say('/start');
+  for (const d of ['cs:intro:next', 'cs:pd:no']) await b.press(d);
+  releaseCheck(); await late; await p; await ticks(100);
+  assert.equal(b.n.render, 1);
+  assert.equal(b.n.video, 0, 'ролик не отправлен');
+  assert.ok(!b.s().story && !b.s().episode);
+});
+
+function setupNamed(botName) {
+  let forgot = 0;
+  const b = setup(['pd', 'age'], { botName, onForget: () => { forgot++; } });
+  return { ...b, forgot: () => forgot };
+}
+
+// Решение Claude 19.11: одна нормализация команд — регистр не важен, «@имя_бота» отрезается только для своего бота.
+test('команды: «/DELETE» и «/delete@бот» удаляют, «/Start@бот» — 6А; «/команда@другой_бот» — не команда; «/» и «//» — без ответа', async () => {
+  for (const cmd of ['/DELETE', '/delete@TitryBot', '/Delete@titrybot']) {
+    const b = setupNamed('TitryBot');
+    await b.say('/start');
+    for (const d of ['cs:intro:next', 'cs:pd:yes', 'cs:age:yes']) await b.press(d);
+    assert.ok(b.s(), 'сессия есть');
+    await b.say(cmd);
+    assert.equal(b.s(), undefined, `${cmd}: сессия удалена`);
+    assert.equal(b.forgot(), 1, `${cmd}: статистика удалена`);
+  }
+  const s = setupNamed('TitryBot');
+  await s.say('/Start@TitryBot');
+  assert.equal(s.texts().at(-1), CONSENT_TEXT.intro);
+  const o = setupNamed('TitryBot');
+  await o.say('/start');
+  for (const d of ['cs:intro:next', 'cs:pd:yes', 'cs:age:yes']) await o.press(d);
+  await o.say('/delete@OtherBot');
+  assert.ok(o.s(), '«/delete@другой_бот» не удаляет');
+  for (const t of ['/', '//']) {
+    const e = setupNamed('TitryBot');
+    await e.say('/start');
+    for (const d of ['cs:intro:next', 'cs:pd:yes', 'cs:age:yes']) await e.press(d);
+    const before = e.sent.length;
+    await e.say(t);
+    assert.equal(e.sent.length, before, `«${t}» — без ответа`);
+  }
 });
