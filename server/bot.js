@@ -271,7 +271,8 @@ export function draftKeyboard(ep, draftId = 0) {
     inline_keyboard: [
       [{ text: '▶ Смотреть титры', callback_data: `play:${draftId}` }],
       // Кнопки меняют на следующую плёнку и музыку; текущие — в сообщении над ними (раньше подпись «Плёнка: X» путала).
-      [{ text: `Другая плёнка: ${nextMood.film}`, callback_data: `mood:${draftId}` }, { text: `Другая музыка: ${nextMusic.file ? nextMusic.title : 'тишина'}`, callback_data: `music:${draftId}` }],
+      [{ text: `Другая плёнка: ${nextMood.film}`, callback_data: `mood:${draftId}` }],
+      [{ text: `Другая музыка: ${nextMusic.file ? nextMusic.title : 'тишина'}`, callback_data: `music:${draftId}` }], // отдельные ряды: название трека не обрезается на телефоне
       [{ text: 'Как поправить строку', callback_data: 'edit' }],
     ],
   };
