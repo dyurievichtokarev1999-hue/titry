@@ -14,9 +14,13 @@ const MARKERS = ['[срок не утверждён]', '[ждёт решения
 const SHIPPED = ['server', 'engine', 'studio', 'config', 'concierge', 'brand'];
 
 // Тексты согласия проверяются как текст, а не как исходник: синтаксис JavaScript ([a, b], [а-я]) не мешает.
-// Поле — любые квадратные скобки в пределах строки, с любым началом и содержимым, включая пустые «[ ]».
-// Ссылка Markdown «[текст](адрес)» — не поле.
-const bracketFields = (text) => [...String(text).matchAll(/\[[^\]\n]*\](?!\()/g)].map(([m]) => m);
+// Находка — любое поле в квадратных скобках (с любым началом, содержимым и переносами строк) и любая одиночная
+// скобка «[» или «]»: бот отправляет согласие без разметки, участник увидит скобки как есть — и в ссылке тоже.
+// Плюс условные куски в круглых скобках: «(если включено)», «(только для теста…)».
+const bracketFields = (text) => [...String(text).matchAll(/\[[^\[\]]*\]|[\[\]]|\*?\((?:если включен[оа]?|только для теста[^)]*|только если[^)]*)\)\*?/giu)].map(([m]) => m);
+// concierge/consent.md — шаблон: выше первой строки «---» инструкция организатору (чекбоксы режимов), участник
+// видит только текст ниже неё.
+const participantPart = (md) => { const i = md.search(/^---\s*$/m); assert.ok(i >= 0, 'в consent.md нет строки «---» перед текстом для участника'); return md.slice(i); };
 const CONSENT_FILES = [new URL('../concierge/consent.md', import.meta.url)];
 
 async function* files(dir) {
@@ -27,11 +31,15 @@ async function* files(dir) {
   }
 }
 
-test('поля в скобках: любое начало и содержимое; чистый текст и ссылки — без находок', () => {
+test('поля в скобках: любое начало, содержимое, перенос, одиночная скобка, условия; чистый текст — без находок', () => {
   assert.deepEqual(bracketFields('Свяжитесь: [контакт оператора].'), ['[контакт оператора]']);
   assert.deepEqual(bracketFields('[ ждёт] [1 срок] [Operator] [-] [ ] []'), ['[ ждёт]', '[1 срок]', '[Operator]', '[-]', '[ ]', '[]']);
-  assert.deepEqual(bracketFields('Окончательный текст без полей. Подробнее — [здесь](https://example.org).'), []);
-  assert.deepEqual(bracketFields('[начало\nпереноса]'), [], 'поле в пределах строки');
+  assert.deepEqual(bracketFields('[ждёт решения:\nсрок]'), ['[ждёт решения:\nсрок]'], 'поле с переносом строки');
+  assert.deepEqual(bracketFields('срок] и [без закрытия'), [']', '['], 'одиночные скобки');
+  assert.deepEqual(bracketFields('Подробнее — [здесь](https://example.org).'), ['[здесь]'], 'ссылка тоже видна участнику как есть');
+  assert.deepEqual(bracketFields('Голосовые *(если включено)* и (только для теста через монтажную).'), ['*(если включено)*', '(только для теста через монтажную)']);
+  assert.deepEqual(bracketFields('Окончательный текст без полей (по желанию — голосом), род (если сам об этом скажешь).'), []);
+  assert.deepEqual(participantPart('- [ ] режим\n\n---\nТекст'), '---\nТекст', 'инструкция организатору выше «---» не проверяется');
 });
 
 test('выпуск для реальных данных: маркеров «[срок не утверждён]», «[ждёт решения…]», «[на согласование с юристом…]» нет в выпускаемом коде, полей в скобках нет в текстах согласия', { skip: process.env.TITRY_RELEASE_REAL_DATA !== '1' && 'только при TITRY_RELEASE_REAL_DATA=1' }, async () => {
@@ -43,6 +51,6 @@ test('выпуск для реальных данных: маркеров «[с�
     }
   }
   for (const [key, text] of Object.entries(CONSENT_TEXT)) for (const m of bracketFields(text)) found.push(`«${m}» в CONSENT_TEXT.${key}`);
-  for (const f of CONSENT_FILES) for (const m of bracketFields(await fs.readFile(f, 'utf8'))) found.push(`«${m}» в ${f.pathname}`);
+  for (const f of CONSENT_FILES) for (const m of bracketFields(participantPart(await fs.readFile(f, 'utf8')))) found.push(`«${m}» в ${f.pathname}`);
   assert.deepEqual(found, [], 'выпуск для реальных данных запрещён');
 });
