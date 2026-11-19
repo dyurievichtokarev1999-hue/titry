@@ -815,23 +815,30 @@ export function createBot({
       if (r === STALE || !current()) return;
       // Доставка ждёт модельной проверки сообщений, пришедших в окно «после проверки — до отправки» (условие 2).
       release();
-      const pending = await waitHolds(s, windowStart + renderMs + holdWaitMs);
-      if (pending.length) {
-        // Предел ожидания истёк — как «неизвестно» (условие 3): у ждущих сообщений есть concern — ролика нет.
-        logError('check', { code: 'timeout' });
-        if (pending.includes('concern')) {
-          s.deliveryEpoch = (s.deliveryEpoch || 0) + 1;
-          s.veto = s.deliveries;
-          if (current()) { s.stage = 'draft'; await sendSafe(chatId, TEXT.tryLater()); }
-          return;
+      const holdDeadline = windowStart + renderMs + holdWaitMs;
+      // Можно ли отправлять: дождаться проверок сообщений окна (в пределах того же бюджета) и применить их итог.
+      // Вызывается до чтения файла и ещё раз после него, прямо перед запросом (QA PR 27): проверки, пришедшие,
+      // пока читался файл, тоже учитываются.
+      const clearToSend = async () => {
+        const pending = await waitHolds(s, holdDeadline);
+        if (pending.length) {
+          // Предел ожидания истёк — как «неизвестно» (условие 3): у ждущих сообщений есть concern — ролика нет.
+          logError('check', { code: 'timeout' });
+          if (pending.includes('concern')) {
+            s.deliveryEpoch = (s.deliveryEpoch || 0) + 1;
+            s.veto = s.deliveries;
+            if (current()) { s.stage = 'draft'; await sendSafe(chatId, TEXT.tryLater()); }
+            return false;
+          }
         }
-      }
-      // Сообщение окна с concern, по которому модель не ответила, отменило ролик (условие 3): ответ уже отправлен.
-      if (cancelled()) { if (current()) s.stage = 'draft'; return; }
-      if (!current()) return;
-      // ready — перепроверка после чтения файла, прямо перед запросом (QA PR 27, п. 2). Загрузка, уже начатая,
+        // Сообщение окна с concern, по которому модель не ответила, отменило ролик (условие 3): ответ уже отправлен.
+        if (cancelled()) { if (current()) s.stage = 'draft'; return false; }
+        return current();
+      };
+      if (!(await clearToSend())) return;
+      // ready — та же проверка после чтения файла, прямо перед запросом (QA PR 27, п. 2). Загрузка, уже начатая,
       // не отзывается: Telegram не умеет отменить отправку; окно — время одного HTTP-запроса.
-      const sent = await tg.sendVideo(chatId, r.outPath, { caption: 'Конец сцены.', width: 720, height: 1280, duration: Math.round(r.duration), reply_markup: FEEDBACK_KB }, { ready: () => current() && !cancelled() });
+      const sent = await tg.sendVideo(chatId, r.outPath, { caption: 'Конец сцены.', width: 720, height: 1280, duration: Math.round(r.duration), reply_markup: FEEDBACK_KB }, { ready: clearToSend });
       if (sent === null) return; // отзыв или отмена во время чтения файла: ролика нет — и метрики render нет
       // /delete во время отправки: после metrics.forget новая запись о человеке не появляется.
       if (!alive(chatId, s)) return;
@@ -1264,14 +1271,14 @@ export function telegram(token, { callMs = TELEGRAM_CALL_MS } = {}) {
       if (!res.ok) throw new Error(`Telegram file ${res.status}`);
       return Buffer.from(await res.arrayBuffer());
     },
-    // ready() — проверка актуальности после чтения файла: false — запроса нет, видео не отправляется.
+    // ready() — проверка (может быть асинхронной) после чтения файла: false — запроса нет, видео не отправляется.
     async sendVideo(chat_id, file, extra = {}, { ready } = {}) {
       const form = new FormData();
       form.append('chat_id', String(chat_id));
       form.append('supports_streaming', 'true');
       for (const [k, v] of Object.entries(extra)) form.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
       form.append('video', new Blob([await fs.readFile(file)], { type: 'video/mp4' }), 'titry.mp4');
-      if (ready && !ready()) return null;
+      if (ready && !(await ready())) return null;
       return call('sendVideo', form);
     },
   };

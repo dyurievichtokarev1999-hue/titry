@@ -19,7 +19,7 @@ function setup(order, { draftGate, renderGate, unsafe, sendGate, botName, onForg
   const tg = {
     send: async (c, text, extra) => { sent.push({ text, extra }); if (sendGate) await sendGate(text); }, action: async () => {}, answer: async () => {},
     fileBuffer: async () => { n.download++; return Buffer.from('ogg'); },
-    sendVideo: async (c, f, extra, o = {}) => { if (hold?.video) await hold.video; if (o.ready && !o.ready()) return null; n.video++; },
+    sendVideo: async (c, f, extra, o = {}) => { if (hold?.video) await hold.video; if (o.ready && !(await o.ready())) return null; n.video++; },
   };
   const events = [];
   const metrics = { hash: () => 'qa-fictional', log: async (c, event) => { events.push(event); if (event === 'story') n.story++; if (hold?.[event]) await hold[event]; }, forget: async () => { if (onForget) onForget(); } };
@@ -559,3 +559,23 @@ test('telegram().sendVideo: ready() после чтения файла верн�
     assert.equal(calls, 1, 'запрос есть');
   } finally { globalThis.fetch = orig; await fs.rm(dir, { recursive: true, force: true }); }
 });
+
+// QA PR 27, повторная приёмка: проверка сообщения, зарегистрированная, пока читался файл, учитывается до отправки.
+for (const [label, danger, video] of [['опасно — ролика и render нет', true, 0], ['безопасно — ролик уходит', false, 1]]) {
+  test(`сообщение во время чтения файла ролика, проверка моделью: ${label}`, async () => {
+    const hold = {};
+    let releaseVideo; hold.video = new Promise((r) => { releaseVideo = r; });
+    let releaseCheck; const checked = new Promise((r) => { releaseCheck = r; });
+    const LATE = 'Вечером ещё долго смотрела в окно на дождь.';
+    const b = setup(['pd', 'age'], { hold, check: async (t) => (t.includes(LATE) ? checked.then(() => danger) : false) });
+    const { p } = await delivering(b); // рендер готов; доставка «читает файл» (hold.video)
+    await ticks();
+    const late = b.say(LATE); await ticks(); // новая проверка зарегистрирована во время чтения файла
+    const ev = b.events.length;
+    releaseVideo(); await ticks();
+    assert.equal(b.n.video, 0, 'до итога проверки ролик не уходит');
+    releaseCheck(); await late; await p; await ticks(50);
+    assert.equal(b.n.video, video);
+    assert.equal(b.events.slice(ev).includes('render'), video === 1);
+  });
+}
