@@ -524,8 +524,10 @@ test('отзыв, пока файл ролика читается перед о�
   await ticks();
   await b.say('/start');
   for (const d of ['cs:intro:next', 'cs:pd:no']) await b.press(d);
+  const ev = b.events.length;
   releaseVideo(); await p; await ticks();
   assert.equal(b.n.video, 0, 'после отзыва отправки нет');
+  assert.ok(!b.events.slice(ev).includes('render'), 'метрики render нет');
 });
 
 test('правка сообщения с опасным текстом после отказа во время доставки: экран остановки, без записи текста и метрики', async () => {

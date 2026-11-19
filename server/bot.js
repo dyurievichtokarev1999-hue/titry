@@ -831,7 +831,8 @@ export function createBot({
       if (!current()) return;
       // ready — перепроверка после чтения файла, прямо перед запросом (QA PR 27, п. 2). Загрузка, уже начатая,
       // не отзывается: Telegram не умеет отменить отправку; окно — время одного HTTP-запроса.
-      await tg.sendVideo(chatId, r.outPath, { caption: 'Конец сцены.', width: 720, height: 1280, duration: Math.round(r.duration), reply_markup: FEEDBACK_KB }, { ready: current });
+      const sent = await tg.sendVideo(chatId, r.outPath, { caption: 'Конец сцены.', width: 720, height: 1280, duration: Math.round(r.duration), reply_markup: FEEDBACK_KB }, { ready: () => current() && !cancelled() });
+      if (sent === null) return; // отзыв или отмена во время чтения файла: ролика нет — и метрики render нет
       // /delete во время отправки: после metrics.forget новая запись о человеке не появляется.
       if (!alive(chatId, s)) return;
       await logMetric(chatId, 'render', { seconds: Math.round(r.seconds), mood: ep.mood, music: ep.music, edits: s.edits || 0 });
@@ -1206,6 +1207,8 @@ export function createBot({
   // Исправленное сообщение (КРИТИКА 14.11, п. 4): правка проходит локальный фильтр, как новое сообщение. Явная
   // опасность — ролик отменяется (в окне доставки), черновик уничтожается, экран остановки. В рассказ правка
   // не попадает и других ответов не даёт: исправленный текст ролик не меняет. Текст в журнал и метрики не пишется.
+  // Без действующего согласия (до 6Ж, после отказа, после повторного /start — в том числе во время доставки, которая
+  // тогда уже не отправит ролик) — только экран остановки, без записи в сессию и метрики (QA PR 27, п. 3).
   async function onEdited(msg) {
     if (!msg.chat || msg.chat.type !== 'private') return;
     const chatId = msg.chat.id;
