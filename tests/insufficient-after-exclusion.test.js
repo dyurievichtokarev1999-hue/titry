@@ -9,7 +9,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { makeDraft, draftRuleBased } from '../server/draft.js';
 import { INSUFFICIENT_INVITE_TEXT, insufficientAfterExclusion, INSUFFICIENT_AFTER_EXCLUSION, validateSafeEpisode, assessRisk, helpMessage, loadHelp } from '../server/safety.js';
-import { createBot, TEXT, insufficientMessages, TELEGRAM_TEXT_LIMIT } from '../server/bot.js';
+import { TEXT, insufficientMessages, TELEGRAM_TEXT_LIMIT } from '../server/bot.js';
+import { createBot } from './helpers/consent.js'; // подтверждения 6А–6Ж пройдены (хелпер)
 import { createApp, INSUFFICIENT_TEXT } from '../server/app.js';
 import { LIMITS } from '../engine/episode.js';
 

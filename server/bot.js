@@ -13,6 +13,7 @@ import { renderEpisode, checkRenderer, ROOT, RENDER_TIMEOUT_MS, KILL_GRACE_MS, r
 import { logError, safeCode, logRenderTimeout } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS, cleanupVoiceOrphans } from './stt.js';
 import { processLedger, KEY_ENV, KEY_VERSION_ENV } from './ledger.js';
+import { CONSENT_TEXT, CONSENT_VERSION, consentSteps } from './consent.js';
 
 const MOOD_ORDER = ['warm', 'sad', 'anger', 'quiet'];
 const MUSIC_ORDER = ['warm', 'sad', 'anger', 'quiet', 'none'];
@@ -122,6 +123,20 @@ export function editExcludedMessages(concern, { help, log = logError, path = 'ro
   log('edit', { code: 'message_too_long' });
   return [block, text];
 }
+
+/** Длинный экран (6Б) — частями по абзацам в пределах лимита Telegram; кнопки — под последней частью. */
+export function splitForTelegram(text, limit = TELEGRAM_TEXT_LIMIT) {
+  const parts = [];
+  for (const p of String(text).split('\n\n')) {
+    const last = parts[parts.length - 1];
+    if (last !== undefined && last.length + 2 + p.length <= limit) { parts[parts.length - 1] += `\n\n${p}`; continue; }
+    // Заголовок на «:» не отрывается от следующего абзаца: переносится в новую часть вместе с ним.
+    const cut = last !== undefined && last.endsWith(':') ? last.lastIndexOf('\n\n') : -1;
+    if (cut > 0) { parts[parts.length - 1] = last.slice(0, cut); parts.push(`${last.slice(cut + 2)}\n\n${p}`); } else parts.push(p);
+  }
+  return parts;
+}
+const consentKb = (rows) => ({ inline_keyboard: rows.map((r) => r.map(([text, data]) => ({ text, callback_data: data }))) });
 
 // ── Чистые функции: разбор правок ────────────────────────────────────────────
 
@@ -446,6 +461,7 @@ export function createBot({
   holdWaitMs = HOLD_WAIT_MS, // жёсткий общий предел ожидания проверок сообщений, пришедших во время подготовки ролика
   renderTimeoutMs = RENDER_TIMEOUT_MS, // предел активного рендера от старта задачи в слоте (server/render.js)
   renderGraceMs = KILL_GRACE_MS, // запасной предел: renderTimeoutMs + 2×renderGraceMs — слот освобождается принудительно
+  consentOrder = consentSteps(), // порядок 6Б/6Г после 6А (TITRY_CONSENT_ORDER), не утверждён до правовой проверки
 } = {}) {
   const sessions = new Map();
   // Рассказ для проверок безопасности: вместе с правками, отклонёнными по длине (s.overflow, только в памяти).
@@ -509,6 +525,71 @@ export function createBot({
 
   // Сессия ещё та же: не удалена через /delete и не заменена новой после истечения срока.
   const alive = (chatId, s) => sessions.get(chatId) === s;
+
+  // ── Подтверждения до приёма рассказа (комплект для юриста v2, пакет согласия v8, 2.1) ──
+  // Отметка о согласии — только в памяти сессии (s.consent): регистрация согласия в карте v4 запланирована, хранилище не
+  // выбрано. Сессия стирается по /delete, через три часа без сообщений и при перезапуске — тогда подтверждения заново.
+  // До 6Ж и после отказа рассказ не принимается: голос не скачивается, SpeechKit, модель, метрика story и рендер не
+  // вызываются, содержание в сессию не пишется (QA «Приём рассказа до подтверждений», критерии 1–3).
+  const consentDone = (s) => s.consent?.step === 'done';
+  async function consentScreen(chatId, s, step) {
+    s.consent.step = step;
+    const { cycle } = s.consent; // до первой отправки: /start во время отправки частей 6Б не перепишет метку старого экрана
+    if (step === 'pd') {
+      const parts = splitForTelegram(CONSENT_TEXT.pd);
+      for (const p of parts.slice(0, -1)) await tg.send(chatId, p);
+      return tg.send(chatId, parts.at(-1), { reply_markup: consentKb([[[CONSENT_TEXT.pdYes, `cs:pd:yes:${cycle}`], [CONSENT_TEXT.pdNo, `cs:pd:no:${cycle}`]]]) });
+    }
+    if (step === 'age') return tg.send(chatId, CONSENT_TEXT.age, { reply_markup: consentKb([[[CONSENT_TEXT.ageYes, `cs:age:yes:${cycle}`], [CONSENT_TEXT.ageNo, `cs:age:no:${cycle}`]]]) });
+    // 6Ж — единственное приглашение, и после /year (решение Claude 18.11, п. 5); период года сохраняется в s.period.
+    return tg.send(chatId, CONSENT_TEXT.ready);
+  }
+  // Рассказ и черновик из памяти сессии: при повторных подтверждениях и при отказе (решение Claude 18.11, пп. 7, 8).
+  // Новое поколение draftId: начатый черновик больше не покажется. Запреты safety (s.blocked) не трогаем.
+  // forgotGen — поколение сброшенного черновика: его опасный ответ модели всё равно показывает экран остановки.
+  // Во время доставки ролика сброс откладывается до её конца (forgetAfter, см. doRender).
+  const forgetStory = (s) => {
+    if (s.delivering) { s.forgetAfter = true; return; }
+    s.forgetAfter = false;
+    // Поколение меняется, только если есть что забыть: повторный сброс (/start, затем «Нет») не затирает forgotGen.
+    if (s.story) { s.forgotGen = s.draftId; s.draftId += 1; }
+    s.story = s.originalStory = s.overflow = s.episode = s.skeleton = s.verdict = null;
+    s.stage = 'idle';
+  };
+  // 6А с начала; прежние нажатия не засчитываются (2.1: «Повторный /start начинает с 6А»).
+  function startConsent(chatId, s) {
+    forgetStory(s); // идущая доставка — по прежним правилам, сброс после неё
+    // cycle — метка этого прохождения в кнопках: кнопка со старого экрана (до /start, /delete, перезапуска) не засчитывается.
+    s.consent = { step: 'intro', given: {}, notified: null, cycle: crypto.randomBytes(4).toString('hex') };
+    return tg.send(chatId, CONSENT_TEXT.intro, { reply_markup: consentKb([[[CONSENT_TEXT.introNext, `cs:intro:next:${s.consent.cycle}`]]]) });
+  }
+  async function onConsent(chatId, s, data) {
+    const c = s.consent;
+    const [, step, answer, cycle] = data.split(':');
+    // Кнопка не текущего шага или прежнего прохождения (Критик реализации 18.11 21:40) — ничего не засчитываем.
+    if (!c || c.step !== step || cycle !== c.cycle) return;
+    const next = step === 'intro' ? consentOrder[0] : consentOrder[consentOrder.indexOf(step) + 1] || 'done';
+    if (answer === 'next' || answer === 'yes') {
+      if (step === 'pd') c.given.pd = { at: now().toISOString(), version: CONSENT_VERSION };
+      return consentScreen(chatId, s, next);
+    }
+    c.step = 'declined'; // отказ как событие не храним; дальше бот ничего не спрашивает и не напоминает
+    forgetStory(s);
+    if (step === 'pd') return tg.send(chatId, CONSENT_TEXT.pdDeclined);
+    // 6Г «Нет»: отметки о согласии удаляются (в памяти — всегда успешно); отметку «младше 18» не храним.
+    const had = Object.keys(c.given).length > 0;
+    c.given = {};
+    await tg.send(chatId, CONSENT_TEXT.ageDeclined);
+    if (had) return tg.send(chatId, CONSENT_TEXT.ageDeleted);
+  }
+  // Сообщение до конца подтверждений: 6З не чаще раза на шаг; без начатого диалога — 6З и 6А; после отказа — тишина.
+  async function preConsent(chatId, s) {
+    const c = s.consent;
+    if (!c) { await tg.send(chatId, CONSENT_TEXT.notYet); await startConsent(chatId, s); s.consent.notified = 'intro'; return; }
+    if (c.step === 'declined' || c.notified === c.step) return;
+    c.notified = c.step;
+    return tg.send(chatId, CONSENT_TEXT.notYet);
+  }
   const isBlocked = (s, story) => !!(s.blocked && s.blocked.has(storyKey(story)));
 
   async function handleStory(chatId, s, story, source) {
@@ -541,7 +622,7 @@ export function createBot({
       s.stage = 'idle';
       return tg.send(chatId, TEXT.checkUnavailable);
     }
-    const current = () => alive(chatId, s) && s.draftId === gen && !isBlocked(s, story) && gate.status(s.scope, story).kind !== 'safety';
+    const current = () => alive(chatId, s) && s.draftId === gen && consentDone(s) && !isBlocked(s, story) && gate.status(s.scope, story).kind !== 'safety';
     await tg.action(chatId, 'typing');
     await tg.send(chatId, TEXT.working);
     let r;
@@ -581,8 +662,8 @@ export function createBot({
       s.blocked = s.blocked || new Set();
       s.blocked.add(storyKey(story));
       gate.markSafety(s.scope, story);
-      // Если сейчас в работе тот же рассказ, его черновик тоже уничтожается.
-      if (s.verdict !== 'blocked' && s.originalStory && storyKey(s.originalStory) === storyKey(story)) {
+      // Если сейчас в работе тот же рассказ или его сбросил повторный /start / отказ, — экран остановки.
+      if (s.forgotGen === gen || (s.verdict !== 'blocked' && s.originalStory && storyKey(s.originalStory) === storyKey(story))) {
         return stopForSafety(chatId, s, r.risk.level, { byModel: r.risk.byModel, at: 'late' });
       }
       return;
@@ -590,7 +671,7 @@ export function createBot({
     if (!current()) {
       // Устаревший «можно» молча отбрасывается. Но если тот же рассказ этой сессии тем временем остановлен
       // (например, проверкой прежней сессии до /delete), человек получает карточку помощи, а не тишину.
-      if (alive(chatId, s) && s.verdict !== 'blocked' && s.originalStory && storyKey(s.originalStory) === storyKey(story)
+      if (alive(chatId, s) && (s.forgotGen === gen || (s.verdict !== 'blocked' && s.originalStory && storyKey(s.originalStory) === storyKey(story)))
         && (isBlocked(s, story) || gate.status(s.scope, story).kind === 'safety')) return stopForSafety(chatId, s, 'urgent', { at: 'late' });
       return;
     }
@@ -624,7 +705,7 @@ export function createBot({
     // Тот же рассказ сейчас в работе и ещё не остановлен: поздняя остановка (как в ветке !r.episode, at: 'late').
     // Без этого два подряд одинаковых рассказа, у первого из которых проверка вернула true, оставляли человека
     // без карточки помощи: первый ответ устарел, у второго current() уже false из-за safety — оба молча выходили.
-    const sameStoryInWork = () => alive(chatId, s) && s.verdict !== 'blocked' && !!s.originalStory && storyKey(s.originalStory) === storyKey(story);
+    const sameStoryInWork = () => alive(chatId, s) && (s.forgotGen === gen || (s.verdict !== 'blocked' && !!s.originalStory && storyKey(s.originalStory) === storyKey(story)));
     const stoppedNow = () => isBlocked(s, story) || gate.status(s.scope, story).kind === 'safety';
     if (!current()) {
       if (stoppedNow() && sameStoryInWork()) return stopForSafety(chatId, s, 'urgent', { at: 'late' });
@@ -763,7 +844,7 @@ export function createBot({
       release();
       await removeQuiet([out]); // ошибка удаления — в журнал только код
     }
-    } finally { s.delivering--; }
+    } finally { s.delivering--; if (!s.delivering && s.forgetAfter) forgetStory(s); }
   }
 
   // Сообщение, пришедшее во время подготовки ролика: окно «после проверки — до отправки» (решение владельца кода
@@ -883,8 +964,8 @@ export function createBot({
     // Подпись к голосовому разбирается вместе с расшифровкой ниже. Разделитель правок не может прийти от человека.
     const text = cleanInput(msg.text || (msg.voice ? '' : msg.caption) || '').trim();
 
-    if (text === '/start') { s.stage = 'idle'; s.period = 'day'; await logMetric(chatId, 'start'); return tg.send(chatId, TEXT.start); }
-    if (text === '/year') { s.stage = 'idle'; s.period = 'year'; await logMetric(chatId, 'year'); return tg.send(chatId, TEXT.year); }
+    if (text === '/start') { s.stage = 'idle'; s.period = 'day'; await logMetric(chatId, 'start'); return startConsent(chatId, s); }
+    if (text === '/year') { s.stage = 'idle'; s.period = 'year'; await logMetric(chatId, 'year'); return consentDone(s) ? tg.send(chatId, TEXT.year) : startConsent(chatId, s); }
     if (text === '/delete') {
       sessions.delete(chatId);
       // Честный ответ (редактор 16:24): «удалены» — только если удаление сессии и статистики подтверждено.
@@ -903,6 +984,15 @@ export function createBot({
       return tg.send(chatId, lines.join('\n'));
     }
     if (text === '/help') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });
+    // До 6Ж и после отказа — ничего из сообщения не обрабатывается. Исключение — уже идущая доставка ролика
+    // (согласие дано раньше, повторный /start сбросил его): сообщения во время подготовки проверяются, как прежде.
+    if (!consentDone(s) && !s.delivering) {
+      // Решение Claude 18.11, п. 6: явная опасность и до подтверждений получает экран остановки с 112 и контактами.
+      // Только локальный фильтр: без модели, без записи в сессию, журнал и метрики.
+      const caption = msg.voice && typeof msg.caption === 'string' ? cleanInput(msg.caption).trim() : '';
+      if (assessRisk(text || caption).level === 'urgent') return tg.send(chatId, helpMessage('urgent'));
+      return preConsent(chatId, s);
+    }
 
     if (msg.voice) {
       const voiceRefused = !sttAvailable() && transcribe === transcribeOgg ? TEXT.voiceOff : msg.voice.duration > MAX_VOICE_SECONDS ? TEXT.voiceLong : null;
@@ -1070,6 +1160,7 @@ export function createBot({
     if (!chatId) return;
     const s = session(chatId);
     const data = q.data || '';
+    if (data.startsWith('cs:')) return onConsent(chatId, s, data);
     if (data.startsWith('fb:')) {
       const v = data.slice(3);
       await logMetric(chatId, 'feedback', { value: v });
@@ -1077,6 +1168,9 @@ export function createBot({
       return tg.send(chatId, v === 'fit' ? TEXT.fit : TEXT.miss);
     }
     if (data === 'edit') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });
+    // Кнопки черновика до 6Ж и после отказа (повторный /start, /delete, истёкшая сессия) — ничего не делают,
+    // и во время доставки тоже: старая ▶ не запускает второй ролик. Остановленный рассказ (stage help) — экран помощи.
+    if (!consentDone(s) && s.stage !== 'help') return;
     const [action, idPart] = data.split(':');
     if (s.stage === 'rendering') return tg.send(chatId, TEXT.rendering);
     // Кнопка работает только для текущего черновика, прошедшего проверку безопасности.
@@ -1095,6 +1189,9 @@ export function createBot({
     const chatId = msg.chat.id;
     const text = cleanInput(msg.text || msg.caption || '').trim();
     if (!text || assessRisk(text).level !== 'urgent') return;
+    const prev = sessions.get(chatId);
+    // До подтверждений — только экран остановки (п. 6), без записи в сессию, журнал и метрики.
+    if (!prev || (!consentDone(prev) && !prev.delivering)) return tg.send(chatId, helpMessage('urgent'));
     const s = session(chatId);
     s.story = text; s.originalStory = text;
     return stopForSafety(chatId, s, 'urgent', { at: s.delivering ? 'edited_rendering' : 'edited' });

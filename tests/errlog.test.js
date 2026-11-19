@@ -5,7 +5,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { createBot, makeMetrics } from '../server/bot.js';
+import { makeMetrics } from '../server/bot.js';
+import { createBot } from './helpers/consent.js'; // подтверждения 6А–6Ж пройдены (хелпер)
 import { createApp } from '../server/app.js';
 import { safeCode } from '../server/errlog.js';
 

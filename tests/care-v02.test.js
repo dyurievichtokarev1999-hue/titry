@@ -9,7 +9,8 @@ import { validateEpisode, sanitizeEpisode } from '../engine/episode.js';
 import { makeDraft } from '../server/draft.js';
 import { renderEpisode } from '../server/render.js';
 import { createApp } from '../server/app.js';
-import { createBot, makeMetrics } from '../server/bot.js';
+import { makeMetrics } from '../server/bot.js';
+import { createBot } from './helpers/consent.js'; // подтверждения 6А–6Ж пройдены (хелпер)
 import { helpMessage } from '../server/safety.js';
 
 // Утверждённый владельцем текст экрана остановки — литералом, независимо от проверяемой функции.

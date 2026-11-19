@@ -10,7 +10,8 @@ import path from 'node:path';
 import { makeDraft, draftRuleBased, groundDraft, STORY_MAX } from '../server/draft.js';
 import { assessRisk, threatErrors, threatPhrase, threatSentences, threatPronounFilter, helpMessage, validateSafeEpisode,
   INSUFFICIENT_TEXT, INSUFFICIENT_INVITE_TEXT, INSUFFICIENT_MATERIAL, INSUFFICIENT_AFTER_EXCLUSION, EDIT_NOT_IN_TITLES_TEXT, EDIT_NOT_IN_TITLES, editNotInTitlesText } from '../server/safety.js';
-import { createBot, TEXT, editExcludedMessages } from '../server/bot.js';
+import { TEXT, editExcludedMessages } from '../server/bot.js';
+import { createBot } from './helpers/consent.js'; // подтверждения 6А–6Ж пройдены (хелпер)
 import { EDIT_SEP } from '../engine/episode.js';
 import { createApp } from '../server/app.js';
 import { rowWordsGrounded, wordsOf } from '../engine/episode.js';

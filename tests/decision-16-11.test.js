@@ -5,7 +5,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { createBot, makeMetrics, continuationLevel } from '../server/bot.js';
+import { makeMetrics, continuationLevel } from '../server/bot.js';
+import { createBot } from './helpers/consent.js'; // подтверждения 6А–6Ж пройдены (хелпер)
 import { assessRisk, prepareHelp, STOP_SCREEN_TEXT, TRY_LATER_TEXT, cyrillicLookalikes } from '../server/safety.js';
 import { joinEdits, EDIT_SEP } from '../engine/episode.js';
 import { modelLike } from './helpers/fake-model.js';

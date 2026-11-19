@@ -6,7 +6,8 @@ import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createBot, makeMetrics } from '../server/bot.js';
+import { makeMetrics } from '../server/bot.js';
+import { createBot } from './helpers/consent.js'; // подтверждения 6А–6Ж пройдены (хелпер)
 import { assessRisk, prepareHelp, helpMessage, STOP_SCREEN_TEXT, TRY_LATER_TEXT, NOT_HEARD_TEXT } from '../server/safety.js';
 import { modelLike } from './helpers/fake-model.js';
 

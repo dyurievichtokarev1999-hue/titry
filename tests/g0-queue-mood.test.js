@@ -5,7 +5,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { createBot, makeMetrics, MAX_RENDER_WAITING } from '../server/bot.js';
+import { makeMetrics, MAX_RENDER_WAITING } from '../server/bot.js';
+import { createBot } from './helpers/consent.js'; // подтверждения 6А–6Ж пройдены (хелпер)
 import { sanitizeEpisode } from '../engine/episode.js';
 
 const example = JSON.parse(await fs.readFile(new URL('../examples/day-quiet.json', import.meta.url), 'utf8'));

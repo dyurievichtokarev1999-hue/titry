@@ -5,7 +5,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { createBot, TEXT, prepareBot } from '../server/bot.js';
+import { TEXT, prepareBot } from '../server/bot.js';
+import { createBot } from './helpers/consent.js'; // подтверждения 6А–6Ж пройдены (хелпер)
 import { createApp } from '../server/app.js';
 import { makeGate, modelModeAtStart } from '../server/gate.js';
 import { assessRisk, prepareHelp, helpMessage, tryLaterMessage, threatPhrase, threatErrors, HOUSEHOLD_IDIOMS, STOP_SCREEN_TEXT, NOT_HEARD_TEXT } from '../server/safety.js';

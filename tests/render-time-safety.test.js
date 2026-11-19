@@ -3,7 +3,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import { createBot, TEXT, telegram } from '../server/bot.js';
+import { TEXT, telegram } from '../server/bot.js';
+import { createBot } from './helpers/consent.js'; // подтверждения 6А–6Ж пройдены (хелпер)
 import { makeGate } from '../server/gate.js';
 import { helpMessage, tryLaterMessage, NOT_HEARD_TEXT, assessRisk } from '../server/safety.js';
 

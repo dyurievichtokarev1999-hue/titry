@@ -7,7 +7,8 @@ import path from 'node:path';
 import { sanitizeEpisode } from '../engine/episode.js';
 import { makeDraft, escapeStoryTags, modelSafetyCheck } from '../server/draft.js';
 import { createApp, strictDate } from '../server/app.js';
-import { createBot, makeMetrics } from '../server/bot.js';
+import { makeMetrics } from '../server/bot.js';
+import { createBot } from './helpers/consent.js'; // подтверждения 6А–6Ж пройдены (хелпер)
 
 const ex = JSON.parse(await fs.readFile(new URL('../examples/day-quiet.json', import.meta.url), 'utf8'));
 
