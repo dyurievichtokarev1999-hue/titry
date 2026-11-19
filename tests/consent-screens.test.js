@@ -437,3 +437,54 @@ test('команды: «/DELETE» и «/delete@бот» удаляют, «/Start
     assert.equal(e.sent.length, before, `«${t}» — без ответа`);
   }
 });
+
+// Разбор PR (code-review high, ponytail-review): после отзыва согласия во время подготовки сообщения идут по правилам
+// до 6Ж — без «Собираю ролик», без скачивания и распознавания голоса; старая ▶ не запускает проверку и рендер.
+test('после отзыва во время подготовки: «ок» и голос — не «Собираю ролик», голос не скачивается; старая ▶ — без проверки и рендера', async () => {
+  let release;
+  const b = setup(['pd', 'age'], { renderGate: new Promise((r) => { release = r; }) });
+  const { id, p } = await delivering(b);
+  await b.say('/start');
+  for (const d of ['cs:intro:next', 'cs:pd:no']) await b.press(d);
+  const before = b.sent.length;
+  await b.say('ок');
+  await b.voice();
+  assert.ok(!b.texts().slice(before).includes(TEXT.rendering), 'нет «Собираю ролик»');
+  assert.equal(b.n.download + b.n.stt, 0, 'голос не скачан и не распознан');
+  release(); await p; await ticks();
+  const c = setup(['pd', 'age'], { renderGate: new Promise((r) => { release = r; }) });
+  const d = await delivering(c);
+  await c.say('/start');
+  for (const x of ['cs:intro:next', 'cs:pd:yes', 'cs:age:yes']) await c.press(x);
+  const checks = c.n.check;
+  await c.press(`play:${d.id}`); await ticks();
+  assert.equal(c.n.check, checks, 'старая ▶ не отправляет рассказ на проверку');
+  release(); await d.p; await ticks();
+  assert.equal(c.n.render, 1);
+  assert.equal(c.n.video, 0);
+  void id;
+});
+
+test('новый рассказ после повторных подтверждений во время обречённой доставки не стирается по её окончании', async () => {
+  let release;
+  const b = setup(['pd', 'age'], { renderGate: new Promise((r) => { release = r; }) });
+  const { p } = await delivering(b);
+  await b.say('/start');
+  for (const x of ['cs:intro:next', 'cs:pd:yes', 'cs:age:yes']) await b.press(x);
+  await b.say(STORY); await ticks();
+  assert.ok(b.s().episode, 'новый черновик показан');
+  release(); await p; await ticks();
+  assert.ok(b.s().story && b.s().episode, 'новый рассказ на месте после конца старой доставки');
+  assert.equal(b.n.video, 0, 'старый ролик не ушёл');
+});
+
+test('«/delete@ДругойБот» — без ответа и не рассказ', async () => {
+  const b = setupNamed('TitryBot');
+  await b.say('/start');
+  for (const d of ['cs:intro:next', 'cs:pd:yes', 'cs:age:yes']) await b.press(d);
+  const before = b.sent.length; const drafts = b.n.draft;
+  await b.say('/delete@OtherBot');
+  assert.equal(b.sent.length, before);
+  assert.equal(b.n.draft, drafts);
+  assert.ok(b.s());
+});

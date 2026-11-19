@@ -21,7 +21,7 @@ const MUSIC_ORDER = ['warm', 'sad', 'anger', 'quiet', 'none'];
 const SESSION_TTL_MS = 3 * 60 * 60 * 1000;
 const WATERMARK = process.env.BOT_WATERMARK ?? 'сделано в титрах';
 
-// Команды бота (setMyCommands): точное совпадение обрабатывается до разбора текста.
+// Команды бота (setMyCommands). Разбор — parseCommand в createBot: без учёта регистра, «@имя_бота» — только своего бота.
 const KNOWN_COMMANDS = new Set(['start', 'year', 'delete', 'help']);
 // Предел, сколько доставка ролика ждёт проверки сообщений, пришедших во время подготовки (страховка от зависания;
 // у самой проверки свой предел и один повтор). По истечении — как «неизвестно» (условие 3).
@@ -550,7 +550,7 @@ export function createBot({
   // forgotGen — поколение сброшенного черновика: его опасный ответ модели всё равно показывает экран остановки.
   // Во время доставки ролика сброс откладывается до её конца (forgetAfter, см. doRender).
   const forgetStory = (s) => {
-    if (s.delivering) { s.forgetAfter = true; return; }
+    if (s.delivering) { s.forgetAfter = true; s.forgetGen = s.draftId; return; }
     s.forgetAfter = false;
     // Поколение меняется, только если есть что забыть: повторный сброс (/start, затем «Нет») не затирает forgotGen.
     if (s.story) { s.forgotGen = s.draftId; s.draftId += 1; }
@@ -733,6 +733,8 @@ export function createBot({
   async function doRender(chatId, s) {
     // Правки после черновика тоже проверяются: опасная строка не попадёт в ролик.
     if (s.verdict !== 'ok' || !s.episode) return tg.send(chatId, TEXT.noDraft);
+    // Черновик, сброшенный отзывом согласия во время доставки: ▶ не запускает ни проверку, ни рендер.
+    if (!consentDone(s) || (s.forgetAfter && s.forgetGen === s.draftId)) return tg.send(chatId, TEXT.noDraft);
     const risk = assessEpisodeRisk(joinEdits(seenStory(s)), s.episode); // правки — продолжение рассказа для проверки безопасности
     if (risk.level === 'urgent') return stopForSafety(chatId, s, 'urgent', { at: 'render' });
     const v = validateSafeEpisode(s.episode, s.story);
@@ -741,7 +743,7 @@ export function createBot({
     const original = s.originalStory || s.story;
     // Согласие отозвано или подтверждения начаты заново (/start, «Нет» на 6Б/6Г; forgetAfter) — ролик не уходит,
     // черновик стирается после доставки по правилу отказа (решение Claude 19.11 по справке к комплекту v2.2).
-    const current = () => alive(chatId, s) && s.draftId === gen && s.verdict === 'ok' && consentDone(s) && !s.forgetAfter && !isBlocked(s, original) && gate.status(s.scope, original).kind === null;
+    const current = () => alive(chatId, s) && s.draftId === gen && s.verdict === 'ok' && consentDone(s) && !(s.forgetAfter && s.forgetGen === gen) && !isBlocked(s, original) && gate.status(s.scope, original).kind === null;
     // ИР-04 (критик реализации): один рендер идёт, до трёх ждут. Дальше — явный ответ «занято», без долговечной очереди.
     if (waiting >= 1 + MAX_RENDER_WAITING) return tg.send(chatId, TEXT.busy); // состояние сессии не меняется
     const ep = structuredClone(s.episode);
@@ -847,7 +849,11 @@ export function createBot({
       release();
       await removeQuiet([out]); // ошибка удаления — в журнал только код
     }
-    } finally { s.delivering--; if (!s.delivering && s.forgetAfter) forgetStory(s); }
+    } finally {
+      s.delivering--;
+      // Отложенный сброс — только если за это время не начат новый рассказ (новые подтверждения → новый черновик).
+      if (!s.delivering && s.forgetAfter) { if (s.draftId === s.forgetGen) forgetStory(s); else s.forgetAfter = false; }
+    }
   }
 
   // Сообщение, пришедшее во время подготовки ролика: окно «после проверки — до отправки» (решение владельца кода
@@ -926,7 +932,7 @@ export function createBot({
     const own = body ? assessRisk(body).level : 'none';
     const cont = body ? continuationLevel(seenStory(s), body) : 'none';
     const level = cont !== 'none' ? cont : own;
-    if (level === 'none' && trivial(body)) return sendSafe(chatId, TEXT.rendering);
+    if (level === 'none' && trivial(body)) return consentDone(s) && !s.forgetAfter ? sendSafe(chatId, TEXT.rendering) : undefined;
     const epoch = s.deliveryEpoch || 0;
     // Самостоятельное сообщение проверяется без прежнего рассказа (QA PR 16, п. 2).
     const hold = decide(chatId, s, body, level, cont !== 'none' ? continuationContext(seenStory(s), body) : body);
@@ -940,6 +946,8 @@ export function createBot({
       return logSafety({ level: 'urgent', at: 'rendering', byModel: !!r.byModel });
     }
     if (r.code) logError('check', { code: r.code });
+    // Согласие отозвано, пока шла проверка: ролик не уйдёт — ни «не получилось», ни «Собираю ролик».
+    if (!consentDone(s) || s.forgetAfter) return;
     if (r.kind === 'unknown') {
       if (!r.fresh) return; // доставка уже отменена (предел ожидания или другое сообщение): ответ уже отправлен
       if (s.delivering) s.stage = 'draft';
@@ -990,7 +998,9 @@ export function createBot({
     if (bare === 'help') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });
     // До 6Ж и после отказа — ничего из сообщения не обрабатывается. Исключение — уже идущая доставка ролика
     // (согласие дано раньше, повторный /start сбросил его): сообщения во время подготовки проверяются, как прежде.
-    if (!consentDone(s) && !s.delivering) {
+    // Доставка идёт по прежнему согласию, пока его не отозвали; после отзыва — те же правила, что до 6Ж.
+    const busy = s.delivering && !(s.forgetAfter && s.forgetGen === s.draftId);
+    if (!consentDone(s)) {
       // Решение Claude 18.11, п. 6: явная опасность и до подтверждений получает экран остановки с 112 и контактами.
       // Только локальный фильтр: без модели, без записи в сессию, журнал и метрики.
       const caption = msg.voice && typeof msg.caption === 'string' ? cleanInput(msg.caption).trim() : '';
@@ -1004,7 +1014,7 @@ export function createBot({
       // Подпись проходит локальный фильтр синхронно, ДО распознавания (КРИТИКА PR 16, п. 1): явный сигнал — сразу путь
       // остановки, без ожидания и без зависимости от распознавания.
       const captionLevel = caption ? assessRisk(caption).level : 'none';
-      if (s.delivering) {
+      if (busy) {
         // Голосовое в окне до отправки (условие 2). Не распознано — ролик не отменяется: «не получилось разобрать голосовое, напиши текстом»;
         // подпись проверяется как текст. Распознанное держит доставку с начала распознавания (как в PR 15).
         if (captionLevel === 'urgent') return duringRender(chatId, s, caption); // ролик отменяется сейчас
@@ -1052,14 +1062,14 @@ export function createBot({
       return handleStory(chatId, s, full, 'voice');
     }
 
-    if (s.delivering && !text) {
+    if (busy && !text) {
       // Кружок, аудио, видео, стикер, фото во время подготовки: ролик не отменяется (условие 2). Подпись — как текст.
       const caption = typeof msg.caption === 'string' ? cleanInput(msg.caption).trim() : '';
       if (caption) return duringRender(chatId, s, caption);
       return sendSafe(chatId, msg.video_note || msg.audio || msg.video ? TEXT.notHeard : TEXT.rendering);
     }
     if (!text) return;
-    if (s.delivering) return duringRender(chatId, s, text);
+    if (busy) return duringRender(chatId, s, text);
     // Пустая заготовка после нехватки: первая правка открывает черновик (рассказ уже прошёл ту же проверку,
     // что перед репликой нехватки: остановка → технические исходы → нехватка).
     if (s.stage === 'compose' && s.skeleton && !s.episode && parseEdit(text)) {
@@ -1139,6 +1149,7 @@ export function createBot({
     let body = text;
     if (text.startsWith('/')) {
       // Известная команда без хвоста обработана выше; у известной команды с хвостом проверяется хвост.
+      if (!cmd && /^\/[A-Za-z]+@\w+/.test(text)) return; // команда другому боту — не нам и не рассказ
       body = cmd && KNOWN_COMMANDS.has(cmd.name) ? cmd.tail : text.replace(/^\/+/, '').trim();
       if (!body) return; // «/», «//» — не команда и не рассказ: без ответа
     }
