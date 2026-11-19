@@ -219,3 +219,23 @@ test('монтажная: поздняя остановка по безопас�
   assert.equal(u.el('title').value, ex.episode.title);
   assert.equal(u.el('help').hidden, false); assert.equal(u.el('helpText').textContent, 'ПОМОЩЬ');
 });
+
+// Разбор монтажной 19.11 (impeccable, состояния): пустая форма при открытии — без списка ошибок; сбой примера — сообщение.
+test('монтажная: только что открытая пустая форма без ошибок проверки, рендер выключен; после первой правки — список проверок', async () => {
+  const u = studio(async (p) => (p === '/api/config' ? { provider: 'claude', model: 'm' } : {}));
+  await u.tick();
+  assert.equal(u.el('checks').children.length, 0, 'нет «Нужно название…» при открытии');
+  assert.equal(u.el('renderBtn').disabled, true);
+  u.el('title').value = 'Пробный';
+  u.el('title').listeners.input();
+  assert.ok(u.el('checks').children.length > 0, 'после правки проверки видны');
+  assert.equal(u.el('renderBtn').disabled, true, 'пустые строки — рендер выключен');
+});
+
+test('монтажная: пример не загрузился — сообщение, выбор сброшен (можно выбрать снова)', async () => {
+  const u = studio(async (p) => (p === '/api/config' ? { provider: 'claude', model: 'm' } : p.startsWith('/examples/') ? { status: 500, body: {} } : {}));
+  u.el('example').value = 'day-quiet';
+  await u.el('example').listeners.change(); await u.tick();
+  assert.match(u.el('draftNote').textContent, /Пример не загрузился/);
+  assert.equal(u.el('example').value, '');
+});

@@ -74,4 +74,4 @@ a{color:var(--amber)}
 .help-box h2{font:400 28px/1.2 var(--display);letter-spacing:0;text-transform:none;color:var(--light)}
 .panel>button{justify-self:start}
 /* Телефон и планшет: цели касания не меньше 44 px (флажки, кнопки, раскрывашка, ползунок). */
-@media (pointer:coarse){button{min-height:44px}summary{padding:12px 0}.check{min-height:44px;align-items:center}.check input{width:20px;height:20px;margin-top:0;flex:none}#scrub{height:32px}}
+@media (pointer:coarse){button{min-height:44px}summary{padding:12px 0}.check{min-height:44px;align-items:center}.check input{width:20px;height:20px;margin-top:0;flex:none}#scrub{height:32px}.rowline .tools button{min-width:44px}}

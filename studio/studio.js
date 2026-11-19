@@ -11,6 +11,7 @@ const state = {
   drafting: 0,          // поколение запроса черновика: поздний ответ прежнего запроса (или до выбора примера) не применяется
   screen: 0,            // поколение экрана результата: ответ рендера/перепроверки, начатых до нехватки, не показывается
   insufficient: false,  // нехватка материала после исключения: рендер выключен до нового проверенного черновика
+  pristine: false,      // только что открытая пустая форма: список проверок не показывается
 };
 const T = timeline(DEFAULT_DURATION);
 const audio = new Audio();
@@ -240,7 +241,7 @@ $('example').addEventListener('change', async () => {
     const res = await fetch(`/examples/${id}.json`);
     if (!res.ok) throw new Error(String(res.status));
     data = await res.json();
-  } catch { $('draftNote').textContent = 'Пример не загрузился. Проверьте, что монтажная запущена, и выберите его ещё раз.'; return; }
+  } catch { $('example').value = ''; $('draftNote').textContent = 'Пример не загрузился. Проверьте, что монтажная запущена, и выберите его ещё раз.'; return; }
   $('story').value = data.story;
   state.drafting++; // ответ черновика, запрошенного до выбора примера, не применяется
   $('draftBtn').disabled = false;
@@ -312,5 +313,4 @@ $('logBtn').addEventListener('click', async () => {
 fillForm(state.episode);
 // Только что открытая форма пустая: список проверок появится после первой правки, черновика или примера.
 state.pristine = true;
-changed();
-state.pristine = false;
+try { changed(); } finally { state.pristine = false; }
