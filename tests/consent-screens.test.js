@@ -654,22 +654,37 @@ test('метрики: новое согласие во время старой �
 
 // Решение Claude 20.11: отзыв согласия («Нет» на 6Б/6Г после согласия) = удаление метрик, как /delete.
 test('отзыв согласия «Нет» на 6Б и 6Г — метрики участника удаляются; ответы прежние; повторный /start без «Нет» не стирает', async () => {
-  for (const refuse of ['pd', 'age']) {
+  for (const order of ORDERS) for (const refuse of ['pd', 'age']) {
     let forgot = 0;
-    const b = setup(['pd', 'age'], { onForget: () => { forgot++; } });
-    await consentAll(b, ['pd', 'age']);
+    const b = setup(order, { onForget: () => { forgot++; } });
+    await consentAll(b, order);
     await b.say(STORY);
     assert.ok(b.events.length > 0);
     await b.say('/start');
     assert.equal(forgot, 0, '/start сам по себе не стирает');
     await b.press('cs:intro:next');
-    if (refuse === 'age') await b.press('cs:pd:yes');
+    for (const st of order) { if (st === refuse) break; await b.press(`cs:${st}:yes`); }
+    await b.press(`cs:${refuse}:maybe`); // не «Нет»: ничего не происходит
+    assert.equal(forgot, 0, 'иное значение кнопки — не отказ');
     const n = b.sent.length;
     await b.press(`cs:${refuse}:no`);
     assert.equal(forgot, 1, `«Нет» на ${refuse}: метрики удалены`);
-    const expected = refuse === 'pd' ? [CONSENT_TEXT.pdDeclined] : [CONSENT_TEXT.ageDeclined, CONSENT_TEXT.ageDeleted];
-    assert.deepEqual(b.texts().slice(n), expected, 'ответы человеку прежние');
+    const hadPd = order.indexOf('pd') < order.indexOf(refuse);
+    const expected = refuse === 'pd' ? [CONSENT_TEXT.pdDeclined] : [CONSENT_TEXT.ageDeclined, ...(hadPd ? [CONSENT_TEXT.ageDeleted] : [])];
+    assert.deepEqual(b.texts().slice(n), expected, `ответы человеку прежние: ${order.join('→')}, «Нет» на ${refuse}`);
   }
+});
+
+test('отзыв согласия: удаление метрик не подтверждено — ответы прежние, затем честное сообщение; в журнале только код', async () => {
+  const b = setup(['pd', 'age'], { onForget: () => { throw Object.assign(new Error('x'), { code: 'EIO' }); } });
+  await consentAll(b, ['pd', 'age']);
+  await b.say('/start'); await b.press('cs:intro:next');
+  const errs = []; const orig = console.error; console.error = (l) => errs.push(String(l));
+  const n = b.sent.length;
+  try { await b.press('cs:pd:no'); } finally { console.error = orig; }
+  assert.deepEqual(b.texts().slice(n), [CONSENT_TEXT.pdDeclined, TEXT.withdrawForgetFailed]);
+  assert.match(errs.join('\n'), /metrics\.forget\.withdraw/);
+  assert.ok(!errs.join('\n').includes('88001'), 'идентификатора чата в журнале нет');
 });
 
 test('отзыв согласия: строки участника удалены из файла метрик, строки другого участника остаются', async () => {
@@ -690,7 +705,12 @@ test('отзыв согласия: строки участника удален�
       for (const st of steps) await (st.startsWith('/') ? bot.handleUpdate({ message: { chat, text: st } }) : press(st));
     };
     await run(91001, []);
-    await run(91002, ['/start', 'cs:intro:next', 'cs:pd:no']);
+    await run(91002, []);
+    const before = (await fs.readFile(path.join(dir, 'm.jsonl'), 'utf8')).split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    assert.ok(before.some((l) => l.user === metrics.hash(91002)), 'до отзыва строки участника есть');
+    const chat = { id: 91002, type: 'private' };
+    await bot.handleUpdate({ message: { chat, text: '/start' } });
+    for (const d of ['cs:intro:next', 'cs:pd:no']) await bot.handleUpdate({ callback_query: { id: 'q', data: `${d}:${bot.sessions.get(91002).consent.cycle}`, message: { chat } } });
     const lines = (await fs.readFile(path.join(dir, 'm.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
     assert.ok(lines.length > 0 && lines.every((l) => l.user === metrics.hash(91001)), 'остались только строки другого участника');
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
