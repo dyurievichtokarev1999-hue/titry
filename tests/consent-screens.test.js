@@ -15,7 +15,7 @@ const ORDERS = [['pd', 'age'], ['age', 'pd']];
 const INVITES = [CONSENT_TEXT.ready, TEXT.year];
 const STORY = ex.story;
 
-function setup(order, { draftGate, renderGate, unsafe, sendGate, botName, onForget, check, sendVideoGate, hold } = {}) {
+function setup(order, { draftGate, renderGate, unsafe, sendGate, botName, onForget, check, sendVideoGate, hold, transcribeGate, transcript = STORY } = {}) {
   const sent = [];
   const n = { download: 0, stt: 0, draft: 0, check: 0, story: 0, render: 0, video: 0 };
   const tg = {
@@ -27,7 +27,7 @@ function setup(order, { draftGate, renderGate, unsafe, sendGate, botName, onForg
   const metrics = { hash: () => 'qa-fictional', log: async (c, event) => { events.push(event); if (event === 'story') n.story++; if (hold?.[event]) await hold[event]; }, forget: async () => { if (onForget) onForget(); } };
   const bot = createBot({
     tg, metrics, consentOrder: order, botName,
-    transcribe: async () => { n.stt++; return STORY; },
+    transcribe: async () => { n.stt++; await transcribeGate; return transcript; },
     draft: async () => { n.draft++; await draftGate; if (unsafe) return { episode: null, risk: { level: 'urgent', byModel: true } }; return { episode: structuredClone(ex.episode), risk: { level: 'none' }, provider: 'claude', dropped: [] }; },
     safetyCheck: async (t) => { n.check++; return check ? check(t) : false; },
     checkRetryMs: 0,
@@ -755,4 +755,60 @@ test('метрики: поздняя остановка по рассказу п
   const before = b.events.length;
   release(); await story;
   assert.ok(!b.events.slice(before).includes('safety'), 'safety прежнего цикла не записана');
+});
+
+// QA PR 31 (5d24307): голосовое относится к циклу согласия, в котором пришло, а не к циклу после распознавания.
+test('метрики: голосовое, пришедшее до нового согласия, не пишется в новом цикле; новое голосовое — пишется', async () => {
+  let release; const gate = new Promise((r) => { release = r; });
+  const b = setup(['pd', 'age'], { transcribeGate: gate });
+  await consentAll(b, ['pd', 'age']);
+  const voice = b.voice();
+  for (let i = 0; i < 50 && !b.n.stt; i++) await tick();
+  assert.equal(b.n.stt, 1, 'распознавание идёт');
+  await consentAll(b, ['pd', 'age']); // новый цикл, пока распознавалось
+  const before = b.events.length;
+  const drafts = b.n.draft;
+  release(); await voice;
+  assert.ok(!b.events.slice(before).includes('story') && !b.events.slice(before).includes('draft'), 'голосовое прежнего цикла не записано');
+  assert.equal(b.n.draft, drafts, 'голосовое прежнего цикла не идёт в модель и не открывает черновик');
+  const before2 = b.events.length;
+  await b.voice(); // в новом цикле — пишется
+  assert.ok(b.events.slice(before2).includes('story'), 'новое голосовое записано');
+});
+
+test('голосовое: согласие отозвано во время распознавания — без модели, эха и записи; явная опасность — экран остановки', async () => {
+  for (const unsafeText of [false, true]) {
+    let release; const gate = new Promise((r) => { release = r; });
+    const b = setup(['pd', 'age'], { transcribeGate: gate, transcript: unsafeText ? 'Не хочу жить.' : STORY });
+    await consentAll(b, ['pd', 'age']);
+    const voice = b.voice();
+    for (let i = 0; i < 50 && !b.n.stt; i++) await tick();
+    await b.say('/start'); // отзыв, нового согласия нет
+    const n = b.sent.length; const events = b.events.length;
+    release(); await voice;
+    const after = b.texts().slice(n);
+    assert.equal(b.n.draft, 0, 'модель не вызывается');
+    assert.ok(!after.some((t) => t.startsWith('Расшифровка')), 'эха расшифровки нет');
+    assert.equal(b.events.length, events, 'метрик нет');
+    assert.ok(!b.s().story, 'рассказ в сессию не пишется');
+    if (unsafeText) assert.deepEqual(after, [helpMessage('urgent')], 'экран остановки');
+    else assert.ok(!after.includes(helpMessage('urgent')));
+  }
+});
+
+test('голосовое во время доставки: согласие отозвано во время распознавания — без проверки, эха и метрик; ролика нет', async () => {
+  let releaseStt; const stt = new Promise((r) => { releaseStt = r; });
+  let releaseRender; const renderGate = new Promise((r) => { releaseRender = r; });
+  const b = setup(['pd', 'age'], { transcribeGate: stt, renderGate });
+  const { p } = await delivering(b);
+  const voice = b.voice();
+  for (let i = 0; i < 50 && !b.n.stt; i++) await tick();
+  await b.say('/start');
+  const n = b.sent.length; const events = b.events.length; const checks = b.n.check;
+  releaseStt(); await voice;
+  assert.ok(!b.texts().slice(n).some((t) => t.startsWith('Расшифровка')), 'эха расшифровки нет');
+  assert.equal(b.n.check, checks, 'модельной проверки голосового нет');
+  assert.equal(b.events.length, events, 'метрик нет');
+  releaseRender(); await p;
+  assert.equal(b.n.video, 0, 'ролик после отзыва не уходит');
 });
