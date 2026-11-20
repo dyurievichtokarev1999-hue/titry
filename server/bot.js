@@ -627,8 +627,8 @@ export function createBot({
   }
   const isBlocked = (s, story) => !!(s.blocked && s.blocked.has(storyKey(story)));
 
-  async function handleStory(chatId, s, story, source) {
-    const cycle = cycleOf(chatId); // метрики этого рассказа — только в цикле согласия, в котором он пришёл
+  // cycle — цикл согласия, в котором пришло сообщение (голосовое — до распознавания, QA PR 31 5d24307).
+  async function handleStory(chatId, s, story, source, cycle = cycleOf(chatId)) {
     const prevStory = seenStory(s); // с правками, отклонёнными по длине: продолжение видит и их
     // Решение 16.11 (б): тревожный обрывок после бытовой формы прежнего текста — продолжение рассказа уровня concern:
     // черновик строится по обоим сообщениям вместе, дальше решает модельная проверка перед рендером.
@@ -971,8 +971,8 @@ export function createBot({
   }
 
   // echo — эхо расшифровки (только при безопасном исходе, после проверки).
-  async function duringRender(chatId, s, text, { echo } = {}) {
-    const cycle = cycleOf(chatId); // метрики этого сообщения — в цикле согласия, в котором оно пришло
+  // cycle — цикл согласия, в котором пришло сообщение (голосовое — до распознавания).
+  async function duringRender(chatId, s, text, { echo, cycle = cycleOf(chatId) } = {}) {
     let body = String(text || '').trim();
     if (body.startsWith('/')) {
       const cmd = parseCommand(body);
@@ -1019,6 +1019,7 @@ export function createBot({
     const chatId = msg.chat.id;
     if (msg.chat.type !== 'private') return; // только личные чаты: истории не для групп
     const s = session(chatId);
+    const cycle = cycleOf(chatId); // цикл согласия на момент прихода: метрики голосового — в нём, а не после распознавания
     // Подпись к фото, видео, файлу — такой же текст, как сообщение (условие 1: подписи попадают в ролик и проверяются).
     // Подпись к голосовому разбирается вместе с расшифровкой ниже. Разделитель правок не может прийти от человека.
     const text = cleanInput(msg.text || (msg.voice ? '' : msg.caption) || '').trim();
@@ -1064,6 +1065,12 @@ export function createBot({
     }
 
     if (msg.voice) {
+      // Согласие отозвано, пока шло распознавание (/start, «Нет»; новый цикл согласия): голосовое — по правилам до 6Ж.
+      // Явная опасность — экран остановки; иначе модель не вызывается, в сессию и метрики ничего не пишется.
+      const lateWithdrawn = (t) => {
+        if (assessRisk(t).level === 'urgent') return tg.send(chatId, helpMessage('urgent'));
+        return consentDone(s) ? undefined : preConsent(chatId, s);
+      };
       const voiceRefused = !sttAvailable() && transcribe === transcribeOgg ? TEXT.voiceOff : msg.voice.duration > MAX_VOICE_SECONDS ? TEXT.voiceLong : null;
       const caption = typeof msg.caption === 'string' ? cleanInput(msg.caption).trim() : ''; // подпись к голосовому — тоже текст
       // Подпись проходит локальный фильтр синхронно, ДО распознавания (КРИТИКА PR 16, п. 1): явный сигнал — сразу путь
@@ -1072,8 +1079,8 @@ export function createBot({
       if (busy) {
         // Голосовое в окне до отправки (условие 2). Не распознано — ролик не отменяется: «не получилось разобрать голосовое, напиши текстом»;
         // подпись проверяется как текст. Распознанное держит доставку с начала распознавания (как в PR 15).
-        if (captionLevel === 'urgent') return duringRender(chatId, s, caption); // ролик отменяется сейчас
-        if (voiceRefused) return caption ? Promise.all([sendSafe(chatId, TEXT.notHeard), duringRender(chatId, s, caption)]) : sendSafe(chatId, TEXT.notHeard);
+        if (captionLevel === 'urgent') return duringRender(chatId, s, caption, { cycle }); // ролик отменяется сейчас
+        if (voiceRefused) return caption ? Promise.all([sendSafe(chatId, TEXT.notHeard), duringRender(chatId, s, caption, { cycle })]) : sendSafe(chatId, TEXT.notHeard);
         let releaseVoice;
         // Уровень удержания — уровень подписи: concern подписи держит «неизвестно» до конца проверки (не none).
         holdDelivery(s, new Promise((r) => { releaseVoice = r; }), captionLevel, Infinity);
@@ -1085,46 +1092,48 @@ export function createBot({
           } catch (e) { logError('stt', e); }
           story = String(story || '').trim();
           if (!alive(chatId, s)) return;
+          if (!consented(chatId, cycle)) return lateWithdrawn(story ? withCaption(story, caption) : caption);
           if (!story) {
-            const p = caption ? duringRender(chatId, s, caption) : null; // удержание подписи ставится синхронно
+            const p = caption ? duringRender(chatId, s, caption, { cycle }) : null; // удержание подписи ставится синхронно
             releaseVoice();
             await sendSafe(chatId, TEXT.notHeard);
             return await p;
           }
           // duringRender ставит своё удержание синхронно; внешнее снимаем сразу — эхо и typing ожидание не держат.
-          const p = duringRender(chatId, s, withCaption(story, caption), { echo: `Расшифровка:\n«${story}»` });
+          const p = duringRender(chatId, s, withCaption(story, caption), { echo: `Расшифровка:\n«${story}»`, cycle });
           releaseVoice();
           return await p;
         } finally { releaseVoice(); }
       }
-      if (captionLevel === 'urgent') return handleStory(chatId, s, caption, 'text'); // остановка без распознавания
+      if (captionLevel === 'urgent') return handleStory(chatId, s, caption, 'text', cycle); // остановка без распознавания
       if (voiceRefused) {
         await tg.send(chatId, voiceRefused);
-        return caption ? handleStory(chatId, s, caption, 'text') : undefined; // подпись — тот же путь, что текст
+        return caption ? handleStory(chatId, s, caption, 'text', cycle) : undefined; // подпись — тот же путь, что текст
       }
       await tg.action(chatId, 'typing');
       let story = '';
       try { story = cleanInput(await transcribe(await tg.fileBuffer(msg.voice.file_id), { duration: msg.voice.duration })); }
       catch (e) { logError('stt', e); }
       if (!alive(chatId, s)) return; // /delete во время распознавания: ничего не отвечаем
+      if (!consented(chatId, cycle)) return lateWithdrawn(story ? withCaption(story, caption) : caption);
       if (!story) {
         await tg.send(chatId, TEXT.voiceEmpty);
-        return caption ? handleStory(chatId, s, caption, 'text') : undefined;
+        return caption ? handleStory(chatId, s, caption, 'text', cycle) : undefined;
       }
       // Подпись к голосовому — продолжение рассказа: те же проверки на всём, что может попасть в ролик.
       const full = withCaption(story, caption);
       await tg.send(chatId, `Расшифровка:\n«${story}»`);
-      return handleStory(chatId, s, full, 'voice');
+      return handleStory(chatId, s, full, 'voice', cycle);
     }
 
     if (busy && !text) {
       // Кружок, аудио, видео, стикер, фото во время подготовки: ролик не отменяется (условие 2). Подпись — как текст.
       const caption = typeof msg.caption === 'string' ? cleanInput(msg.caption).trim() : '';
-      if (caption) return duringRender(chatId, s, caption);
+      if (caption) return duringRender(chatId, s, caption, { cycle });
       return sendSafe(chatId, msg.video_note || msg.audio || msg.video ? TEXT.notHeard : TEXT.rendering);
     }
     if (!text) return;
-    if (busy) return duringRender(chatId, s, text);
+    if (busy) return duringRender(chatId, s, text, { cycle });
     // Пустая заготовка после нехватки: первая правка открывает черновик (рассказ уже прошёл ту же проверку,
     // что перед репликой нехватки: остановка → технические исходы → нехватка).
     if (s.stage === 'compose' && s.skeleton && !s.episode && parseEdit(text)) {
