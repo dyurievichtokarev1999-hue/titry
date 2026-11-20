@@ -238,15 +238,18 @@ function enterInsufficient() {
 function showHelp(text) { $('helpText').textContent = text; $('help').hidden = false; $('helpClose').focus(); }
 $('helpClose').addEventListener('click', () => { $('help').hidden = true; });
 
+let examplePick = 0; // только последний выбор примера меняет форму, селектор и статус
 $('example').addEventListener('change', async () => {
   const id = $('example').value;
+  const pick = ++examplePick;
   if (!id) return;
   let data;
   try {
     const res = await fetch(`/examples/${id}.json`);
     if (!res.ok) throw new Error(String(res.status));
     data = await res.json();
-  } catch { $('example').value = ''; $('draftNote').textContent = 'Пример не загрузился. Проверьте, что монтажная запущена, и выберите его ещё раз.'; return; }
+  } catch { if (pick !== examplePick) return; $('example').value = ''; $('draftNote').textContent = 'Пример не загрузился. Проверьте, что монтажная запущена, и выберите его ещё раз.'; return; }
+  if (pick !== examplePick) return;
   $('story').value = data.story;
   state.drafting++; // ответ черновика, запрошенного до выбора примера, не применяется
   $('draftBtn').disabled = false;

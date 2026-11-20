@@ -239,3 +239,49 @@ test('монтажная: пример не загрузился — сообщ�
   assert.match(u.el('draftNote').textContent, /Пример не загрузился/);
   assert.equal(u.el('example').value, '');
 });
+
+// QA PR 30 (46ddbe3): только последний выбор примера меняет форму, селектор и статус.
+function racingStudio() {
+  const pending = {};
+  const u = studio(async (p) => {
+    if (p === '/api/config') return { provider: 'claude', model: 'm' };
+    const m = /^\/examples\/(\w+)\.json$/.exec(p);
+    if (m) return new Promise((r) => { pending[m[1]] = r; });
+    return {};
+  });
+  const pick = (id) => { u.el('example').value = id; return u.el('example').listeners.change(); };
+  return { u, pending, pick };
+}
+const exB = { story: 'Вымышленный рассказ примера B.', episode: { ...structuredClone(ex.episode), title: 'Вымышленный пример B' } };
+
+for (const late of ['поздний успех', 'поздняя ошибка']) {
+  test(`монтажная: A→B, ${late} A не меняет форму, селектор и статус примера B`, async () => {
+    const { u, pending, pick } = racingStudio();
+    const a = pick('A'); await u.tick();
+    const b = pick('B'); await u.tick();
+    pending.B(exB); await b; await u.tick();
+    const note = u.el('draftNote').textContent;
+    pending.A(late === 'поздний успех' ? { story: ex.story, episode: ex.episode } : { status: 500, body: {} }); await a; await u.tick();
+    assert.equal(u.el('example').value, 'B', 'селектор не сброшен');
+    assert.equal(u.el('title').value, 'Вымышленный пример B', 'в форме пример B');
+    assert.equal(u.el('story').value, exB.story);
+    assert.equal(u.el('draftNote').textContent, note, 'статус примера B');
+  });
+}
+
+test('монтажная: одиночный 500, затем повторный выбор того же примера загружает его', async () => {
+  let fail = true;
+  const u = studio(async (p) => {
+    if (p === '/api/config') return { provider: 'claude', model: 'm' };
+    if (p.startsWith('/examples/')) { if (fail) { fail = false; return { status: 500, body: {} }; } return { story: ex.story, episode: ex.episode }; }
+    return {};
+  });
+  u.el('example').value = 'day-quiet';
+  await u.el('example').listeners.change(); await u.tick();
+  assert.equal(u.el('example').value, '');
+  u.el('example').value = 'day-quiet';
+  await u.el('example').listeners.change(); await u.tick();
+  assert.equal(u.el('example').value, 'day-quiet');
+  assert.equal(u.el('title').value, ex.episode.title);
+  assert.equal(u.el('draftNote').textContent, 'Загружен вымышленный пример из прототипа.');
+});
