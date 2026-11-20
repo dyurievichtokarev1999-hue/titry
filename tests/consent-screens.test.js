@@ -182,7 +182,7 @@ test('опасное сообщение до подтверждений — эк
     assert.equal(b.texts().at(-1), helpMessage('urgent'));
     assert.deepEqual({ ...b.n }, { download: 0, stt: 0, draft: 0, check: 0, story: 0, render: 0, video: 0 });
     assert.ok(!b.s().story && !b.s().blocked, 'текст и запрет в сессию не пишутся');
-    assert.deepEqual(b.events, ['start'], 'в метриках только /start: опасные сообщения не записаны');
+    assert.deepEqual(b.events, [], 'до подтверждений метрик нет: ни /start, ни опасных сообщений (проверка перед запуском, п. 3)');
   }
 });
 
@@ -583,3 +583,47 @@ for (const [label, danger, video] of [['опасно — ролика и render 
     assert.equal(b.events.slice(ev).includes('render'), video === 1);
   });
 }
+
+// Проверка перед запуском, п. 3: метрики пишутся только при действующем согласии текущей сессии —
+// не до 6Ж, не после отказа или /start, не после /delete (в том числе от поздних кнопок старых сообщений).
+const consentAll = async (b, order) => { await b.say('/start'); await b.press('cs:intro:next'); for (const o of order) await b.press(`cs:${o}:yes`); };
+
+test('метрики до согласия: /start, /year, рассказ, кнопки отклика, отказ — ни одной записи', async () => {
+  for (const order of ORDERS) {
+    const b = setup(order);
+    await b.press('fb:fit'); await b.say('/year'); await b.say('/start'); await b.say(STORY);
+    await b.press('cs:intro:next'); await b.press('fb:heavier'); await b.press(`cs:${order[0]}:no`); await b.say('/year');
+    assert.deepEqual(b.events, [], order.join('→'));
+  }
+});
+
+test('метрики после /delete: поздняя кнопка отклика и новые сообщения новой записи не создают', async () => {
+  const b = setup(['pd', 'age']);
+  await consentAll(b, ['pd', 'age']);
+  await b.say(STORY);
+  await b.press(`play:${b.s().draftId}`);
+  assert.equal(b.n.video, 1);
+  assert.ok(b.events.includes('story') && b.events.includes('render'), 'после согласия метрики пишутся');
+  await b.press('fb:fit');
+  assert.equal(b.events.at(-1), 'feedback');
+  const before = b.events.length;
+  await b.say('/delete');
+  await b.press('fb:heavier'); // кнопка старого сообщения с роликом
+  await b.say(STORY); await b.say('/year');
+  assert.equal(b.events.length, before, 'после /delete записей нет');
+  assert.ok(b.texts().includes(helpMessage('concern')), 'помощь по «тяжелее» показана и без записи');
+});
+
+test('метрики после отзыва согласия (/start, «Нет»): поздние кнопки и сообщения не пишутся', async () => {
+  for (const withdraw of ['start', 'no']) {
+    const b = setup(['pd', 'age']);
+    await consentAll(b, ['pd', 'age']);
+    await b.say(STORY);
+    const before = b.events.length;
+    assert.ok(before > 0);
+    await b.say('/start');
+    if (withdraw === 'no') { await b.press('cs:intro:next'); await b.press('cs:pd:no'); }
+    await b.press('fb:fit'); await b.say(STORY);
+    assert.equal(b.events.length, before, withdraw);
+  }
+});

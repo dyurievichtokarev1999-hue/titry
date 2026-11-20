@@ -468,8 +468,12 @@ export function createBot({
   // Рассказ для проверок безопасности: вместе с правками, отклонёнными по длине (s.overflow, только в памяти).
   // Иначе угрозу можно разбить на две правки у предела: первая отклонена и выпала бы из контекста фильтра.
   const seenStory = (s) => (s.overflow?.length ? `${s.story}${EDIT_SEP}${s.overflow.join(EDIT_SEP)}` : s.story);
+  // Метрики — только при действующем согласии текущей сессии (проверка перед запуском, п. 3): до 6Ж, после отказа,
+  // /start, /delete (сессии нет) и для поздних кнопок старых сообщений запись не делается. Проверка — в момент записи.
+  const consented = (chatId) => { const s = sessions.get(chatId); return !!s && consentDone(s) && !s.forgetAfter; };
+  const writeMetric = async (chatId, event, data) => { if (consented(chatId)) await metrics.log(chatId, event, data); };
   // Метрики «как получится»: сбой записи (например, ENOSPC) не должен ломать ответ человеку. В журнал — только код.
-  const logMetric = (chatId, event, data) => Promise.resolve().then(() => metrics.log(chatId, event, data)).catch((e) => logError('metrics', e));
+  const logMetric = (chatId, event, data) => Promise.resolve().then(() => writeMetric(chatId, event, data)).catch((e) => logError('metrics', e));
   // Незавершённые черновики и отдельные проверки участника: их результат может создать запрет уже после /delete.
   const inFlight = new Map();
   const track = async (chatId, p) => {
@@ -521,7 +525,7 @@ export function createBot({
     applyStop(s);
     // Экран остановки — до записи в журнал: сбой или зависание журнала не задерживает помощь.
     try { await tg.send(chatId, helpMessage('urgent')); }
-    finally { try { await metrics.log(chatId, 'safety', { level, ...extra }); } catch (e) { logError('metrics', e); } }
+    finally { try { await writeMetric(chatId, 'safety', { level, ...extra }); } catch (e) { logError('metrics', e); } }
   }
 
   // Сессия ещё та же: не удалена через /delete и не заменена новой после истечения срока.
@@ -849,7 +853,7 @@ export function createBot({
       release(); // следующая задача и новые запросы — сразу
       const timedOut = e?.code === 'render_timeout';
       // Предел рендера: в журнал и метрики — только код и длительность; новая запись о человеке — только у живой сессии.
-      if (timedOut) { logRenderTimeout('render', e.ms); if (alive(chatId, s)) try { await metrics.log(chatId, 'render_timeout', { ms: Math.round(e.ms) }); } catch (m) { logError('metrics', m); } }
+      if (timedOut) { logRenderTimeout('render', e.ms); if (alive(chatId, s)) try { await writeMetric(chatId, 'render_timeout', { ms: Math.round(e.ms) }); } catch (m) { logError('metrics', m); } }
       else logError('render', e);
       // Сессия неактуальна (/delete, новый рассказ, отмена доставки) — по отменённой задаче ни одного сообщения.
       if (current() && !(timedOut && cancelled())) {
@@ -950,7 +954,7 @@ export function createBot({
     holdDelivery(s, hold, level); // синхронно, до первого await
     const r = await hold;
     if (!alive(chatId, s)) return; // /delete во время проверки: ничего не отвечаем (запрет, если был, остаётся)
-    const logSafety = (extra) => Promise.resolve().then(() => metrics.log(chatId, 'safety', extra)).catch((e) => logError('metrics', e));
+    const logSafety = (extra) => Promise.resolve().then(() => writeMetric(chatId, 'safety', extra)).catch((e) => logError('metrics', e));
     if (r.kind === 'urgent') {
       // Экран остановки — первым и ни от чего не зависит: эха нет (повторять опасную фразу незачем), метрики — после.
       await sendSafe(chatId, helpMessage('urgent'));
