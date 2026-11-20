@@ -11,6 +11,7 @@ const state = {
   drafting: 0,          // поколение запроса черновика: поздний ответ прежнего запроса (или до выбора примера) не применяется
   screen: 0,            // поколение экрана результата: ответ рендера/перепроверки, начатых до нехватки, не показывается
   insufficient: false,  // нехватка материала после исключения: рендер выключен до нового проверенного черновика
+  pristine: false,      // только что открытая пустая форма: список проверок не показывается
 };
 const T = timeline(DEFAULT_DURATION);
 const audio = new Audio();
@@ -93,8 +94,8 @@ function showChecks() {
   const v = validateEpisode(state.episode, story);
   const ul = $('checks');
   ul.textContent = '';
-  // Нехватка: пустая форма не превращается в список «допишите» — проверять нечего, рендер выключен.
-  if (state.insufficient) { $('renderBtn').disabled = true; return v; }
+  // Нехватка или только что открытая пустая форма: не список «допишите» — проверять нечего, рендер выключен.
+  if (state.insufficient || state.pristine) { $('renderBtn').disabled = true; return v; }
   const add = (cls, msg) => { const li = document.createElement('li'); li.className = cls; li.textContent = msg; ul.append(li); };
   v.errors.forEach((e) => add('error', e.msg));
   v.warnings.forEach((w) => add('warning', w.msg));
@@ -237,10 +238,18 @@ function enterInsufficient() {
 function showHelp(text) { $('helpText').textContent = text; $('help').hidden = false; $('helpClose').focus(); }
 $('helpClose').addEventListener('click', () => { $('help').hidden = true; });
 
+let examplePick = 0; // только последний выбор примера меняет форму, селектор и статус
 $('example').addEventListener('change', async () => {
   const id = $('example').value;
+  const pick = ++examplePick;
   if (!id) return;
-  const data = await (await fetch(`/examples/${id}.json`)).json();
+  let data;
+  try {
+    const res = await fetch(`/examples/${id}.json`);
+    if (!res.ok) throw new Error(String(res.status));
+    data = await res.json();
+  } catch { if (pick !== examplePick) return; $('example').value = ''; $('draftNote').textContent = 'Пример не загрузился. Проверьте, что монтажная запущена, и выберите его ещё раз.'; return; }
+  if (pick !== examplePick) return;
   $('story').value = data.story;
   state.drafting++; // ответ черновика, запрошенного до выбора примера, не применяется
   $('draftBtn').disabled = false;
@@ -310,4 +319,6 @@ $('logBtn').addEventListener('click', async () => {
 });
 
 fillForm(state.episode);
-changed();
+// Только что открытая форма пустая: список проверок появится после первой правки, черновика или примера.
+state.pristine = true;
+try { changed(); } finally { state.pristine = false; }
