@@ -486,6 +486,9 @@ export function createBot({
   // в файл (QA PR 31, п. 1): /start или «Нет», пришедшие, пока запись ждала, её отменяют.
   // Отложенный сброс относится к своей доставке (forgetGen): после нового согласия и нового рассказа он метрики не держит.
   const cycleOf = (chatId) => sessions.get(chatId)?.consent?.cycle;
+  // Та же сессия и то же действующее согласие, что при приходе сообщения (без учёта отложенного сброса доставки:
+  // новое согласие во время старой доставки принимает новые рассказы).
+  const sameConsent = (chatId, s, cycle) => sessions.get(chatId) === s && consentDone(s) && s.consent.cycle === cycle;
   const consented = (chatId, cycle) => {
     const s = sessions.get(chatId);
     return !!s && consentDone(s) && s.consent.cycle === cycle && !(s.forgetAfter && s.forgetGen === s.draftId);
@@ -627,8 +630,20 @@ export function createBot({
   }
   const isBlocked = (s, story) => !!(s.blocked && s.blocked.has(storyKey(story)));
 
+  // Сообщение пришло при другом согласии (отзыв или новый цикл, пока шли распознавание и ответы): по правилам до 6Ж.
+  // Сессии нет (/delete) — ничего не отвечаем. Явная опасность, в том числе продолжение прежнего рассказа, — экран
+  // остановки; иначе модель не вызывается, в сессию и метрики ничего не пишется; до нового согласия — 6З.
+  // После нового согласия старое сообщение не используется (человек отправит рассказ заново).
+  function outsideConsent(chatId, s, text) {
+    if (!alive(chatId, s)) return undefined;
+    if (assessRisk(text).level === 'urgent' || continuationLevel(seenStory(s), text) === 'urgent') return tg.send(chatId, helpMessage('urgent'));
+    return consentDone(s) ? undefined : preConsent(chatId, s);
+  }
   // cycle — цикл согласия, в котором пришло сообщение (голосовое — до распознавания, QA PR 31 5d24307).
   async function handleStory(chatId, s, story, source, cycle = cycleOf(chatId)) {
+    // Граница рассказа (QA PR 31 ef95836): сообщение пришло при другом согласии (отзыв или новый цикл, пока шли
+    // распознавание и ответы) — в сессию и в модель не идёт; явная опасность — экран остановки.
+    if (!sameConsent(chatId, s, cycle)) return outsideConsent(chatId, s, story);
     const prevStory = seenStory(s); // с правками, отклонёнными по длине: продолжение видит и их
     // Решение 16.11 (б): тревожный обрывок после бытовой формы прежнего текста — продолжение рассказа уровня concern:
     // черновик строится по обоим сообщениям вместе, дальше решает модельная проверка перед рендером.
@@ -658,9 +673,12 @@ export function createBot({
       s.stage = 'idle';
       return tg.send(chatId, TEXT.checkUnavailable);
     }
-    const current = () => alive(chatId, s) && s.draftId === gen && consentDone(s) && !isBlocked(s, story) && gate.status(s.scope, story).kind !== 'safety';
+    const current = () => sameConsent(chatId, s, cycle) && s.draftId === gen && !isBlocked(s, story) && gate.status(s.scope, story).kind !== 'safety';
     await tg.action(chatId, 'typing');
     await tg.send(chatId, TEXT.working);
+    // Согласие сменилось, пока шли ответы: модель не вызывается. Запрет, поставленный за это время, — ниже, после
+    // черновика (поздняя остановка), как раньше.
+    if (!sameConsent(chatId, s, cycle) || s.draftId !== gen) return;
     let r;
     try {
       r = await track(chatId, draft(story, { date: todayIso(now()), period: s.period, tone: 'quiet' }));
@@ -1065,12 +1083,6 @@ export function createBot({
     }
 
     if (msg.voice) {
-      // Согласие отозвано, пока шло распознавание (/start, «Нет»; новый цикл согласия): голосовое — по правилам до 6Ж.
-      // Явная опасность — экран остановки; иначе модель не вызывается, в сессию и метрики ничего не пишется.
-      const lateWithdrawn = (t) => {
-        if (assessRisk(t).level === 'urgent') return tg.send(chatId, helpMessage('urgent'));
-        return consentDone(s) ? undefined : preConsent(chatId, s);
-      };
       const voiceRefused = !sttAvailable() && transcribe === transcribeOgg ? TEXT.voiceOff : msg.voice.duration > MAX_VOICE_SECONDS ? TEXT.voiceLong : null;
       const caption = typeof msg.caption === 'string' ? cleanInput(msg.caption).trim() : ''; // подпись к голосовому — тоже текст
       // Подпись проходит локальный фильтр синхронно, ДО распознавания (КРИТИКА PR 16, п. 1): явный сигнал — сразу путь
@@ -1092,7 +1104,7 @@ export function createBot({
           } catch (e) { logError('stt', e); }
           story = String(story || '').trim();
           if (!alive(chatId, s)) return;
-          if (!consented(chatId, cycle)) return lateWithdrawn(story ? withCaption(story, caption) : caption);
+          if (!sameConsent(chatId, s, cycle)) return outsideConsent(chatId, s, story ? withCaption(story, caption) : caption);
           if (!story) {
             const p = caption ? duringRender(chatId, s, caption, { cycle }) : null; // удержание подписи ставится синхронно
             releaseVoice();
@@ -1115,7 +1127,7 @@ export function createBot({
       try { story = cleanInput(await transcribe(await tg.fileBuffer(msg.voice.file_id), { duration: msg.voice.duration })); }
       catch (e) { logError('stt', e); }
       if (!alive(chatId, s)) return; // /delete во время распознавания: ничего не отвечаем
-      if (!consented(chatId, cycle)) return lateWithdrawn(story ? withCaption(story, caption) : caption);
+      if (!sameConsent(chatId, s, cycle)) return outsideConsent(chatId, s, story ? withCaption(story, caption) : caption);
       if (!story) {
         await tg.send(chatId, TEXT.voiceEmpty);
         return caption ? handleStory(chatId, s, caption, 'text', cycle) : undefined;

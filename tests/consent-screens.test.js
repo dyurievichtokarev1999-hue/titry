@@ -875,3 +875,54 @@ test('голосовое во время доставки: согласие от
   releaseRender(); await p;
   assert.equal(b.n.video, 0, 'ролик после отзыва не уходит');
 });
+
+// QA PR 31 (ef95836): граница рассказа — согласие сменилось, пока бот отправлял эхо или ответ про голосовое.
+test('голосовое: новое согласие во время отправки эха — модель не вызывается, черновика и метрик нет; опасность — экран остановки', async () => {
+  for (const unsafeText of [false, true]) {
+    let release; const gate = new Promise((r) => { release = r; });
+    const b = setup(['pd', 'age'], { transcript: unsafeText ? 'Не хочу жить.' : STORY, sendGate: (t) => (String(t).startsWith('Расшифровка') ? gate : null) });
+    await consentAll(b, ['pd', 'age']);
+    const voice = b.voice();
+    for (let i = 0; i < 50 && !b.texts().some((t) => String(t).startsWith('Расшифровка')); i++) await tick();
+    await consentAll(b, ['pd', 'age']); // новый цикл, пока эхо отправлялось
+    const n = b.sent.length; const events = b.events.length;
+    release(); await voice;
+    assert.equal(b.n.draft, 0, 'модель не вызывается');
+    assert.ok(!b.s().story && !b.s().episode, 'черновик нового цикла не меняется');
+    assert.equal(b.events.length, events, 'метрик нет');
+    const after = b.texts().slice(n);
+    if (unsafeText) assert.deepEqual(after, [helpMessage('urgent')], 'экран остановки');
+    else assert.deepEqual(after, []);
+  }
+});
+
+test('голосовое отклонено (длинное) с подписью: новое согласие во время ответа — подпись не идёт в модель и метрики', async () => {
+  let release; const gate = new Promise((r) => { release = r; });
+  const b = setup(['pd', 'age'], { sendGate: (t) => (t === TEXT.voiceLong ? gate : null) });
+  await consentAll(b, ['pd', 'age']);
+  const voice = b.bot.handleUpdate({ message: { chat: { id: 88001, type: 'private' }, voice: { file_id: 'f9', duration: 100000 }, caption: STORY } });
+  for (let i = 0; i < 50 && !b.texts().includes(TEXT.voiceLong); i++) await tick();
+  await consentAll(b, ['pd', 'age']);
+  const events = b.events.length;
+  release(); await voice;
+  assert.equal(b.n.draft, 0, 'подпись не идёт в модель');
+  assert.equal(b.events.length, events, 'метрик нет');
+  await b.say(STORY); // новый рассказ в новом цикле — обычный путь
+  assert.equal(b.n.draft, 1, 'новый рассказ обрабатывается');
+});
+
+test('рассказ: новое согласие, пока отправлялось «Монтирую…», — модель не вызывается, метрик нет; новый рассказ — обычный путь', async () => {
+  let release; const gate = new Promise((r) => { release = r; });
+  let hold = true;
+  const b = setup(['pd', 'age'], { sendGate: (t) => (hold && t === TEXT.working ? gate : null) });
+  await consentAll(b, ['pd', 'age']);
+  const story = b.say(STORY);
+  for (let i = 0; i < 50 && !b.texts().includes(TEXT.working); i++) await tick();
+  await consentAll(b, ['pd', 'age']);
+  const events = b.events.length;
+  hold = false; release(); await story;
+  assert.equal(b.n.draft, 0, 'модель не вызывается');
+  assert.ok(!b.events.slice(events).includes('draft'), 'метрики draft нет');
+  await b.say(STORY);
+  assert.equal(b.n.draft, 1, 'новый рассказ — обычный путь');
+});
