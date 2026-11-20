@@ -367,7 +367,8 @@ export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), sal
     get trackedUsers() { return generation.size; },
     /** Только для тестов и диагностики: сколько временных копий ждут удаления. */
     get pendingTmpCleanup() { return leftovers.size; },
-    async log(chatId, event, extra = {}) {
+    // allow — проверка вызывающего прямо перед записью в файл, уже в очереди (например, действует ли ещё согласие).
+    async log(chatId, event, extra = {}, { allow } = {}) {
       const h = hash(chatId);
       enter(h);
       try {
@@ -376,6 +377,7 @@ export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), sal
         await fs.mkdir(path.dirname(file), { recursive: true });
         return await serialClean(async () => {
           if ((generation.get(h) || 0) !== gen) return; // человек удалил данные, пока запись ждала
+          if (allow && !allow()) return; // согласие отозвано, пока запись ждала
           await fs.appendFile(file, row);
         });
       } finally { leave(h); }
@@ -475,13 +477,23 @@ export function createBot({
   // Рассказ для проверок безопасности: вместе с правками, отклонёнными по длине (s.overflow, только в памяти).
   // Иначе угрозу можно разбить на две правки у предела: первая отклонена и выпала бы из контекста фильтра.
   const seenStory = (s) => (s.overflow?.length ? `${s.story}${EDIT_SEP}${s.overflow.join(EDIT_SEP)}` : s.story);
-  // Метрики — только при действующем согласии текущей сессии (проверка перед запуском, п. 3): до 6Ж, после отказа,
-  // /start, /delete (сессии нет) и для поздних кнопок старых сообщений запись не делается. Проверка — в момент записи.
+  // Метрики — только при действующем согласии (проверка перед запуском, п. 3): до 6Ж, после отказа, /start, /delete
+  // (сессии нет) и для поздних кнопок старых сообщений запись не делается. Запись привязана к циклу согласия, в котором
+  // началось событие (рассказ, доставка, сообщение во время доставки; новый цикл — только через /start), и проверяется
+  // дважды: при вызове и в очереди прямо перед записью
+  // в файл (QA PR 31, п. 1): /start или «Нет», пришедшие, пока запись ждала, её отменяют.
   // Отложенный сброс относится к своей доставке (forgetGen): после нового согласия и нового рассказа он метрики не держит.
-  const consented = (chatId) => { const s = sessions.get(chatId); return !!s && consentDone(s) && !(s.forgetAfter && s.forgetGen === s.draftId); };
-  const writeMetric = async (chatId, event, data) => { if (consented(chatId)) await metrics.log(chatId, event, data); };
+  const cycleOf = (chatId) => sessions.get(chatId)?.consent?.cycle;
+  const consented = (chatId, cycle) => {
+    const s = sessions.get(chatId);
+    return !!s && consentDone(s) && s.consent.cycle === cycle && !(s.forgetAfter && s.forgetGen === s.draftId);
+  };
+  const writeMetric = async (chatId, event, data, cycle = cycleOf(chatId)) => {
+    if (consented(chatId, cycle)) await metrics.log(chatId, event, data, { allow: () => consented(chatId, cycle) });
+  };
   // Метрики «как получится»: сбой записи (например, ENOSPC) не должен ломать ответ человеку. В журнал — только код.
-  const logMetric = (chatId, event, data) => Promise.resolve().then(() => writeMetric(chatId, event, data)).catch((e) => logError('metrics', e));
+  // Цикл берётся при вызове: событие относится к согласию, действовавшему в этот момент.
+  const logMetric = (chatId, event, data, cycle = cycleOf(chatId)) => Promise.resolve().then(() => writeMetric(chatId, event, data, cycle)).catch((e) => logError('metrics', e));
   // Незавершённые черновики и отдельные проверки участника: их результат может создать запрет уже после /delete.
   const inFlight = new Map();
   const track = async (chatId, p) => {
@@ -529,11 +541,12 @@ export function createBot({
       gate.markSafety(s.scope, s.originalStory || s.story);
     }
   }
-  async function stopForSafety(chatId, s, level, extra = {}) {
+  // cycle — цикл согласия, в котором началось событие (по умолчанию — текущий при вызове, до первого await).
+  async function stopForSafety(chatId, s, level, extra = {}, cycle = cycleOf(chatId)) {
     applyStop(s);
     // Экран остановки — до записи в журнал: сбой или зависание журнала не задерживает помощь.
     try { await tg.send(chatId, helpMessage('urgent')); }
-    finally { try { await writeMetric(chatId, 'safety', { level, ...extra }); } catch (e) { logError('metrics', e); } }
+    finally { try { await writeMetric(chatId, 'safety', { level, ...extra }, cycle); } catch (e) { logError('metrics', e); } }
   }
 
   // Сессия ещё та же: не удалена через /delete и не заменена новой после истечения срока.
@@ -606,6 +619,7 @@ export function createBot({
   const isBlocked = (s, story) => !!(s.blocked && s.blocked.has(storyKey(story)));
 
   async function handleStory(chatId, s, story, source) {
+    const cycle = cycleOf(chatId); // метрики этого рассказа — только в цикле согласия, в котором он пришёл
     const prevStory = seenStory(s); // с правками, отклонёнными по длине: продолжение видит и их
     // Решение 16.11 (б): тревожный обрывок после бытовой формы прежнего текста — продолжение рассказа уровня concern:
     // черновик строится по обоим сообщениям вместе, дальше решает модельная проверка перед рендером.
@@ -624,10 +638,10 @@ export function createBot({
     s.stage = 'drafting';
     // Решение 16.11 (б): однозначное продолжение бытовой формы прежнего текста — остановка. Собственный urgent нового
     // сообщения после рассказа — тоже сразу, до любых отправок (как до разбора QA PR 16).
-    if (cont === 'urgent' || (prevStory && assessRisk(story).level === 'urgent')) return stopForSafety(chatId, s, 'urgent', { at: 'continuation' });
+    if (cont === 'urgent' || (prevStory && assessRisk(story).level === 'urgent')) return stopForSafety(chatId, s, 'urgent', { at: 'continuation' }, cycle);
     const prior = gate.status(s.scope, story);
     if (isBlocked(s, story) || prior.kind === 'safety') {
-      return stopForSafety(chatId, s, 'urgent', { at: 'repeat' });
+      return stopForSafety(chatId, s, 'urgent', { at: 'repeat' }, cycle);
     }
     if (prior.kind) {
       // Хранилище запретов недоступно: черновик не делается, без карточки помощи.
@@ -671,13 +685,13 @@ export function createBot({
     if (r.insufficient) return replyInsufficient(chatId, s, story, gen, current, r.risk && r.risk.level === 'concern', r.code);
     if (!r.episode) {
       // Остановка важнее всего, даже если ответ устарел: рассказ запоминается как запрещённый.
-      if (s.draftId === gen) return stopForSafety(chatId, s, r.risk.level, { byModel: r.risk.byModel });
+      if (s.draftId === gen) return stopForSafety(chatId, s, r.risk.level, { byModel: r.risk.byModel }, cycle);
       s.blocked = s.blocked || new Set();
       s.blocked.add(storyKey(story));
       gate.markSafety(s.scope, story);
       // Если сейчас в работе тот же рассказ или его сбросил повторный /start / отказ, — экран остановки.
       if (s.forgotGen === gen || (s.verdict !== 'blocked' && s.originalStory && storyKey(s.originalStory) === storyKey(story))) {
-        return stopForSafety(chatId, s, r.risk.level, { byModel: r.risk.byModel, at: 'late' });
+        return stopForSafety(chatId, s, r.risk.level, { byModel: r.risk.byModel, at: 'late' }, cycle);
       }
       return;
     }
@@ -685,10 +699,10 @@ export function createBot({
       // Устаревший «можно» молча отбрасывается. Но если тот же рассказ этой сессии тем временем остановлен
       // (например, проверкой прежней сессии до /delete), человек получает карточку помощи, а не тишину.
       if (alive(chatId, s) && (s.forgotGen === gen || (s.verdict !== 'blocked' && s.originalStory && storyKey(s.originalStory) === storyKey(story)))
-        && (isBlocked(s, story) || gate.status(s.scope, story).kind === 'safety')) return stopForSafety(chatId, s, 'urgent', { at: 'late' });
+        && (isBlocked(s, story) || gate.status(s.scope, story).kind === 'safety')) return stopForSafety(chatId, s, 'urgent', { at: 'late' }, cycle);
       return;
     }
-    await logMetric(chatId, 'story', { source, period: s.period, chars: Math.round(story.length / 50) * 50 });
+    await logMetric(chatId, 'story', { source, period: s.period, chars: Math.round(story.length / 50) * 50 }, cycle);
     if (!current()) return;
     if (r.risk.level === 'concern') await tg.send(chatId, helpMessage('concern'));
     // Решение 16.11 (в): флаг модели — мягкий блок с контактами рядом с черновиком, без остановки ролика.
@@ -698,7 +712,7 @@ export function createBot({
     s.verdict = 'ok';
     s.edits = 0;
     s.stage = 'draft';
-    await logMetric(chatId, 'draft', { provider: r.provider, rows: r.episode.rows.length, dropped: (r.dropped || []).length });
+    await logMetric(chatId, 'draft', { provider: r.provider, rows: r.episode.rows.length, dropped: (r.dropped || []).length }, cycle);
     if (!current()) return;
     await showDraft(chatId, s);
   }
@@ -721,7 +735,7 @@ export function createBot({
     const sameStoryInWork = () => alive(chatId, s) && (s.forgotGen === gen || (s.verdict !== 'blocked' && !!s.originalStory && storyKey(s.originalStory) === storyKey(story)));
     const stoppedNow = () => isBlocked(s, story) || gate.status(s.scope, story).kind === 'safety';
     if (!current()) {
-      if (stoppedNow() && sameStoryInWork()) return stopForSafety(chatId, s, 'urgent', { at: 'late' });
+      if (stoppedNow() && sameStoryInWork()) return stopForSafety(chatId, s, 'urgent', { at: 'late' }, cycle);
       return;
     }
     // Модельной проверки здесь нет (решение владельца кода 13.11 15:00): модельная проверка одна — перед рендером, на
@@ -729,10 +743,10 @@ export function createBot({
     const st = gate.status(s.scope, story);
     if (st.kind) { logError('check', { code: st.code }); s.stage = 'idle'; return tg.send(chatId, TEXT.checkUnavailable); }
     s.stage = 'idle'; // заготовка появится только перед самой отправкой реплики (восьмой разбор)
-    await logMetric(chatId, code === INSUFFICIENT_MATERIAL ? INSUFFICIENT_MATERIAL : INSUFFICIENT_AFTER_EXCLUSION);
+    await logMetric(chatId, code === INSUFFICIENT_MATERIAL ? INSUFFICIENT_MATERIAL : INSUFFICIENT_AFTER_EXCLUSION, undefined, cycle);
     if (!current()) {
       // Пока писалась метрика, тот же рассказ остановлен (например, проверкой прежней сессии): карточка помощи, не тишина.
-      if (stoppedNow() && sameStoryInWork()) return stopForSafety(chatId, s, 'urgent', { at: 'late' });
+      if (stoppedNow() && sameStoryInWork()) return stopForSafety(chatId, s, 'urgent', { at: 'late' }, cycle);
       return;
     }
     // Черновика нет, но человек может написать строки сам (вариант 1): правки ложатся на пустую заготовку эпизода
@@ -747,6 +761,7 @@ export function createBot({
     if (s.verdict !== 'ok' || !s.episode) return tg.send(chatId, TEXT.noDraft);
     // Черновик, сброшенный отзывом согласия во время доставки: ▶ не запускает ни проверку, ни рендер.
     if (!consentDone(s) || (s.forgetAfter && s.forgetGen === s.draftId)) return tg.send(chatId, TEXT.noDraft);
+    const cycle = s.consent.cycle; // метрики этой доставки — только в её цикле согласия (QA PR 31, п. 2)
     const risk = assessEpisodeRisk(joinEdits(seenStory(s)), s.episode); // правки — продолжение рассказа для проверки безопасности
     if (risk.level === 'urgent') return stopForSafety(chatId, s, 'urgent', { at: 'render' });
     const v = validateSafeEpisode(s.episode, s.story);
@@ -773,7 +788,7 @@ export function createBot({
     const text = `${joinEdits(story)}\n${episodeToText(ep)}`;
     const g = await track(chatId, gate.verify(s.scope, original, ep, text));
     if (!alive(chatId, s) || s.draftId !== gen) return; // удалённая или заменённая сессия не оживает
-    if (g.kind === 'safety') return stopForSafety(chatId, s, 'urgent', { at: 'check', byModel: !!g.byModel });
+    if (g.kind === 'safety') return stopForSafety(chatId, s, 'urgent', { at: 'check', byModel: !!g.byModel }, cycle);
     if (g.unknown) {
       // «Неизвестно» и после повтора (условие 3): локально чисто — ролик делается; есть concern — ролика нет.
       logError('check', { code: g.code });
@@ -851,17 +866,17 @@ export function createBot({
       if (!(await clearToSend())) return;
       // ready — та же проверка после чтения файла, прямо перед запросом (QA PR 27, п. 2). Загрузка, уже начатая,
       // не отзывается: Telegram не умеет отменить отправку; окно — время одного HTTP-запроса.
-      const sent = await tg.sendVideo(chatId, r.outPath, { caption: 'Конец сцены.', width: 720, height: 1280, duration: Math.round(r.duration), reply_markup: feedbackKeyboard(s.consent?.cycle) }, { ready: clearToSend });
+      const sent = await tg.sendVideo(chatId, r.outPath, { caption: 'Конец сцены.', width: 720, height: 1280, duration: Math.round(r.duration), reply_markup: feedbackKeyboard(cycle) }, { ready: clearToSend });
       if (sent === null) return; // отзыв или отмена во время чтения файла: ролика нет — и метрики render нет
       // /delete во время отправки: после metrics.forget новая запись о человеке не появляется.
       if (!alive(chatId, s)) return;
-      await logMetric(chatId, 'render', { seconds: Math.round(r.seconds), mood: ep.mood, music: ep.music, edits: s.edits || 0 });
+      await logMetric(chatId, 'render', { seconds: Math.round(r.seconds), mood: ep.mood, music: ep.music, edits: s.edits || 0 }, cycle);
       if (current()) s.stage = 'watched';
     } catch (e) {
       release(); // следующая задача и новые запросы — сразу
       const timedOut = e?.code === 'render_timeout';
       // Предел рендера: в журнал и метрики — только код и длительность; новая запись о человеке — только у живой сессии.
-      if (timedOut) { logRenderTimeout('render', e.ms); if (alive(chatId, s)) try { await writeMetric(chatId, 'render_timeout', { ms: Math.round(e.ms) }); } catch (m) { logError('metrics', m); } }
+      if (timedOut) { logRenderTimeout('render', e.ms); if (alive(chatId, s)) try { await writeMetric(chatId, 'render_timeout', { ms: Math.round(e.ms) }, cycle); } catch (m) { logError('metrics', m); } }
       else logError('render', e);
       // Сессия неактуальна (/delete, новый рассказ, отмена доставки) — по отменённой задаче ни одного сообщения.
       if (current() && !(timedOut && cancelled())) {
@@ -947,6 +962,7 @@ export function createBot({
 
   // echo — эхо расшифровки (только при безопасном исходе, после проверки).
   async function duringRender(chatId, s, text, { echo } = {}) {
+    const cycle = cycleOf(chatId); // метрики этого сообщения — в цикле согласия, в котором оно пришло
     let body = String(text || '').trim();
     if (body.startsWith('/')) {
       const cmd = parseCommand(body);
@@ -962,7 +978,7 @@ export function createBot({
     holdDelivery(s, hold, level); // синхронно, до первого await
     const r = await hold;
     if (!alive(chatId, s)) return; // /delete во время проверки: ничего не отвечаем (запрет, если был, остаётся)
-    const logSafety = (extra) => Promise.resolve().then(() => writeMetric(chatId, 'safety', extra)).catch((e) => logError('metrics', e));
+    const logSafety = (extra) => Promise.resolve().then(() => writeMetric(chatId, 'safety', extra, cycle)).catch((e) => logError('metrics', e));
     if (r.kind === 'urgent') {
       // Экран остановки — первым и ни от чего не зависит: эха нет (повторять опасную фразу незачем), метрики — после.
       await sendSafe(chatId, helpMessage('urgent'));
