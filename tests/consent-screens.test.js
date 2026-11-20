@@ -715,3 +715,107 @@ test('отзыв согласия: строки участника удален�
     assert.ok(lines.length > 0 && lines.every((l) => l.user === metrics.hash(91001)), 'остались только строки другого участника');
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
+// QA PR 31 (05d5aba): согласие проверяется и в очереди прямо перед записью; метрика старой доставки — только в её цикле.
+function setupQueued(order, { sendVideo } = {}) {
+  // Подмена очереди метрик: запись ждёт release, затем — как настоящая очередь — спрашивает allow() перед записью.
+  const q = []; const written = [];
+  const sent = [];
+  const metrics = { hash: () => 'qa-fictional', forget: async () => {},
+    log: (c, event, extra, o = {}) => new Promise((done) => q.push(() => { if (!o.allow || o.allow()) written.push(event); done(); })) };
+  const tg = { send: async (c, text) => { sent.push(text); }, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''),
+    sendVideo: sendVideo || (async (c, f, extra, o = {}) => { if (o.ready && !(await o.ready())) return null; }) };
+  const bot = createBot({ tg, metrics, consentOrder: order, safetyCheck: async () => false, checkRetryMs: 0,
+    draft: async () => ({ episode: structuredClone(ex.episode), risk: { level: 'none' }, provider: 'claude', dropped: [] }),
+    render: async (e, o) => ({ seconds: 1, duration: 24, outPath: o.outPath }) });
+  const chat = { id: 88101, type: 'private' };
+  const say = (text) => bot.handleUpdate({ message: { chat, text } });
+  const press = (d) => bot.handleUpdate({ callback_query: { id: 'q', data: /^cs:/.test(d) ? `${d}:${bot.sessions.get(chat.id).consent.cycle}` : d, message: { chat } } });
+  const flush = async () => { while (q.length) q.shift()(); await new Promise((r) => setImmediate(r)); };
+  const consent = async () => { await say('/start'); await press('cs:intro:next'); for (const o of order) await press(`cs:${o}:yes`); };
+  return { bot, chat, say, press, flush, consent, written, q, s: () => bot.sessions.get(chat.id) };
+}
+const tick = () => new Promise((r) => setImmediate(r));
+
+// Выполнить действие бота, освобождая записи метрик, пока оно не завершится (записи ждут в очереди-подмене).
+async function settle(b, p) {
+  let done = false; p.then(() => { done = true; }, () => { done = true; });
+  for (let i = 0; i < 500 && !done; i++) { await b.flush(); }
+  await p;
+}
+
+// «Нет» доступно только после /start, а /start уже сам меняет цикл: отдельного сценария для «Нет» нет.
+test('метрики: /start, пришедший, пока запись ждала в очереди, её отменяет; запись действующего цикла проходит', async () => {
+  const b = setupQueued(['pd', 'age']);
+  await settle(b, b.consent());
+  const story = b.say(STORY);
+  for (let i = 0; i < 50 && !b.q.length; i++) await tick();
+  assert.ok(b.q.length > 0, 'запись story ждёт в очереди');
+  await b.say('/start'); // /start метрик не пишет и очередь не ждёт
+  await settle(b, story);
+  assert.deepEqual(b.written, [], 'ожидавшая запись не прошла');
+  const c = setupQueued(['pd', 'age']);
+  await settle(c, c.consent());
+  await settle(c, c.say(STORY));
+  assert.ok(c.written.includes('story'), 'без отзыва запись проходит');
+});
+
+test('метрики: render старой доставки не пишется в новом цикле согласия; новая доставка — одна запись render', async () => {
+  const b = setupQueued(['pd', 'age']);
+  await settle(b, b.consent());
+  await settle(b, b.say(STORY));
+  const n = b.written.length;
+  const playing = b.press(`play:${b.s().draftId}`);
+  // ждём, пока в очереди окажется запись render (ролик уже отправлен)
+  for (let i = 0; i < 200; i++) { await tick(); if (b.q.length) break; }
+  assert.ok(b.q.length > 0, 'запись render ждёт в очереди');
+  await settle(b, b.consent()); // человек начинает заново и снова соглашается, пока запись ждала
+  await settle(b, playing);
+  assert.ok(!b.written.slice(n).includes('render'), 'render старой доставки не записан');
+  await settle(b, b.say(STORY));
+  await settle(b, b.press(`play:${b.s().draftId}`));
+  assert.equal(b.written.filter((e) => e === 'render').length, 1, 'новая доставка — одна запись render');
+});
+
+test('очередь метрик: allow() проверяется прямо перед записью в файл', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-allow-'));
+  try {
+    const m = makeMetrics(path.join(dir, 'm.jsonl'), 'fictional-salt-0001');
+    let ok = true;
+    const a = m.log(1, 'story', {}, { allow: () => ok });
+    ok = false; // отзыв, пока запись ждала (fs.mkdir, очередь)
+    await a;
+    await m.log(2, 'story', {}, { allow: () => true });
+    const lines = (await fs.readFile(path.join(dir, 'm.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
+    assert.deepEqual(lines.map((l) => l.user), [m.hash(2)]);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+// QA PR 31, п. 2: окно загрузки ролика. Отзыв проверен перед запросом, загрузка уже идёт; человек снова соглашается и
+// присылает новый рассказ (draftId меняется, отложенный сброс больше не держит). Только цикл не пускает render старой доставки.
+test('метрики: render ролика, загруженного до нового согласия и нового рассказа, не пишется в новом цикле', async () => {
+  let release; const upload = new Promise((r) => { release = r; });
+  const b = setupQueued(['pd', 'age'], { sendVideo: async (c, f, extra, o = {}) => { if (o.ready && !(await o.ready())) return null; await upload; return {}; } });
+  await settle(b, b.consent());
+  await settle(b, b.say(STORY));
+  const playing = b.press(`play:${b.s().draftId}`);
+  for (let i = 0; i < 200 && !b.s().delivering; i++) await tick();
+  for (let i = 0; i < 50; i++) await tick(); // ready пройдена, загрузка ждёт
+  await settle(b, b.consent());
+  await settle(b, b.say(STORY)); // новый рассказ в новом цикле
+  const before = b.written.length;
+  release();
+  await settle(b, playing);
+  assert.ok(!b.written.slice(before).includes('render'), 'render старой доставки не записан');
+});
+
+test('метрики: поздняя остановка по рассказу прежнего цикла не пишется в новом цикле; экран помощи показан', async () => {
+  let release; const gate = new Promise((r) => { release = r; });
+  const b = setup(['pd', 'age'], { draftGate: gate, unsafe: true });
+  await consentAll(b, ['pd', 'age']);
+  const story = b.say(STORY);
+  for (let i = 0; i < 50; i++) await tick();
+  await consentAll(b, ['pd', 'age']); // новый цикл, пока модель думала
+  const before = b.events.length;
+  release(); await story;
+  assert.ok(!b.events.slice(before).includes('safety'), 'safety прежнего цикла не записана');
+});
