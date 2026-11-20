@@ -219,3 +219,69 @@ test('монтажная: поздняя остановка по безопас�
   assert.equal(u.el('title').value, ex.episode.title);
   assert.equal(u.el('help').hidden, false); assert.equal(u.el('helpText').textContent, 'ПОМОЩЬ');
 });
+
+// Разбор монтажной 19.11 (impeccable, состояния): пустая форма при открытии — без списка ошибок; сбой примера — сообщение.
+test('монтажная: только что открытая пустая форма без ошибок проверки, рендер выключен; после первой правки — список проверок', async () => {
+  const u = studio(async (p) => (p === '/api/config' ? { provider: 'claude', model: 'm' } : {}));
+  await u.tick();
+  assert.equal(u.el('checks').children.length, 0, 'нет «Нужно название…» при открытии');
+  assert.equal(u.el('renderBtn').disabled, true);
+  u.el('title').value = 'Пробный';
+  u.el('title').listeners.input();
+  assert.ok(u.el('checks').children.length > 0, 'после правки проверки видны');
+  assert.equal(u.el('renderBtn').disabled, true, 'пустые строки — рендер выключен');
+});
+
+test('монтажная: пример не загрузился — сообщение, выбор сброшен (можно выбрать снова)', async () => {
+  const u = studio(async (p) => (p === '/api/config' ? { provider: 'claude', model: 'm' } : p.startsWith('/examples/') ? { status: 500, body: {} } : {}));
+  u.el('example').value = 'day-quiet';
+  await u.el('example').listeners.change(); await u.tick();
+  assert.match(u.el('draftNote').textContent, /Пример не загрузился/);
+  assert.equal(u.el('example').value, '');
+});
+
+// QA PR 30 (46ddbe3): только последний выбор примера меняет форму, селектор и статус.
+function racingStudio() {
+  const pending = {};
+  const u = studio(async (p) => {
+    if (p === '/api/config') return { provider: 'claude', model: 'm' };
+    const m = /^\/examples\/(\w+)\.json$/.exec(p);
+    if (m) return new Promise((r) => { pending[m[1]] = r; });
+    return {};
+  });
+  const pick = (id) => { u.el('example').value = id; return u.el('example').listeners.change(); };
+  return { u, pending, pick };
+}
+const exB = { story: 'Вымышленный рассказ примера B.', episode: { ...structuredClone(ex.episode), title: 'Вымышленный пример B' } };
+
+for (const late of ['поздний успех', 'поздняя ошибка']) {
+  test(`монтажная: A→B, ${late} A не меняет форму, селектор и статус примера B`, async () => {
+    const { u, pending, pick } = racingStudio();
+    const a = pick('A'); await u.tick();
+    const b = pick('B'); await u.tick();
+    pending.B(exB); await b; await u.tick();
+    const note = u.el('draftNote').textContent;
+    pending.A(late === 'поздний успех' ? { story: ex.story, episode: ex.episode } : { status: 500, body: {} }); await a; await u.tick();
+    assert.equal(u.el('example').value, 'B', 'селектор не сброшен');
+    assert.equal(u.el('title').value, 'Вымышленный пример B', 'в форме пример B');
+    assert.equal(u.el('story').value, exB.story);
+    assert.equal(u.el('draftNote').textContent, note, 'статус примера B');
+  });
+}
+
+test('монтажная: одиночный 500, затем повторный выбор того же примера загружает его', async () => {
+  let fail = true;
+  const u = studio(async (p) => {
+    if (p === '/api/config') return { provider: 'claude', model: 'm' };
+    if (p.startsWith('/examples/')) { if (fail) { fail = false; return { status: 500, body: {} }; } return { story: ex.story, episode: ex.episode }; }
+    return {};
+  });
+  u.el('example').value = 'day-quiet';
+  await u.el('example').listeners.change(); await u.tick();
+  assert.equal(u.el('example').value, '');
+  u.el('example').value = 'day-quiet';
+  await u.el('example').listeners.change(); await u.tick();
+  assert.equal(u.el('example').value, 'day-quiet');
+  assert.equal(u.el('title').value, ex.episode.title);
+  assert.equal(u.el('draftNote').textContent, 'Загружен вымышленный пример из прототипа.');
+});
