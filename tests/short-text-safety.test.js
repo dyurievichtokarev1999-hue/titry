@@ -77,7 +77,7 @@ test('«/текст»: неизвестная команда — путь рас
   assert.equal(k.sent.at(-1), CONSENT_TEXT.intro, '«/start» без хвоста начинает подтверждения с 6А (комплект v2, 2.1)');
   const k2 = setup();
   await k2.say('/start@titry_bot');
-  assert.equal(k2.sent.at(-1), TEXT.start);
+  assert.equal(k2.sent.at(-1), CONSENT_TEXT.intro, '«/start@бот» — та же команда /start');
 });
 
 test('однословные формы самоповреждения — urgent (узкое «б»); сообщение целиком «Сдохну» — urgent (решение 16.11)', () => {
@@ -91,7 +91,7 @@ test('однословные формы самоповреждения — urgen
 test('«/START», «//текст», «/cmd» с переводом строки, «/start_x …»', async () => {
   const k = setup();
   await k.say('/START');
-  assert.equal(k.sent.at(-1), TEXT.start);
+  assert.equal(k.sent.at(-1), CONSENT_TEXT.intro, '«/START» — та же команда /start');
   for (const text of ['//порежусь', '/start\nхочу умереть', '/help\nубьюсь', '/start_x убьюсь', '/ хочу умереть']) {
     const b = setup();
     await b.say(text);

@@ -10,24 +10,24 @@ import { helpMessage } from '../server/safety.js';
 
 const ex = JSON.parse(await fs.readFile(new URL('../examples/day-quiet.json', import.meta.url), 'utf8'));
 const ORDERS = [['pd', 'age'], ['age', 'pd']];
-const INVITES = [CONSENT_TEXT.ready, TEXT.year, TEXT.start];
+const INVITES = [CONSENT_TEXT.ready, TEXT.year];
 const STORY = ex.story;
 
-function setup(order, { draftGate, renderGate, unsafe, sendGate } = {}) {
+function setup(order, { draftGate, renderGate, unsafe, sendGate, botName, onForget, check, sendVideoGate, hold } = {}) {
   const sent = [];
   const n = { download: 0, stt: 0, draft: 0, check: 0, story: 0, render: 0, video: 0 };
   const tg = {
     send: async (c, text, extra) => { sent.push({ text, extra }); if (sendGate) await sendGate(text); }, action: async () => {}, answer: async () => {},
     fileBuffer: async () => { n.download++; return Buffer.from('ogg'); },
-    sendVideo: async () => { n.video++; },
+    sendVideo: async (c, f, extra, o = {}) => { if (hold?.video) await hold.video; if (o.ready && !(await o.ready())) return null; n.video++; },
   };
   const events = [];
-  const metrics = { hash: () => 'qa-fictional', log: async (c, event) => { events.push(event); if (event === 'story') n.story++; }, forget: async () => {} };
+  const metrics = { hash: () => 'qa-fictional', log: async (c, event) => { events.push(event); if (event === 'story') n.story++; if (hold?.[event]) await hold[event]; }, forget: async () => { if (onForget) onForget(); } };
   const bot = createBot({
-    tg, metrics, consentOrder: order,
+    tg, metrics, consentOrder: order, botName,
     transcribe: async () => { n.stt++; return STORY; },
     draft: async () => { n.draft++; await draftGate; if (unsafe) return { episode: null, risk: { level: 'urgent', byModel: true } }; return { episode: structuredClone(ex.episode), risk: { level: 'none' }, provider: 'claude', dropped: [] }; },
-    safetyCheck: async () => { n.check++; return false; },
+    safetyCheck: async (t) => { n.check++; return check ? check(t) : false; },
     checkRetryMs: 0,
     render: async (e, o) => { n.render++; await renderGate; return { seconds: 1, duration: 24, outPath: o.outPath }; },
   });
@@ -369,3 +369,217 @@ test('/start, пока отправляется первая часть 6Б: к�
   for (const d of oldPd) await b.bot.handleUpdate({ callback_query: { id: 'q', data: d, message: { chat: { id: 88001, type: 'private' } } } });
   assert.deepEqual(b.s().consent, before, 'кнопка старого 6Б не засчитана');
 });
+
+// Решение Claude 19.11 (справка к комплекту v2.2): отзыв согласия во время подготовки — ролик не уходит.
+test('отзыв согласия во время рендера (/start, «Нет» на 6Б, «Нет» на 6Г, повторные «Да»): ролик не отправляется, рассказ стёрт', async () => {
+  for (const after of [['/start'], ['/start', 'cs:intro:next', 'cs:pd:no'], ['/start', 'cs:intro:next', 'cs:pd:yes', 'cs:age:no'], ['/start', 'cs:intro:next', 'cs:pd:yes', 'cs:age:yes']]) {
+    let release;
+    const b = setup(['pd', 'age'], { renderGate: new Promise((r) => { release = r; }) });
+    const { p } = await delivering(b);
+    for (const x of after) await (x.startsWith('/') ? b.say(x) : b.press(x));
+    release(); await p; await ticks();
+    assert.equal(b.n.render, 1, after.join(' → '));
+    assert.equal(b.n.video, 0, `ролик не отправлен: ${after.join(' → ')}`);
+    for (const k of ['story', 'originalStory', 'episode']) assert.ok(!b.s()[k], `${k}: ${after.join(' → ')}`);
+  }
+});
+
+test('отзыв согласия во время доставки (рендер готов, ролик ждёт проверки сообщения окна): ролик не отправляется', async () => {
+  let releaseRender; let releaseCheck;
+  const renderGate = new Promise((r) => { releaseRender = r; });
+  const held = new Promise((r) => { releaseCheck = r; });
+  const LATE = 'Вечером ещё долго смотрела в окно на дождь.';
+  // Модельная проверка сообщения, пришедшего во время подготовки, задерживает доставку готового ролика.
+  const b = setup(['pd', 'age'], { renderGate, check: async (t) => (t.includes(LATE) ? held.then(() => false) : false) });
+  const { p } = await delivering(b);
+  const late = b.say(LATE); await ticks(); // сообщение окна: доставка ждёт его проверки
+  releaseRender(); await ticks();
+  assert.equal(b.n.video, 0, 'ролик ещё ждёт проверки');
+  await b.say('/start');
+  for (const d of ['cs:intro:next', 'cs:pd:no']) await b.press(d);
+  releaseCheck(); await late; await p; await ticks(100);
+  assert.equal(b.n.render, 1);
+  assert.equal(b.n.video, 0, 'ролик не отправлен');
+  assert.ok(!b.s().story && !b.s().episode);
+});
+
+function setupNamed(botName) {
+  let forgot = 0;
+  const b = setup(['pd', 'age'], { botName, onForget: () => { forgot++; } });
+  return { ...b, forgot: () => forgot };
+}
+
+// Решение Claude 19.11: одна нормализация команд — регистр не важен, «@имя_бота» отрезается только для своего бота.
+test('команды: «/DELETE» и «/delete@бот» удаляют, «/Start@бот» — 6А; «/команда@другой_бот» — не команда; «/» и «//» — без ответа', async () => {
+  for (const cmd of ['/DELETE', '/delete@TitryBot', '/Delete@titrybot']) {
+    const b = setupNamed('TitryBot');
+    await b.say('/start');
+    for (const d of ['cs:intro:next', 'cs:pd:yes', 'cs:age:yes']) await b.press(d);
+    assert.ok(b.s(), 'сессия есть');
+    await b.say(cmd);
+    assert.equal(b.s(), undefined, `${cmd}: сессия удалена`);
+    assert.equal(b.forgot(), 1, `${cmd}: статистика удалена`);
+  }
+  const s = setupNamed('TitryBot');
+  await s.say('/Start@TitryBot');
+  assert.equal(s.texts().at(-1), CONSENT_TEXT.intro);
+  const o = setupNamed('TitryBot');
+  await o.say('/start');
+  for (const d of ['cs:intro:next', 'cs:pd:yes', 'cs:age:yes']) await o.press(d);
+  await o.say('/delete@OtherBot');
+  assert.ok(o.s(), '«/delete@другой_бот» не удаляет');
+  for (const t of ['/', '//']) {
+    const e = setupNamed('TitryBot');
+    await e.say('/start');
+    for (const d of ['cs:intro:next', 'cs:pd:yes', 'cs:age:yes']) await e.press(d);
+    const before = e.sent.length;
+    await e.say(t);
+    assert.equal(e.sent.length, before, `«${t}» — без ответа`);
+  }
+});
+
+// Разбор PR (code-review high, ponytail-review): после отзыва согласия во время подготовки сообщения идут по правилам
+// до 6Ж — без «Собираю ролик», без скачивания и распознавания голоса; старая ▶ не запускает проверку и рендер.
+test('после отзыва во время подготовки: «ок» и голос — не «Собираю ролик», голос не скачивается; старая ▶ — без проверки и рендера', async () => {
+  let release;
+  const b = setup(['pd', 'age'], { renderGate: new Promise((r) => { release = r; }) });
+  const { id, p } = await delivering(b);
+  await b.say('/start');
+  for (const d of ['cs:intro:next', 'cs:pd:no']) await b.press(d);
+  const before = b.sent.length;
+  await b.say('ок');
+  await b.voice();
+  assert.ok(!b.texts().slice(before).includes(TEXT.rendering), 'нет «Собираю ролик»');
+  assert.equal(b.n.download + b.n.stt, 0, 'голос не скачан и не распознан');
+  release(); await p; await ticks();
+  const c = setup(['pd', 'age'], { renderGate: new Promise((r) => { release = r; }) });
+  const d = await delivering(c);
+  await c.say('/start');
+  for (const x of ['cs:intro:next', 'cs:pd:yes', 'cs:age:yes']) await c.press(x);
+  const checks = c.n.check;
+  await c.press(`play:${d.id}`); await ticks();
+  assert.equal(c.n.check, checks, 'старая ▶ не отправляет рассказ на проверку');
+  release(); await d.p; await ticks();
+  assert.equal(c.n.render, 1);
+  assert.equal(c.n.video, 0);
+  void id;
+});
+
+test('новый рассказ после повторных подтверждений во время обречённой доставки не стирается по её окончании', async () => {
+  let release;
+  const b = setup(['pd', 'age'], { renderGate: new Promise((r) => { release = r; }) });
+  const { p } = await delivering(b);
+  await b.say('/start');
+  for (const x of ['cs:intro:next', 'cs:pd:yes', 'cs:age:yes']) await b.press(x);
+  await b.say(STORY); await ticks();
+  assert.ok(b.s().episode, 'новый черновик показан');
+  release(); await p; await ticks();
+  assert.ok(b.s().story && b.s().episode, 'новый рассказ на месте после конца старой доставки');
+  assert.equal(b.n.video, 0, 'старый ролик не ушёл');
+});
+
+test('«/delete@ДругойБот» — без ответа и не рассказ', async () => {
+  const b = setupNamed('TitryBot');
+  await b.say('/start');
+  for (const d of ['cs:intro:next', 'cs:pd:yes', 'cs:age:yes']) await b.press(d);
+  const before = b.sent.length; const drafts = b.n.draft;
+  await b.say('/delete@OtherBot');
+  assert.equal(b.sent.length, before);
+  assert.equal(b.n.draft, drafts);
+  assert.ok(b.s());
+});
+
+test('команда другому боту с хвостом: хвост идёт по пути рассказа (проверка безопасности), не в тишину', async () => {
+  // Модель здесь подменена: проверяем маршрут — хвост дошёл до черновика (там локальный фильтр и модель), ответ есть.
+  for (const t of ['/start@OtherBot убьюсь', '/x@a\nубьюсь', '/start@OtherBot сегодня долго гуляла по парку']) {
+    const b = setupNamed('TitryBot');
+    await b.say('/start');
+    for (const d of ['cs:intro:next', 'cs:pd:yes', 'cs:age:yes']) await b.press(d);
+    const drafts = b.n.draft; const before = b.sent.length;
+    await b.say(t);
+    assert.equal(b.n.draft, drafts + 1, t);
+    assert.ok(b.sent.length > before, `есть ответ: ${t}`);
+  }
+});
+
+// QA PR 27: гонки отмены — сброс согласия до записи метрики; перепроверка перед самой отправкой; правка после отказа.
+test('/start во время доставки при зависшей записи метрики: согласие сброшено сразу, ролик не уходит', async () => {
+  const hold = {};
+  let releaseVideo; hold.video = new Promise((r) => { releaseVideo = r; }); // доставка ждёт у отправки
+  const b = setup(['pd', 'age'], { hold });
+  const { p } = await delivering(b);
+  let releaseLog; hold.start = new Promise((r) => { releaseLog = r; });
+  const start = b.say('/start'); await ticks(5); // запись метрики /start ещё не завершена
+  assert.equal(b.s().consent.step, 'intro', 'согласие сброшено до записи метрики');
+  releaseVideo(); await p; await ticks();
+  assert.equal(b.n.video, 0, 'ролик не ушёл');
+  releaseLog(); await start;
+});
+
+test('отзыв, пока файл ролика читается перед отправкой: запроса на отправку нет', async () => {
+  const hold = {};
+  let releaseVideo; hold.video = new Promise((r) => { releaseVideo = r; });
+  const b = setup(['pd', 'age'], { hold });
+  const { p } = await delivering(b); // рендер готов сразу; доставка ждёт «чтения файла» (hold.video)
+  await ticks();
+  await b.say('/start');
+  for (const d of ['cs:intro:next', 'cs:pd:no']) await b.press(d);
+  const ev = b.events.length;
+  releaseVideo(); await p; await ticks();
+  assert.equal(b.n.video, 0, 'после отзыва отправки нет');
+  assert.ok(!b.events.slice(ev).includes('render'), 'метрики render нет');
+});
+
+test('правка сообщения с опасным текстом после отказа во время доставки: экран остановки, без записи текста и метрики', async () => {
+  let release;
+  const b = setup(['pd', 'age'], { renderGate: new Promise((r) => { release = r; }) });
+  const { p } = await delivering(b);
+  await b.say('/start');
+  for (const d of ['cs:intro:next', 'cs:pd:no']) await b.press(d);
+  const ev = b.events.length;
+  await b.bot.handleUpdate({ edited_message: { chat: { id: 88001, type: 'private' }, text: 'Не хочу жить.' } });
+  assert.equal(b.texts().at(-1), helpMessage('urgent'));
+  assert.notEqual(b.s().story, 'Не хочу жить.', 'текст правки не записан в сессию');
+  assert.deepEqual(b.events.slice(ev), [], 'метрика не записана');
+  release(); await p; await ticks();
+});
+
+test('telegram().sendVideo: ready() после чтения файла вернул false — HTTP-запроса нет; true — запрос есть', async () => {
+  const { telegram } = await import('../server/bot.js');
+  const os = await import('node:os'); const path = await import('node:path');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-sv-'));
+  const file = path.join(dir, 'v.mp4'); await fs.writeFile(file, 'x');
+  const orig = globalThis.fetch; let calls = 0;
+  globalThis.fetch = async () => { calls++; return { json: async () => ({ ok: true, result: {} }) }; };
+  try {
+    const tg = telegram('dummy-not-a-token');
+    assert.equal(await tg.sendVideo(1, file, {}, { ready: () => false }), null);
+    assert.equal(calls, 0, 'запроса нет');
+    await tg.sendVideo(1, file, {}, { ready: () => true });
+    assert.equal(calls, 1, 'запрос есть');
+    assert.equal(await tg.sendVideo(1, file, {}, { ready: async () => false }), null, 'асинхронный ready: false — запроса нет');
+    assert.equal(calls, 1);
+    await tg.sendVideo(1, file, {}, { ready: async () => true });
+    assert.equal(calls, 2, 'асинхронный ready: true — запрос есть');
+  } finally { globalThis.fetch = orig; await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+// QA PR 27, повторная приёмка: проверка сообщения, зарегистрированная, пока читался файл, учитывается до отправки.
+for (const [label, danger, video] of [['опасно — ролика и render нет', true, 0], ['безопасно — ролик уходит', false, 1]]) {
+  test(`сообщение во время чтения файла ролика, проверка моделью: ${label}`, async () => {
+    const hold = {};
+    let releaseVideo; hold.video = new Promise((r) => { releaseVideo = r; });
+    let releaseCheck; const checked = new Promise((r) => { releaseCheck = r; });
+    const LATE = 'Вечером ещё долго смотрела в окно на дождь.';
+    const b = setup(['pd', 'age'], { hold, check: async (t) => (t.includes(LATE) ? checked.then(() => danger) : false) });
+    const { p } = await delivering(b); // рендер готов; доставка «читает файл» (hold.video)
+    await ticks();
+    const late = b.say(LATE); await ticks(); // новая проверка зарегистрирована во время чтения файла
+    const ev = b.events.length;
+    releaseVideo(); await ticks();
+    assert.equal(b.n.video, 0, 'до итога проверки ролик не уходит');
+    releaseCheck(); await late; await p; await ticks(50);
+    assert.equal(b.n.video, video);
+    assert.equal(b.events.slice(ev).includes('render'), video === 1);
+  });
+}
