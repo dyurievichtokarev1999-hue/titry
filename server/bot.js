@@ -682,7 +682,7 @@ export function createBot({
       s.stage = 'idle';
       return tg.send(chatId, TEXT.renderFail);
     }
-    if (r.insufficient) return replyInsufficient(chatId, s, story, gen, current, r.risk && r.risk.level === 'concern', r.code);
+    if (r.insufficient) return replyInsufficient(chatId, s, story, gen, current, r.risk && r.risk.level === 'concern', r.code, cycle);
     if (!r.episode) {
       // Остановка важнее всего, даже если ответ устарел: рассказ запоминается как запрещённый.
       if (s.draftId === gen) return stopForSafety(chatId, s, r.risk.level, { byModel: r.risk.byModel }, cycle);
@@ -728,7 +728,8 @@ export function createBot({
   // сверх 4096 — сначала блок помощи, затем реплика, код message_too_long в журнале; сейчас 256 знаков.
   // Решение владельца 11.11 12:05, п. 4: обычная нехватка у заготовки (insufficient_material) идёт тем же путём
   // и с той же репликой; в метрику — только код причины из закрытого списка.
-  async function replyInsufficient(chatId, s, story, gen, current, concern, code = INSUFFICIENT_AFTER_EXCLUSION) {
+  // cycle — цикл согласия, в котором пришёл рассказ (из handleStory).
+  async function replyInsufficient(chatId, s, story, gen, current, concern, code = INSUFFICIENT_AFTER_EXCLUSION, cycle = cycleOf(chatId)) {
     // Тот же рассказ сейчас в работе и ещё не остановлен: поздняя остановка (как в ветке !r.episode, at: 'late').
     // Без этого два подряд одинаковых рассказа, у первого из которых проверка вернула true, оставляли человека
     // без карточки помощи: первый ответ устарел, у второго current() уже false из-за safety — оба молча выходили.
