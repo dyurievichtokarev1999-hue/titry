@@ -204,7 +204,7 @@ export function applyEdit(ep, cmd) {
       ep.post = cmd.value === '-' || !cmd.value ? { text: '', source: '' } : { text: cmd.value, source: cmd.value, own: true };
       // без обрезки, как в ownRow: опора — полный текст правки; длинную сцену покажет понятная ошибка длины
       return null;
-    default: return 'Правку не получилось разобрать. Примеры — /help.';
+    default: return 'Не понял правку.';
   }
 }
 
