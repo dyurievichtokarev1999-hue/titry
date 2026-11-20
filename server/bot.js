@@ -23,6 +23,8 @@ const WATERMARK = process.env.BOT_WATERMARK ?? 'сделано в титрах';
 
 // Команды бота (setMyCommands). Разбор — parseCommand в createBot: без учёта регистра, «@имя_бота» — только своего бота.
 const KNOWN_COMMANDS = new Set(['start', 'year', 'delete', 'help']);
+// Начало правки черновика: «2:», «2=», «+ …». Короткий текст, который parseEdit не разобрал, — подсказка с /help (без «2.»: так начинаются рассказы-списки).
+const EDIT_START = /^(?:\d{1,2}\s*[:=]|\+)/;
 // Предел, сколько доставка ролика ждёт проверки сообщений, пришедших во время подготовки (страховка от зависания;
 // у самой проверки свой предел и один повтор). По истечении — как «неизвестно» (условие 3).
 export const HOLD_WAIT_MS = 120 * 1000;
@@ -41,16 +43,17 @@ export const TEXT = {
   // ИР-04: очередь заполнена, черновик сохранён. Текст редактора повествования (10.11), дословно.
   busy: 'Сейчас очередь заполнена. Черновик остаётся здесь. Нажми «▶ Смотреть титры» ещё раз чуть позже.',
   voiceOff: 'Голосовые пока не подключены. Напиши, пожалуйста, текстом.',
-  voiceLong: `Голосовое длиннее ${Math.round(MAX_VOICE_SECONDS / 60)} минут. Для одной сцены хватит минуты.`,
+  voiceLong: `Голосовое дольше ${Math.round(MAX_VOICE_SECONDS / 60)} мин. Для одной сцены хватит минуты.`, // «мин.» — без склонения числа
   voiceEmpty: 'Не получилось разобрать голосовое. Можно повторить или написать текстом.',
   tooLong: TOO_LONG_TEXT, // тот же текст, что у draft.js и монтажной
   editExcluded: EDIT_NOT_IN_TITLES_TEXT, // текст — в server/safety.js; окончательный утверждает редактор
   editHelp: [
     'Как поправить:',
-    '<code>2: вечером гуляла в парке</code> — новая строка 2 из твоих слов',
-    '<code>2: Вечером — гуляла в парке</code> — роль и текст',
+    // Примеры без рода: род не угадываем (правило «00 База»).
+    '<code>2: вечером прогулка в парке</code> — новая строка 2 из твоих слов',
+    '<code>2: Вечером — прогулка в парке</code> — роль и текст',
     '<code>-3</code> — убрать строку 3',
-    '<code>+ Ночью — смотрела в окно</code> — добавить строку',
+    '<code>+ Ночью — окно и тишина</code> — добавить строку',
     '<code>название: Письмо, которое ушло</code>',
     '<code>жанр: тихая драма</code>',
     '<code>после: Посуда — до завтра.</code> или <code>после: -</code>',
@@ -68,6 +71,7 @@ export const TEXT = {
   keptSafety: 'Служебная запись об остановке по безопасности сохранена по правилу теста. В ней нет текста рассказа. [срок не утверждён]',
   recordUnknown: 'Проверить состояние служебной записи не получилось. Полное удаление не подтверждено.',
   more: 'Расскажи чуть подробнее: что было, что запомнилось.',
+  editUnparsed: 'Правку не получилось разобрать. Примеры — /help.', // начатая, но не разобранная правка на черновике
   // Модель не ответила и после повтора, в ролике есть локальный concern (условие 3): текст — в server/safety.js.
   tryLater: () => tryLaterMessage(),
   // Голосовое во время подготовки ролика не распознано (условие 2): ролик не отменяется. Текст — в server/safety.js.
@@ -205,7 +209,7 @@ export function applyEdit(ep, cmd) {
       ep.post = cmd.value === '-' || !cmd.value ? { text: '', source: '' } : { text: cmd.value, source: cmd.value, own: true };
       // без обрезки, как в ownRow: опора — полный текст правки; длинную сцену покажет понятная ошибка длины
       return null;
-    default: return 'Не понял правку.';
+    default: return TEXT.editUnparsed;
   }
 }
 
@@ -254,7 +258,7 @@ export function draftMessage(ep, validation) {
   lines.push('', `Плёнка: ${MOODS[ep.mood].film} · музыка: ${TRACKS[ep.music].file ? TRACKS[ep.music].title : 'тишина'}`);
   const problems = validation ? validation.errors : [];
   if (problems.length) lines.push('', ...[...new Set(problems.map(personMessage))].map((m) => `⚠ ${esc(m)}`));
-  lines.push('', 'Похоже на твой день? Любую строку можно поправить.');
+  lines.push('', `Похоже на твой ${ep.period === 'year' ? 'год' : 'день'}? Любую строку можно поправить.`);
   return lines.join('\n');
 }
 
@@ -264,7 +268,9 @@ export function draftKeyboard(ep, draftId = 0) {
   return {
     inline_keyboard: [
       [{ text: '▶ Смотреть титры', callback_data: `play:${draftId}` }],
-      [{ text: `Плёнка: ${nextMood.film}`, callback_data: `mood:${draftId}` }, { text: `Музыка: ${nextMusic.file ? nextMusic.title : 'тишина'}`, callback_data: `music:${draftId}` }],
+      // Кнопки меняют на следующую плёнку и музыку; текущие — в сообщении над ними (раньше подпись «Плёнка: X» путала).
+      [{ text: `Другая плёнка: ${nextMood.film}`, callback_data: `mood:${draftId}` }],
+      [{ text: `Другая музыка: ${nextMusic.file ? nextMusic.title : 'тишина'}`, callback_data: `music:${draftId}` }], // отдельные ряды: название трека не обрезается на телефоне
       [{ text: 'Как поправить строку', callback_data: 'edit' }],
     ],
   };
@@ -1175,6 +1181,9 @@ export function createBot({
         s.stage = 'draft';
         return showDraft(chatId, s);
       }
+      // Короткая начатая, но не разобранная правка («2:», «+ окно»): подсказка вместо «подробнее», черновик остаётся.
+      // Только короткий текст — тот же путь shortText с теми же проверками безопасности; длинный идёт путём рассказа, как раньше.
+      if (text.length < 12 && EDIT_START.test(text)) return shortText(chatId, s, text, TEXT.editUnparsed);
     }
     // «/текст» (решение Claude 11.11 15:05 п. 1): известная команда без хвоста обработана выше; у известной команды
     // с хвостом проверяется хвост, любой другой текст на «/» — путь рассказа (проверка безопасности первой).
@@ -1193,11 +1202,11 @@ export function createBot({
   // Короткий текст (< 12 знаков; PR 15): локальный фильтр ≠ none → путь рассказа (остановка и помощь, без «подробнее»);
   // иначе — «Расскажи чуть подробнее». Модельной проверки коротких текстов нет (решение владельца кода 13.11 15:00):
   // модельная проверка одна — перед рендером. Текст в журнал и метрики не пишется.
-  async function shortText(chatId, s, text) {
+  async function shortText(chatId, s, text, reply = TEXT.more) {
     // Запрещённый раньше текст (например, моделью в окне до отправки) — снова остановка, а не «подробнее».
     // Строчное продолжение бытовой формы (решение 16.11, (б)) — и для коротких сообщений: «и ядом» после «Отравлюсь шавермой.».
     if (assessRisk(text).level !== 'none' || continuationLevel(seenStory(s), text) !== 'none' || isBlocked(s, text) || gate.status(s.scope, text).kind === 'safety') return handleStory(chatId, s, text, 'text');
-    return tg.send(chatId, TEXT.more);
+    return tg.send(chatId, reply);
   }
 
   async function onCallback(q) {
