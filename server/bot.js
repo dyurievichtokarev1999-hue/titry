@@ -582,12 +582,17 @@ export function createBot({
     }
     c.step = 'declined'; // отказ как событие не храним; дальше бот ничего не спрашивает и не напоминает
     forgetStory(s);
-    if (step === 'pd') return tg.send(chatId, CONSENT_TEXT.pdDeclined);
-    // 6Г «Нет»: отметки о согласии удаляются (в памяти — всегда успешно); отметку «младше 18» не храним.
-    const had = Object.keys(c.given).length > 0;
-    c.given = {};
-    await tg.send(chatId, CONSENT_TEXT.ageDeclined);
-    if (had) return tg.send(chatId, CONSENT_TEXT.ageDeleted);
+    // Отзыв согласия = удаление метрик, как /delete (решение Claude 20.11). Запуск — синхронно, до ответов: запись,
+    // уже стоящая в очереди, отбрасывается барьером поколения. Сбой — только код в журнал; ответы человеку прежние.
+    const forgot = (async () => metrics.forget(chatId))().catch((e) => logError('metrics.forget.withdraw', e)); // тело — синхронно
+    try {
+      if (step === 'pd') return await tg.send(chatId, CONSENT_TEXT.pdDeclined);
+      // 6Г «Нет»: отметки о согласии удаляются (в памяти — всегда успешно); отметку «младше 18» не храним.
+      const had = Object.keys(c.given).length > 0;
+      c.given = {};
+      await tg.send(chatId, CONSENT_TEXT.ageDeclined);
+      if (had) return await tg.send(chatId, CONSENT_TEXT.ageDeleted);
+    } finally { await forgot; }
   }
   // Сообщение до конца подтверждений: 6З не чаще раза на шаг; без начатого диалога — 6З и 6А; после отказа — тишина.
   async function preConsent(chatId, s) {

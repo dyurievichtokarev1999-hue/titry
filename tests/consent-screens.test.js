@@ -4,7 +4,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import { createBot, TEXT, splitForTelegram, TELEGRAM_TEXT_LIMIT } from '../server/bot.js';
+import { createBot, TEXT, splitForTelegram, TELEGRAM_TEXT_LIMIT, makeMetrics } from '../server/bot.js';
+import os from 'node:os';
+import path from 'node:path';
 import { CONSENT_TEXT, consentSteps } from '../server/consent.js';
 import { helpMessage } from '../server/safety.js';
 
@@ -648,4 +650,48 @@ test('метрики: новое согласие во время старой �
   await b.say(STORY);
   assert.ok(b.events.slice(before).includes('story'), 'рассказ при новом согласии записан');
   release(); await playing;
+});
+
+// Решение Claude 20.11: отзыв согласия («Нет» на 6Б/6Г после согласия) = удаление метрик, как /delete.
+test('отзыв согласия «Нет» на 6Б и 6Г — метрики участника удаляются; ответы прежние; повторный /start без «Нет» не стирает', async () => {
+  for (const refuse of ['pd', 'age']) {
+    let forgot = 0;
+    const b = setup(['pd', 'age'], { onForget: () => { forgot++; } });
+    await consentAll(b, ['pd', 'age']);
+    await b.say(STORY);
+    assert.ok(b.events.length > 0);
+    await b.say('/start');
+    assert.equal(forgot, 0, '/start сам по себе не стирает');
+    await b.press('cs:intro:next');
+    if (refuse === 'age') await b.press('cs:pd:yes');
+    const n = b.sent.length;
+    await b.press(`cs:${refuse}:no`);
+    assert.equal(forgot, 1, `«Нет» на ${refuse}: метрики удалены`);
+    const expected = refuse === 'pd' ? [CONSENT_TEXT.pdDeclined] : [CONSENT_TEXT.ageDeclined, CONSENT_TEXT.ageDeleted];
+    assert.deepEqual(b.texts().slice(n), expected, 'ответы человеку прежние');
+  }
+});
+
+test('отзыв согласия: строки участника удалены из файла метрик, строки другого участника остаются', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-withdraw-'));
+  try {
+    const metrics = makeMetrics(path.join(dir, 'm.jsonl'), 'fictional-salt-0001');
+    const sent = [];
+    const tg = { send: async (c, text) => { sent.push(text); }, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''), sendVideo: async () => {} };
+    const bot = createBot({ tg, metrics, consentOrder: ['pd', 'age'], safetyCheck: async () => false, checkRetryMs: 0,
+      draft: async () => ({ episode: structuredClone(ex.episode), risk: { level: 'none' }, provider: 'claude', dropped: [] }),
+      render: async (e, o) => ({ seconds: 1, duration: 24, outPath: o.outPath }) });
+    const run = async (id, steps) => {
+      const chat = { id, type: 'private' };
+      const press = (d) => bot.handleUpdate({ callback_query: { id: 'q', data: `${d}:${bot.sessions.get(id).consent.cycle}`, message: { chat } } });
+      await bot.handleUpdate({ message: { chat, text: '/start' } });
+      await press('cs:intro:next'); await press('cs:pd:yes'); await press('cs:age:yes');
+      await bot.handleUpdate({ message: { chat, text: STORY } });
+      for (const st of steps) await (st.startsWith('/') ? bot.handleUpdate({ message: { chat, text: st } }) : press(st));
+    };
+    await run(91001, []);
+    await run(91002, ['/start', 'cs:intro:next', 'cs:pd:no']);
+    const lines = (await fs.readFile(path.join(dir, 'm.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    assert.ok(lines.length > 0 && lines.every((l) => l.user === metrics.hash(91001)), 'остались только строки другого участника');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
