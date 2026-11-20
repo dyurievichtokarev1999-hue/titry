@@ -88,7 +88,9 @@ test('сценарий бота: рассказ → правка → ролик 
   // Настроение не названо → quiet (10.11); кнопка плёнки переключает по кругу quiet → warm.
   assert.equal(rendered[0].mood, 'warm');
   assert.ok(tg.sent.some((m) => m.type === 'video'));
-  await bot.handleUpdate({ callback_query: { id: 'q3', data: 'fb:heavier', message: { chat } } });
+  const fbKb = tg.sent.find((m) => m.type === 'video').extra.reply_markup.inline_keyboard[0];
+  const heavier = fbKb.find((b) => b.callback_data.startsWith('fb:heavier:')).callback_data; // кнопка с меткой цикла согласия
+  await bot.handleUpdate({ callback_query: { id: 'q3', data: heavier, message: { chat } } });
   assert.ok(tg.sent.some((m) => /112/.test(m.text)));
 
   const log = await fs.readFile(path.join(dir, 'm.jsonl'), 'utf8');

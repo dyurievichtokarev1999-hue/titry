@@ -604,14 +604,21 @@ test('метрики после /delete: поздняя кнопка откли�
   await b.press(`play:${b.s().draftId}`);
   assert.equal(b.n.video, 1);
   assert.ok(b.events.includes('story') && b.events.includes('render'), 'после согласия метрики пишутся');
-  await b.press('fb:fit');
+  const cycle = b.s().consent.cycle; // метка в кнопках отклика под роликом
+  await b.press(`fb:fit:${cycle}`);
   assert.equal(b.events.at(-1), 'feedback');
   const before = b.events.length;
   await b.say('/delete');
-  await b.press('fb:heavier'); // кнопка старого сообщения с роликом
+  await b.press(`fb:heavier:${cycle}`); // кнопка старого сообщения с роликом
   await b.say(STORY); await b.say('/year');
   assert.equal(b.events.length, before, 'после /delete записей нет');
   assert.ok(b.texts().includes(helpMessage('concern')), 'помощь по «тяжелее» показана и без записи');
+  // Новое согласие: кнопка старого ролика (прежний цикл) по-прежнему не пишется; новый рассказ — пишется.
+  await consentAll(b, ['pd', 'age']);
+  await b.press(`fb:fit:${cycle}`);
+  assert.equal(b.events.length, before, 'старый ролик после нового согласия не пишется');
+  await b.say(STORY);
+  assert.ok(b.events.length > before, 'при новом согласии метрики пишутся');
 });
 
 test('метрики после отзыва согласия (/start, «Нет»): поздние кнопки и сообщения не пишутся', async () => {
@@ -626,4 +633,19 @@ test('метрики после отзыва согласия (/start, «Нет�
     await b.press('fb:fit'); await b.say(STORY);
     assert.equal(b.events.length, before, withdraw);
   }
+});
+
+test('метрики: новое согласие во время старой доставки — метрики нового рассказа пишутся', async () => {
+  let release; const gate = new Promise((r) => { release = r; });
+  const b = setup(['pd', 'age'], { hold: { video: gate } });
+  await consentAll(b, ['pd', 'age']);
+  await b.say(STORY);
+  const playing = b.press(`play:${b.s().draftId}`);
+  for (let i = 0; i < 20 && !b.s().delivering; i++) await new Promise((r) => setImmediate(r));
+  assert.ok(b.s().delivering, 'доставка идёт');
+  await consentAll(b, ['pd', 'age']); // /start и подтверждения заново, пока ролик доставляется
+  const before = b.events.length;
+  await b.say(STORY);
+  assert.ok(b.events.slice(before).includes('story'), 'рассказ при новом согласии записан');
+  release(); await playing;
 });

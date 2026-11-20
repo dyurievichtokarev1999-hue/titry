@@ -268,13 +268,14 @@ export function draftKeyboard(ep, draftId = 0) {
   };
 }
 
-const FEEDBACK_KB = {
+// Метка цикла согласия в кнопках отклика: отклик пишется в метрики, только если ролик отправлен при текущем согласии.
+const feedbackKeyboard = (cycle) => ({
   inline_keyboard: [[
-    { text: 'Попало', callback_data: 'fb:fit' },
-    { text: 'Не подходит', callback_data: 'fb:miss' },
-    { text: 'Стало тяжелее', callback_data: 'fb:heavier' },
+    { text: 'Попало', callback_data: `fb:fit:${cycle}` },
+    { text: 'Не подходит', callback_data: `fb:miss:${cycle}` },
+    { text: 'Стало тяжелее', callback_data: `fb:heavier:${cycle}` },
   ]],
-};
+});
 
 // ── Метрики без содержимого рассказов ────────────────────────────────────────
 
@@ -470,7 +471,8 @@ export function createBot({
   const seenStory = (s) => (s.overflow?.length ? `${s.story}${EDIT_SEP}${s.overflow.join(EDIT_SEP)}` : s.story);
   // Метрики — только при действующем согласии текущей сессии (проверка перед запуском, п. 3): до 6Ж, после отказа,
   // /start, /delete (сессии нет) и для поздних кнопок старых сообщений запись не делается. Проверка — в момент записи.
-  const consented = (chatId) => { const s = sessions.get(chatId); return !!s && consentDone(s) && !s.forgetAfter; };
+  // Отложенный сброс относится к своей доставке (forgetGen): после нового согласия и нового рассказа он метрики не держит.
+  const consented = (chatId) => { const s = sessions.get(chatId); return !!s && consentDone(s) && !(s.forgetAfter && s.forgetGen === s.draftId); };
   const writeMetric = async (chatId, event, data) => { if (consented(chatId)) await metrics.log(chatId, event, data); };
   // Метрики «как получится»: сбой записи (например, ENOSPC) не должен ломать ответ человеку. В журнал — только код.
   const logMetric = (chatId, event, data) => Promise.resolve().then(() => writeMetric(chatId, event, data)).catch((e) => logError('metrics', e));
@@ -843,7 +845,7 @@ export function createBot({
       if (!(await clearToSend())) return;
       // ready — та же проверка после чтения файла, прямо перед запросом (QA PR 27, п. 2). Загрузка, уже начатая,
       // не отзывается: Telegram не умеет отменить отправку; окно — время одного HTTP-запроса.
-      const sent = await tg.sendVideo(chatId, r.outPath, { caption: 'Конец сцены.', width: 720, height: 1280, duration: Math.round(r.duration), reply_markup: FEEDBACK_KB }, { ready: clearToSend });
+      const sent = await tg.sendVideo(chatId, r.outPath, { caption: 'Конец сцены.', width: 720, height: 1280, duration: Math.round(r.duration), reply_markup: feedbackKeyboard(s.consent?.cycle) }, { ready: clearToSend });
       if (sent === null) return; // отзыв или отмена во время чтения файла: ролика нет — и метрики render нет
       // /delete во время отправки: после metrics.forget новая запись о человеке не появляется.
       if (!alive(chatId, s)) return;
@@ -991,9 +993,9 @@ export function createBot({
 
     const cmd = parseCommand(text);
     const bare = cmd && !cmd.tail && KNOWN_COMMANDS.has(cmd.name) ? cmd.name : null; // «/DELETE», «/delete@бот» — как «/delete»
-    // Сброс согласия — синхронно, до записи метрики (QA PR 27, п. 1): идущая доставка сразу видит отзыв.
-    // startConsent меняет состояние синхронно, до первого await; метрика пишется параллельно («как получится»).
-    if (bare === 'start') { s.stage = 'idle'; s.period = 'day'; const logged = logMetric(chatId, 'start'); try { return await startConsent(chatId, s); } finally { await logged; } }
+    // Сброс согласия — синхронно (QA PR 27, п. 1): идущая доставка сразу видит отзыв.
+    // /start всегда начинает подтверждения заново: до нового согласия метрик нет, событие «start» не пишется.
+    if (bare === 'start') { s.stage = 'idle'; s.period = 'day'; return startConsent(chatId, s); }
     if (bare === 'year') {
       s.stage = 'idle'; s.period = 'year';
       const logged = logMetric(chatId, 'year');
@@ -1197,8 +1199,9 @@ export function createBot({
     const data = q.data || '';
     if (data.startsWith('cs:')) return onConsent(chatId, s, data);
     if (data.startsWith('fb:')) {
-      const v = data.slice(3);
-      await logMetric(chatId, 'feedback', { value: v });
+      const [, v, cycle] = data.split(':');
+      // Отклик на ролик прежнего согласия (после /delete, /start, отказа) в метрики не пишется; ответ — как обычно.
+      if (cycle && cycle === String(s.consent?.cycle)) await logMetric(chatId, 'feedback', { value: v });
       if (v === 'heavier') { await tg.send(chatId, TEXT.heavier); return tg.send(chatId, helpMessage('concern')); }
       return tg.send(chatId, v === 'fit' ? TEXT.fit : TEXT.miss);
     }
