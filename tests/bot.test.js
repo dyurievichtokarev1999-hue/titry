@@ -136,3 +136,38 @@ test('тексты: «Похоже на твой год» для /year; прим
   const kb = draftKeyboard(episode, 1).inline_keyboard.flat().map((b) => b.text);
   assert.ok(kb.some((t) => t.startsWith('Другая плёнка')) && kb.some((t) => t.startsWith('Другая музыка')));
 });
+
+// QA PR 29 (faad2b1): начатая, но не разобранная правка на черновике — подсказка с /help, черновик остаётся;
+// сигнал безопасности — путь рассказа (остановка); обычный рассказ — как рассказ.
+test('черновик: короткие «2:» и «+ окно» — подсказка, черновик на месте; длинный «+ …» — путь рассказа; «+ не хочу жить» — остановка', async () => {
+  const tg = fakeTelegram();
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-test-'));
+  const bot = createBot({ safetyCheck: async () => false, tg, metrics: makeMetrics(path.join(dir, 'm.jsonl'), 'salt'), render: async () => { throw new Error('не должно вызываться'); }, draft: (s, o) => import('../server/draft.js').then((m) => m.makeDraft(s, { ...o, provider: 'manual' })) });
+  const chat = { id: 4242, type: 'private' };
+  await bot.handleUpdate({ message: { chat, text: '/start' } });
+  await bot.handleUpdate({ message: { chat, text: 'Сегодня я долго правил письмо и отправил его. Вечером позвонил друг. Потом ужин и сериал.' } });
+  await bot.handleUpdate({ message: { chat, text: '+ Утром — я отправил письмо' } });
+  const draft = structuredClone(bot.sessions.get(4242).episode);
+  for (const t of ['2:', '+ окно']) {
+    const n = tg.sent.length;
+    await bot.handleUpdate({ message: { chat, text: t } });
+    assert.deepEqual(tg.sent.slice(n).map((m) => m.text), [TEXT.editUnparsed], t);
+    assert.deepEqual(bot.sessions.get(4242).episode, draft, `черновик не изменился: ${t}`);
+  }
+  assert.match(TEXT.editUnparsed, /\/help/);
+  let n = tg.sent.length;
+  // Длинный текст на «+» без тире — путь рассказа (там и модельная проверка перед роликом), не подсказка.
+  await bot.handleUpdate({ message: { chat, text: '+5 утром, я весь день гулял по парку и думал о работе' } });
+  assert.ok(tg.sent.length > n && !tg.sent.slice(n).some((m) => m.text === TEXT.editUnparsed), 'длинный «+ …» — не подсказка');
+  n = tg.sent.length;
+  await bot.handleUpdate({ message: { chat, text: '+ не хочу больше жить' } });
+  assert.ok(tg.sent.slice(n).some((m) => m.text === helpMessage('urgent')), 'остановка, а не подсказка');
+  // Обычный рассказ на другом чате с черновиком — путь рассказа, не подсказка.
+  const chat2 = { id: 4243, type: 'private' };
+  await bot.handleUpdate({ message: { chat: chat2, text: '/start' } });
+  await bot.handleUpdate({ message: { chat: chat2, text: 'Сегодня я долго правил письмо и отправил его. Вечером позвонил друг. Потом ужин и сериал.' } });
+  await bot.handleUpdate({ message: { chat: chat2, text: '+ Утром — я отправил письмо' } });
+  n = tg.sent.length;
+  await bot.handleUpdate({ message: { chat: chat2, text: 'Сегодня был длинный день, я гулял в парке и думал о работе.' } });
+  assert.ok(!tg.sent.slice(n).some((m) => m.text === TEXT.editUnparsed), 'рассказ — не подсказка');
+});
