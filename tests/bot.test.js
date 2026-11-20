@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { TEXT, applyEdit, draftMessage, makeMetrics, parseEdit } from '../server/bot.js';
+import { TEXT, applyEdit, draftMessage, draftKeyboard, makeMetrics, parseEdit } from '../server/bot.js';
 import { createBot } from './helpers/consent.js'; // подтверждения 6А–6Ж пройдены (хелпер)
 import { draftRuleBased } from '../server/draft.js';
 import { helpMessage } from '../server/safety.js';
@@ -124,4 +124,50 @@ test('метрики: проверка id не путает время «:42» �
     assert.ok(!logHasValue(log, 42), 'id чата в открытом виде нет');
     assert.ok(logHasValue(log, metrics.hash(42)), 'вместо id — хэш');
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+// Разбор текстов бота 19.11 (impeccable, clarify): «день/год», примеры правки без рода, понятная ошибка правки.
+test('тексты: «Похоже на твой год» для /year; примеры правки без рода; голос — «мин.» без склонения', async () => {
+  const { episode } = JSON.parse(await fs.readFile(new URL('../examples/day-quiet.json', import.meta.url), 'utf8'));
+  assert.match(draftMessage({ ...episode, period: 'year' }), /Похоже на твой год\?/);
+  assert.match(draftMessage(episode), /Похоже на твой день\?/);
+  assert.ok(!/гуляла|смотрела/.test(TEXT.editHelp), 'в примерах нет рода');
+  assert.match(TEXT.voiceLong, /дольше \d+ мин\./);
+  const kb = draftKeyboard(episode, 1).inline_keyboard.flat().map((b) => b.text);
+  assert.ok(kb.some((t) => t.startsWith('Другая плёнка')) && kb.some((t) => t.startsWith('Другая музыка')));
+});
+
+// QA PR 29 (faad2b1): начатая, но не разобранная правка на черновике — подсказка с /help, черновик остаётся;
+// сигнал безопасности — путь рассказа (остановка); обычный рассказ — как рассказ.
+test('черновик: короткие «2:» и «+ окно» — подсказка, черновик на месте; длинный «+ …» — путь рассказа; «+ не хочу жить» — остановка', async () => {
+  const tg = fakeTelegram();
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-test-'));
+  const bot = createBot({ safetyCheck: async () => false, tg, metrics: makeMetrics(path.join(dir, 'm.jsonl'), 'salt'), render: async () => { throw new Error('не должно вызываться'); }, draft: (s, o) => import('../server/draft.js').then((m) => m.makeDraft(s, { ...o, provider: 'manual' })) });
+  const chat = { id: 4242, type: 'private' };
+  await bot.handleUpdate({ message: { chat, text: '/start' } });
+  await bot.handleUpdate({ message: { chat, text: 'Сегодня я долго правил письмо и отправил его. Вечером позвонил друг. Потом ужин и сериал.' } });
+  await bot.handleUpdate({ message: { chat, text: '+ Утром — я отправил письмо' } });
+  const draft = structuredClone(bot.sessions.get(4242).episode);
+  for (const t of ['2:', '+ окно']) {
+    const n = tg.sent.length;
+    await bot.handleUpdate({ message: { chat, text: t } });
+    assert.deepEqual(tg.sent.slice(n).map((m) => m.text), [TEXT.editUnparsed], t);
+    assert.deepEqual(bot.sessions.get(4242).episode, draft, `черновик не изменился: ${t}`);
+  }
+  assert.match(TEXT.editUnparsed, /\/help/);
+  let n = tg.sent.length;
+  // Длинный текст на «+» без тире — путь рассказа (там и модельная проверка перед роликом), не подсказка.
+  await bot.handleUpdate({ message: { chat, text: '+5 утром, я весь день гулял по парку и думал о работе' } });
+  assert.ok(tg.sent.length > n && !tg.sent.slice(n).some((m) => m.text === TEXT.editUnparsed), 'длинный «+ …» — не подсказка');
+  n = tg.sent.length;
+  await bot.handleUpdate({ message: { chat, text: '+ не хочу больше жить' } });
+  assert.ok(tg.sent.slice(n).some((m) => m.text === helpMessage('urgent')), 'остановка, а не подсказка');
+  // Обычный рассказ на другом чате с черновиком — путь рассказа, не подсказка.
+  const chat2 = { id: 4243, type: 'private' };
+  await bot.handleUpdate({ message: { chat: chat2, text: '/start' } });
+  await bot.handleUpdate({ message: { chat: chat2, text: 'Сегодня я долго правил письмо и отправил его. Вечером позвонил друг. Потом ужин и сериал.' } });
+  await bot.handleUpdate({ message: { chat: chat2, text: '+ Утром — я отправил письмо' } });
+  n = tg.sent.length;
+  await bot.handleUpdate({ message: { chat: chat2, text: 'Сегодня был длинный день, я гулял в парке и думал о работе.' } });
+  assert.ok(!tg.sent.slice(n).some((m) => m.text === TEXT.editUnparsed), 'рассказ — не подсказка');
 });
