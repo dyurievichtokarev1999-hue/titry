@@ -15,12 +15,12 @@ const ORDERS = [['pd', 'age'], ['age', 'pd']];
 const INVITES = [CONSENT_TEXT.ready, TEXT.year];
 const STORY = ex.story;
 
-function setup(order, { draftGate, renderGate, unsafe, sendGate, botName, onForget, check, sendVideoGate, hold, transcribeGate, transcript = STORY } = {}) {
+function setup(order, { draftGate, renderGate, unsafe, sendGate, botName, onForget, check, sendVideoGate, hold, transcribeGate, transcript = STORY, actionGate, downloadGate } = {}) {
   const sent = [];
   const n = { download: 0, stt: 0, draft: 0, check: 0, story: 0, render: 0, video: 0 };
   const tg = {
-    send: async (c, text, extra) => { sent.push({ text, extra }); if (sendGate) await sendGate(text); }, action: async () => {}, answer: async () => {},
-    fileBuffer: async () => { n.download++; return Buffer.from('ogg'); },
+    send: async (c, text, extra) => { sent.push({ text, extra }); if (sendGate) await sendGate(text); }, action: async () => { await actionGate; }, answer: async () => {},
+    fileBuffer: async () => { n.download++; await downloadGate; return Buffer.from('ogg'); },
     sendVideo: async (c, f, extra, o = {}) => { if (hold?.video) await hold.video; if (o.ready && !(await o.ready())) return null; n.video++; },
   };
   const events = [];
@@ -925,4 +925,47 @@ test('рассказ: новое согласие, пока отправляло
   assert.ok(!b.events.slice(events).includes('draft'), 'метрики draft нет');
   await b.say(STORY);
   assert.equal(b.n.draft, 1, 'новый рассказ — обычный путь');
+});
+
+// QA PR 31 (be03e4e): граница скачивания и распознавания голосового.
+test('голосовое: /start, пока показывался индикатор, — ни скачивания, ни распознавания, ни модели', async () => {
+  let release; const gate = new Promise((r) => { release = r; });
+  let hold = false;
+  const b = setup(['pd', 'age'], { actionGate: { then: (r) => (hold ? gate.then(r) : r()) } });
+  await consentAll(b, ['pd', 'age']);
+  hold = true;
+  const voice = b.voice(); await tick();
+  hold = false;
+  await b.say('/start');
+  release(); await voice;
+  assert.deepEqual({ download: b.n.download, stt: b.n.stt, draft: b.n.draft }, { download: 0, stt: 0, draft: 0 });
+});
+
+test('голосовое: /delete или /start во время скачивания — распознавание не запускается; /delete — без ответа', async () => {
+  for (const cmd of ['/delete', '/start']) {
+    for (const busy of [false, true]) {
+      let release; const gate = new Promise((r) => { release = r; });
+      let hold = false;
+      const b = setup(['pd', 'age'], { downloadGate: { then: (r) => (hold ? gate.then(r) : r()) }, renderGate: busy ? new Promise(() => {}) : undefined });
+      if (busy) await delivering(b); else await consentAll(b, ['pd', 'age']);
+      hold = true;
+      const voice = b.voice();
+      for (let i = 0; i < 50 && !b.n.download; i++) await tick();
+      assert.equal(b.n.download, 1, 'скачивание началось');
+      hold = false;
+      await b.say(cmd);
+      const n = b.sent.length; const events = b.events.length;
+      release(); await voice;
+      assert.equal(b.n.stt, 0, `${cmd}${busy ? ' (доставка)' : ''}: распознавание не запускается`);
+      assert.equal(b.events.length, events, 'метрик нет');
+      if (cmd === '/delete') assert.deepEqual(b.texts().slice(n), [], '/delete — без ответа');
+    }
+  }
+});
+
+test('голосовое при действующем согласии: скачивание, распознавание и черновик — как обычно', async () => {
+  const b = setup(['pd', 'age']);
+  await consentAll(b, ['pd', 'age']);
+  await b.voice();
+  assert.deepEqual({ download: b.n.download, stt: b.n.stt, draft: b.n.draft }, { download: 1, stt: 1, draft: 1 });
 });
