@@ -683,6 +683,9 @@ test('отзыв согласия: удаление метрик не подтв
   const n = b.sent.length;
   try { await b.press('cs:pd:no'); } finally { console.error = orig; }
   assert.deepEqual(b.texts().slice(n), [CONSENT_TEXT.pdDeclined, TEXT.withdrawForgetFailed]);
+  // Текст редактора (ПРАВКА-ЗАПРОС 21.11) — литералом; «/delete» отдельным словом, без знаков препинания рядом.
+  assert.equal(TEXT.withdrawForgetFailed, 'Пока не удалось подтвердить удаление твоей статистики. Чтобы повторить запрос, отправь /delete чуть позже.');
+  assert.match(TEXT.withdrawForgetFailed, / \/delete /);
   assert.match(errs.join('\n'), /metrics\.forget\.withdraw/);
   assert.ok(!errs.join('\n').includes('88001'), 'идентификатора чата в журнале нет');
 });
