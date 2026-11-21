@@ -80,6 +80,8 @@ export const TEXT = {
   checkUnavailable: 'Ролик задерживается: сервис не завершил проверку. Сейчас отправить его не получится. Ждать в чате и отвечать на это сообщение не нужно.',
   // Черновик текста, на вычитку редактору повествования: честно, без «всё удалено», без обещаний сроков.
   deleteFailed: 'Сессия удалена, а удаление статистики по тебе подтвердить не получилось. Попробуй /delete ещё раз чуть позже.',
+  // Отзыв согласия: удаление статистики не подтверждено. Текст редактора повествования (ПРАВКА-ЗАПРОС 21.11), дословно.
+  withdrawForgetFailed: 'Пока не удалось подтвердить удаление твоей статистики. Чтобы повторить запрос, отправь /delete чуть позже.',
   renderFail: 'Не получилось собрать ролик. Попробуй ещё раз чуть позже.',
   draftFail: 'Не получилось собрать черновик. Попробуй ещё раз чуть позже.',
   // Внутренняя причина insufficient_after_exclusion (редактор повествования), дословно: только эта реплика —
@@ -602,14 +604,21 @@ export function createBot({
       if (step === 'pd') c.given.pd = { at: now().toISOString(), version: CONSENT_VERSION };
       return consentScreen(chatId, s, next);
     }
+    if (answer !== 'no') return; // отказ — только кнопка «Нет»; иное значение кнопки ничего не делает
     c.step = 'declined'; // отказ как событие не храним; дальше бот ничего не спрашивает и не напоминает
     forgetStory(s);
-    if (step === 'pd') return tg.send(chatId, CONSENT_TEXT.pdDeclined);
-    // 6Г «Нет»: отметки о согласии удаляются (в памяти — всегда успешно); отметку «младше 18» не храним.
-    const had = Object.keys(c.given).length > 0;
-    c.given = {};
-    await tg.send(chatId, CONSENT_TEXT.ageDeclined);
-    if (had) return tg.send(chatId, CONSENT_TEXT.ageDeleted);
+    // Отзыв согласия = удаление метрик, как /delete (решение Claude 20.11). Запуск — синхронно, до ответов: запись,
+    // уже стоящая в очереди, отбрасывается барьером поколения. Сбой — код в журнал и честное сообщение после ответов.
+    const forgot = (async () => metrics.forget(chatId))().then(() => true, (e) => { logError('metrics.forget.withdraw', e); return false; }); // тело — синхронно
+    if (step === 'pd') await tg.send(chatId, CONSENT_TEXT.pdDeclined);
+    else {
+      // 6Г «Нет»: отметки о согласии удаляются (в памяти — всегда успешно); отметку «младше 18» не храним.
+      const had = Object.keys(c.given).length > 0;
+      c.given = {};
+      await tg.send(chatId, CONSENT_TEXT.ageDeclined);
+      if (had) await tg.send(chatId, CONSENT_TEXT.ageDeleted);
+    }
+    if (!(await forgot)) return tg.send(chatId, TEXT.withdrawForgetFailed);
   }
   // Сообщение до конца подтверждений: 6З не чаще раза на шаг; без начатого диалога — 6З и 6А; после отказа — тишина.
   async function preConsent(chatId, s) {

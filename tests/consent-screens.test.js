@@ -652,6 +652,72 @@ test('метрики: новое согласие во время старой �
   release(); await playing;
 });
 
+// Решение Claude 20.11: отзыв согласия («Нет» на 6Б/6Г после согласия) = удаление метрик, как /delete.
+test('отзыв согласия «Нет» на 6Б и 6Г — метрики участника удаляются; ответы прежние; повторный /start без «Нет» не стирает', async () => {
+  for (const order of ORDERS) for (const refuse of ['pd', 'age']) {
+    let forgot = 0;
+    const b = setup(order, { onForget: () => { forgot++; } });
+    await consentAll(b, order);
+    await b.say(STORY);
+    assert.ok(b.events.length > 0);
+    await b.say('/start');
+    assert.equal(forgot, 0, '/start сам по себе не стирает');
+    await b.press('cs:intro:next');
+    for (const st of order) { if (st === refuse) break; await b.press(`cs:${st}:yes`); }
+    await b.press(`cs:${refuse}:maybe`); // не «Нет»: ничего не происходит
+    assert.equal(forgot, 0, 'иное значение кнопки — не отказ');
+    const n = b.sent.length;
+    await b.press(`cs:${refuse}:no`);
+    assert.equal(forgot, 1, `«Нет» на ${refuse}: метрики удалены`);
+    const hadPd = order.indexOf('pd') < order.indexOf(refuse);
+    const expected = refuse === 'pd' ? [CONSENT_TEXT.pdDeclined] : [CONSENT_TEXT.ageDeclined, ...(hadPd ? [CONSENT_TEXT.ageDeleted] : [])];
+    assert.deepEqual(b.texts().slice(n), expected, `ответы человеку прежние: ${order.join('→')}, «Нет» на ${refuse}`);
+  }
+});
+
+test('отзыв согласия: удаление метрик не подтверждено — ответы прежние, затем честное сообщение; в журнале только код', async () => {
+  const b = setup(['pd', 'age'], { onForget: () => { throw Object.assign(new Error('x'), { code: 'EIO' }); } });
+  await consentAll(b, ['pd', 'age']);
+  await b.say('/start'); await b.press('cs:intro:next');
+  const errs = []; const orig = console.error; console.error = (l) => errs.push(String(l));
+  const n = b.sent.length;
+  try { await b.press('cs:pd:no'); } finally { console.error = orig; }
+  assert.deepEqual(b.texts().slice(n), [CONSENT_TEXT.pdDeclined, TEXT.withdrawForgetFailed]);
+  // Текст редактора (ПРАВКА-ЗАПРОС 21.11) — литералом; «/delete» отдельным словом, без знаков препинания рядом.
+  assert.equal(TEXT.withdrawForgetFailed, 'Пока не удалось подтвердить удаление твоей статистики. Чтобы повторить запрос, отправь /delete чуть позже.');
+  assert.match(TEXT.withdrawForgetFailed, / \/delete /);
+  assert.match(errs.join('\n'), /metrics\.forget\.withdraw/);
+  assert.ok(!errs.join('\n').includes('88001'), 'идентификатора чата в журнале нет');
+});
+
+test('отзыв согласия: строки участника удалены из файла метрик, строки другого участника остаются', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-withdraw-'));
+  try {
+    const metrics = makeMetrics(path.join(dir, 'm.jsonl'), 'fictional-salt-0001');
+    const sent = [];
+    const tg = { send: async (c, text) => { sent.push(text); }, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''), sendVideo: async () => {} };
+    const bot = createBot({ tg, metrics, consentOrder: ['pd', 'age'], safetyCheck: async () => false, checkRetryMs: 0,
+      draft: async () => ({ episode: structuredClone(ex.episode), risk: { level: 'none' }, provider: 'claude', dropped: [] }),
+      render: async (e, o) => ({ seconds: 1, duration: 24, outPath: o.outPath }) });
+    const run = async (id, steps) => {
+      const chat = { id, type: 'private' };
+      const press = (d) => bot.handleUpdate({ callback_query: { id: 'q', data: `${d}:${bot.sessions.get(id).consent.cycle}`, message: { chat } } });
+      await bot.handleUpdate({ message: { chat, text: '/start' } });
+      await press('cs:intro:next'); await press('cs:pd:yes'); await press('cs:age:yes');
+      await bot.handleUpdate({ message: { chat, text: STORY } });
+      for (const st of steps) await (st.startsWith('/') ? bot.handleUpdate({ message: { chat, text: st } }) : press(st));
+    };
+    await run(91001, []);
+    await run(91002, []);
+    const before = (await fs.readFile(path.join(dir, 'm.jsonl'), 'utf8')).split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    assert.ok(before.some((l) => l.user === metrics.hash(91002)), 'до отзыва строки участника есть');
+    const chat = { id: 91002, type: 'private' };
+    await bot.handleUpdate({ message: { chat, text: '/start' } });
+    for (const d of ['cs:intro:next', 'cs:pd:no']) await bot.handleUpdate({ callback_query: { id: 'q', data: `${d}:${bot.sessions.get(91002).consent.cycle}`, message: { chat } } });
+    const lines = (await fs.readFile(path.join(dir, 'm.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    assert.ok(lines.length > 0 && lines.every((l) => l.user === metrics.hash(91001)), 'остались только строки другого участника');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
 // QA PR 31 (05d5aba): согласие проверяется и в очереди прямо перед записью; метрика старой доставки — только в её цикле.
 function setupQueued(order, { sendVideo } = {}) {
   // Подмена очереди метрик: запись ждёт release, затем — как настоящая очередь — спрашивает allow() перед записью.
