@@ -1091,7 +1091,10 @@ export function createBot({
           let story = '';
           try {
             Promise.resolve().then(() => tg.action(chatId, 'typing')).catch((e) => logError('send', e)); // не ждём
-            story = cleanInput(await transcribe(await tg.fileBuffer(msg.voice.file_id), { duration: msg.voice.duration }));
+            const buf = await tg.fileBuffer(msg.voice.file_id);
+            // Согласие сменилось или сессию удалили, пока скачивался файл: распознавание не запускается (QA PR 31 be03e4e).
+            if (!sameConsent(chatId, s, cycle)) return outsideConsent(chatId, s, caption);
+            story = cleanInput(await transcribe(buf, { duration: msg.voice.duration }));
           } catch (e) { logError('stt', e); }
           story = String(story || '').trim();
           if (!alive(chatId, s)) return;
@@ -1114,9 +1117,15 @@ export function createBot({
         return caption ? handleStory(chatId, s, caption, 'text', cycle) : undefined; // подпись — тот же путь, что текст
       }
       await tg.action(chatId, 'typing');
+      // Граница скачивания и распознавания (QA PR 31 be03e4e): согласие сменилось или сессию удалили — ни скачивания,
+      // ни распознавания; во время скачивания — распознавание не запускается.
+      if (!sameConsent(chatId, s, cycle)) return outsideConsent(chatId, s, caption);
       let story = '';
-      try { story = cleanInput(await transcribe(await tg.fileBuffer(msg.voice.file_id), { duration: msg.voice.duration })); }
-      catch (e) { logError('stt', e); }
+      try {
+        const buf = await tg.fileBuffer(msg.voice.file_id);
+        if (!sameConsent(chatId, s, cycle)) return outsideConsent(chatId, s, caption);
+        story = cleanInput(await transcribe(buf, { duration: msg.voice.duration }));
+      } catch (e) { logError('stt', e); }
       if (!alive(chatId, s)) return; // /delete во время распознавания: ничего не отвечаем
       if (!sameConsent(chatId, s, cycle)) return outsideConsent(chatId, s, story ? withCaption(story, caption) : caption);
       if (!story) {
