@@ -37,7 +37,7 @@ test('п. 6: metrics.log бросает ENOSPC — человек получае
     assert.equal(video, 1);
     assert.ok(!sent.some((x) => x.text === TEXT.renderFail), 'нет «Не получилось собрать ролик»');
   } finally { console.error = orig; await fs.rm(dir, { recursive: true, force: true }); }
-  assert.ok(logs >= 4);
+  assert.ok(logs >= 3, 'story, draft, render — после подтверждений; /start до согласия метрику не пишет');
   const log = errs.join('\n');
   assert.match(log, /ENOSPC/);
   assert.ok(!/нет места|чай|посуд/.test(log), 'в журнале только код');

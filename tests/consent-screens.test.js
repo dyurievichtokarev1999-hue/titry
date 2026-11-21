@@ -4,7 +4,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import { createBot, TEXT, splitForTelegram, TELEGRAM_TEXT_LIMIT } from '../server/bot.js';
+import { createBot, TEXT, splitForTelegram, TELEGRAM_TEXT_LIMIT, makeMetrics } from '../server/bot.js';
+import os from 'node:os';
+import path from 'node:path';
 import { CONSENT_TEXT, consentSteps } from '../server/consent.js';
 import { helpMessage } from '../server/safety.js';
 
@@ -13,19 +15,19 @@ const ORDERS = [['pd', 'age'], ['age', 'pd']];
 const INVITES = [CONSENT_TEXT.ready, TEXT.year];
 const STORY = ex.story;
 
-function setup(order, { draftGate, renderGate, unsafe, sendGate, botName, onForget, check, sendVideoGate, hold } = {}) {
+function setup(order, { draftGate, renderGate, unsafe, sendGate, botName, onForget, check, sendVideoGate, hold, transcribeGate, transcript = STORY, actionGate, downloadGate } = {}) {
   const sent = [];
   const n = { download: 0, stt: 0, draft: 0, check: 0, story: 0, render: 0, video: 0 };
   const tg = {
-    send: async (c, text, extra) => { sent.push({ text, extra }); if (sendGate) await sendGate(text); }, action: async () => {}, answer: async () => {},
-    fileBuffer: async () => { n.download++; return Buffer.from('ogg'); },
+    send: async (c, text, extra) => { sent.push({ text, extra }); if (sendGate) await sendGate(text); }, action: async () => { await actionGate; }, answer: async () => {},
+    fileBuffer: async () => { n.download++; await downloadGate; return Buffer.from('ogg'); },
     sendVideo: async (c, f, extra, o = {}) => { if (hold?.video) await hold.video; if (o.ready && !(await o.ready())) return null; n.video++; },
   };
   const events = [];
   const metrics = { hash: () => 'qa-fictional', log: async (c, event) => { events.push(event); if (event === 'story') n.story++; if (hold?.[event]) await hold[event]; }, forget: async () => { if (onForget) onForget(); } };
   const bot = createBot({
     tg, metrics, consentOrder: order, botName,
-    transcribe: async () => { n.stt++; return STORY; },
+    transcribe: async () => { n.stt++; await transcribeGate; return transcript; },
     draft: async () => { n.draft++; await draftGate; if (unsafe) return { episode: null, risk: { level: 'urgent', byModel: true } }; return { episode: structuredClone(ex.episode), risk: { level: 'none' }, provider: 'claude', dropped: [] }; },
     safetyCheck: async (t) => { n.check++; return check ? check(t) : false; },
     checkRetryMs: 0,
@@ -182,7 +184,7 @@ test('опасное сообщение до подтверждений — эк
     assert.equal(b.texts().at(-1), helpMessage('urgent'));
     assert.deepEqual({ ...b.n }, { download: 0, stt: 0, draft: 0, check: 0, story: 0, render: 0, video: 0 });
     assert.ok(!b.s().story && !b.s().blocked, 'текст и запрет в сессию не пишутся');
-    assert.deepEqual(b.events, ['start'], 'в метриках только /start: опасные сообщения не записаны');
+    assert.deepEqual(b.events, [], 'до подтверждений метрик нет: ни /start, ни опасных сообщений (проверка перед запуском, п. 3)');
   }
 });
 
@@ -583,3 +585,324 @@ for (const [label, danger, video] of [['опасно — ролика и render 
     assert.equal(b.events.slice(ev).includes('render'), video === 1);
   });
 }
+
+// Проверка перед запуском, п. 3: метрики пишутся только при действующем согласии текущей сессии —
+// не до 6Ж, не после отказа или /start, не после /delete (в том числе от поздних кнопок старых сообщений).
+const consentAll = async (b, order) => { await b.say('/start'); await b.press('cs:intro:next'); for (const o of order) await b.press(`cs:${o}:yes`); };
+
+test('метрики до согласия: /start, /year, рассказ, кнопки отклика, отказ — ни одной записи', async () => {
+  for (const order of ORDERS) {
+    const b = setup(order);
+    await b.press('fb:fit'); await b.say('/year'); await b.say('/start'); await b.say(STORY);
+    await b.press('cs:intro:next'); await b.press('fb:heavier'); await b.press(`cs:${order[0]}:no`); await b.say('/year');
+    assert.deepEqual(b.events, [], order.join('→'));
+  }
+});
+
+test('метрики после /delete: поздняя кнопка отклика и новые сообщения новой записи не создают', async () => {
+  const b = setup(['pd', 'age']);
+  await consentAll(b, ['pd', 'age']);
+  await b.say(STORY);
+  await b.press(`play:${b.s().draftId}`);
+  assert.equal(b.n.video, 1);
+  assert.ok(b.events.includes('story') && b.events.includes('render'), 'после согласия метрики пишутся');
+  const cycle = b.s().consent.cycle; // метка в кнопках отклика под роликом
+  await b.press(`fb:fit:${cycle}`);
+  assert.equal(b.events.at(-1), 'feedback');
+  const before = b.events.length;
+  await b.say('/delete');
+  await b.press(`fb:heavier:${cycle}`); // кнопка старого сообщения с роликом
+  await b.say(STORY); await b.say('/year');
+  assert.equal(b.events.length, before, 'после /delete записей нет');
+  assert.ok(b.texts().includes(helpMessage('concern')), 'помощь по «тяжелее» показана и без записи');
+  // Новое согласие: кнопка старого ролика (прежний цикл) по-прежнему не пишется; новый рассказ — пишется.
+  await consentAll(b, ['pd', 'age']);
+  await b.press(`fb:fit:${cycle}`);
+  assert.equal(b.events.length, before, 'старый ролик после нового согласия не пишется');
+  await b.say(STORY);
+  assert.ok(b.events.length > before, 'при новом согласии метрики пишутся');
+});
+
+test('метрики после отзыва согласия (/start, «Нет»): поздние кнопки и сообщения не пишутся', async () => {
+  for (const withdraw of ['start', 'no']) {
+    const b = setup(['pd', 'age']);
+    await consentAll(b, ['pd', 'age']);
+    await b.say(STORY);
+    const before = b.events.length;
+    assert.ok(before > 0);
+    await b.say('/start');
+    if (withdraw === 'no') { await b.press('cs:intro:next'); await b.press('cs:pd:no'); }
+    await b.press('fb:fit'); await b.say(STORY);
+    assert.equal(b.events.length, before, withdraw);
+  }
+});
+
+test('метрики: новое согласие во время старой доставки — метрики нового рассказа пишутся', async () => {
+  let release; const gate = new Promise((r) => { release = r; });
+  const b = setup(['pd', 'age'], { hold: { video: gate } });
+  await consentAll(b, ['pd', 'age']);
+  await b.say(STORY);
+  const playing = b.press(`play:${b.s().draftId}`);
+  for (let i = 0; i < 20 && !b.s().delivering; i++) await new Promise((r) => setImmediate(r));
+  assert.ok(b.s().delivering, 'доставка идёт');
+  await consentAll(b, ['pd', 'age']); // /start и подтверждения заново, пока ролик доставляется
+  const before = b.events.length;
+  await b.say(STORY);
+  assert.ok(b.events.slice(before).includes('story'), 'рассказ при новом согласии записан');
+  release(); await playing;
+});
+
+// QA PR 31 (05d5aba): согласие проверяется и в очереди прямо перед записью; метрика старой доставки — только в её цикле.
+function setupQueued(order, { sendVideo } = {}) {
+  // Подмена очереди метрик: запись ждёт release, затем — как настоящая очередь — спрашивает allow() перед записью.
+  const q = []; const written = [];
+  const sent = [];
+  const metrics = { hash: () => 'qa-fictional', forget: async () => {},
+    log: (c, event, extra, o = {}) => new Promise((done) => q.push(() => { if (!o.allow || o.allow()) written.push(event); done(); })) };
+  const tg = { send: async (c, text) => { sent.push(text); }, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''),
+    sendVideo: sendVideo || (async (c, f, extra, o = {}) => { if (o.ready && !(await o.ready())) return null; }) };
+  const bot = createBot({ tg, metrics, consentOrder: order, safetyCheck: async () => false, checkRetryMs: 0,
+    draft: async () => ({ episode: structuredClone(ex.episode), risk: { level: 'none' }, provider: 'claude', dropped: [] }),
+    render: async (e, o) => ({ seconds: 1, duration: 24, outPath: o.outPath }) });
+  const chat = { id: 88101, type: 'private' };
+  const say = (text) => bot.handleUpdate({ message: { chat, text } });
+  const press = (d) => bot.handleUpdate({ callback_query: { id: 'q', data: /^cs:/.test(d) ? `${d}:${bot.sessions.get(chat.id).consent.cycle}` : d, message: { chat } } });
+  const flush = async () => { while (q.length) q.shift()(); await new Promise((r) => setImmediate(r)); };
+  const consent = async () => { await say('/start'); await press('cs:intro:next'); for (const o of order) await press(`cs:${o}:yes`); };
+  return { bot, chat, say, press, flush, consent, written, q, s: () => bot.sessions.get(chat.id) };
+}
+const tick = () => new Promise((r) => setImmediate(r));
+
+// Выполнить действие бота, освобождая записи метрик, пока оно не завершится (записи ждут в очереди-подмене).
+async function settle(b, p) {
+  let done = false; p.then(() => { done = true; }, () => { done = true; });
+  for (let i = 0; i < 500 && !done; i++) { await b.flush(); }
+  await p;
+}
+
+// «Нет» доступно только после /start, а /start уже сам меняет цикл: отдельного сценария для «Нет» нет.
+test('метрики: /start, пришедший, пока запись ждала в очереди, её отменяет; запись действующего цикла проходит', async () => {
+  const b = setupQueued(['pd', 'age']);
+  await settle(b, b.consent());
+  const story = b.say(STORY);
+  for (let i = 0; i < 50 && !b.q.length; i++) await tick();
+  assert.ok(b.q.length > 0, 'запись story ждёт в очереди');
+  await b.say('/start'); // /start метрик не пишет и очередь не ждёт
+  await settle(b, story);
+  assert.deepEqual(b.written, [], 'ожидавшая запись не прошла');
+  const c = setupQueued(['pd', 'age']);
+  await settle(c, c.consent());
+  await settle(c, c.say(STORY));
+  assert.ok(c.written.includes('story'), 'без отзыва запись проходит');
+});
+
+test('метрики: render старой доставки не пишется в новом цикле согласия; новая доставка — одна запись render', async () => {
+  const b = setupQueued(['pd', 'age']);
+  await settle(b, b.consent());
+  await settle(b, b.say(STORY));
+  const n = b.written.length;
+  const playing = b.press(`play:${b.s().draftId}`);
+  // ждём, пока в очереди окажется запись render (ролик уже отправлен)
+  for (let i = 0; i < 200; i++) { await tick(); if (b.q.length) break; }
+  assert.ok(b.q.length > 0, 'запись render ждёт в очереди');
+  await settle(b, b.consent()); // человек начинает заново и снова соглашается, пока запись ждала
+  await settle(b, playing);
+  assert.ok(!b.written.slice(n).includes('render'), 'render старой доставки не записан');
+  await settle(b, b.say(STORY));
+  await settle(b, b.press(`play:${b.s().draftId}`));
+  assert.equal(b.written.filter((e) => e === 'render').length, 1, 'новая доставка — одна запись render');
+});
+
+test('очередь метрик: allow() проверяется прямо перед записью в файл', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-allow-'));
+  try {
+    const m = makeMetrics(path.join(dir, 'm.jsonl'), 'fictional-salt-0001');
+    let ok = true;
+    const a = m.log(1, 'story', {}, { allow: () => ok });
+    ok = false; // отзыв, пока запись ждала (fs.mkdir, очередь)
+    await a;
+    await m.log(2, 'story', {}, { allow: () => true });
+    const lines = (await fs.readFile(path.join(dir, 'm.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
+    assert.deepEqual(lines.map((l) => l.user), [m.hash(2)]);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+// QA PR 31, п. 2: окно загрузки ролика. Отзыв проверен перед запросом, загрузка уже идёт; человек снова соглашается и
+// присылает новый рассказ (draftId меняется, отложенный сброс больше не держит). Только цикл не пускает render старой доставки.
+test('метрики: render ролика, загруженного до нового согласия и нового рассказа, не пишется в новом цикле', async () => {
+  let release; const upload = new Promise((r) => { release = r; });
+  const b = setupQueued(['pd', 'age'], { sendVideo: async (c, f, extra, o = {}) => { if (o.ready && !(await o.ready())) return null; await upload; return {}; } });
+  await settle(b, b.consent());
+  await settle(b, b.say(STORY));
+  const playing = b.press(`play:${b.s().draftId}`);
+  for (let i = 0; i < 200 && !b.s().delivering; i++) await tick();
+  for (let i = 0; i < 50; i++) await tick(); // ready пройдена, загрузка ждёт
+  await settle(b, b.consent());
+  await settle(b, b.say(STORY)); // новый рассказ в новом цикле
+  const before = b.written.length;
+  release();
+  await settle(b, playing);
+  assert.ok(!b.written.slice(before).includes('render'), 'render старой доставки не записан');
+});
+
+test('метрики: поздняя остановка по рассказу прежнего цикла не пишется в новом цикле; экран помощи показан', async () => {
+  let release; const gate = new Promise((r) => { release = r; });
+  const b = setup(['pd', 'age'], { draftGate: gate, unsafe: true });
+  await consentAll(b, ['pd', 'age']);
+  const story = b.say(STORY);
+  for (let i = 0; i < 50; i++) await tick();
+  await consentAll(b, ['pd', 'age']); // новый цикл, пока модель думала
+  const before = b.events.length;
+  release(); await story;
+  assert.ok(!b.events.slice(before).includes('safety'), 'safety прежнего цикла не записана');
+});
+
+// QA PR 31 (5d24307): голосовое относится к циклу согласия, в котором пришло, а не к циклу после распознавания.
+test('метрики: голосовое, пришедшее до нового согласия, не пишется в новом цикле; новое голосовое — пишется', async () => {
+  let release; const gate = new Promise((r) => { release = r; });
+  const b = setup(['pd', 'age'], { transcribeGate: gate });
+  await consentAll(b, ['pd', 'age']);
+  const voice = b.voice();
+  for (let i = 0; i < 50 && !b.n.stt; i++) await tick();
+  assert.equal(b.n.stt, 1, 'распознавание идёт');
+  await consentAll(b, ['pd', 'age']); // новый цикл, пока распознавалось
+  const before = b.events.length;
+  const drafts = b.n.draft;
+  release(); await voice;
+  assert.ok(!b.events.slice(before).includes('story') && !b.events.slice(before).includes('draft'), 'голосовое прежнего цикла не записано');
+  assert.equal(b.n.draft, drafts, 'голосовое прежнего цикла не идёт в модель и не открывает черновик');
+  const before2 = b.events.length;
+  await b.voice(); // в новом цикле — пишется
+  assert.ok(b.events.slice(before2).includes('story'), 'новое голосовое записано');
+});
+
+test('голосовое: согласие отозвано во время распознавания — без модели, эха и записи; явная опасность — экран остановки', async () => {
+  for (const unsafeText of [false, true]) {
+    let release; const gate = new Promise((r) => { release = r; });
+    const b = setup(['pd', 'age'], { transcribeGate: gate, transcript: unsafeText ? 'Не хочу жить.' : STORY });
+    await consentAll(b, ['pd', 'age']);
+    const voice = b.voice();
+    for (let i = 0; i < 50 && !b.n.stt; i++) await tick();
+    await b.say('/start'); // отзыв, нового согласия нет
+    const n = b.sent.length; const events = b.events.length;
+    release(); await voice;
+    const after = b.texts().slice(n);
+    assert.equal(b.n.draft, 0, 'модель не вызывается');
+    assert.ok(!after.some((t) => t.startsWith('Расшифровка')), 'эха расшифровки нет');
+    assert.equal(b.events.length, events, 'метрик нет');
+    assert.ok(!b.s().story, 'рассказ в сессию не пишется');
+    if (unsafeText) assert.deepEqual(after, [helpMessage('urgent')], 'экран остановки');
+    else assert.ok(!after.includes(helpMessage('urgent')));
+  }
+});
+
+test('голосовое во время доставки: согласие отозвано во время распознавания — без проверки, эха и метрик; ролика нет', async () => {
+  let releaseStt; const stt = new Promise((r) => { releaseStt = r; });
+  let releaseRender; const renderGate = new Promise((r) => { releaseRender = r; });
+  const b = setup(['pd', 'age'], { transcribeGate: stt, renderGate });
+  const { p } = await delivering(b);
+  const voice = b.voice();
+  for (let i = 0; i < 50 && !b.n.stt; i++) await tick();
+  await b.say('/start');
+  const n = b.sent.length; const events = b.events.length; const checks = b.n.check;
+  releaseStt(); await voice;
+  assert.ok(!b.texts().slice(n).some((t) => t.startsWith('Расшифровка')), 'эха расшифровки нет');
+  assert.equal(b.n.check, checks, 'модельной проверки голосового нет');
+  assert.equal(b.events.length, events, 'метрик нет');
+  releaseRender(); await p;
+  assert.equal(b.n.video, 0, 'ролик после отзыва не уходит');
+});
+
+// QA PR 31 (ef95836): граница рассказа — согласие сменилось, пока бот отправлял эхо или ответ про голосовое.
+test('голосовое: новое согласие во время отправки эха — модель не вызывается, черновика и метрик нет; опасность — экран остановки', async () => {
+  for (const unsafeText of [false, true]) {
+    let release; const gate = new Promise((r) => { release = r; });
+    const b = setup(['pd', 'age'], { transcript: unsafeText ? 'Не хочу жить.' : STORY, sendGate: (t) => (String(t).startsWith('Расшифровка') ? gate : null) });
+    await consentAll(b, ['pd', 'age']);
+    const voice = b.voice();
+    for (let i = 0; i < 50 && !b.texts().some((t) => String(t).startsWith('Расшифровка')); i++) await tick();
+    await consentAll(b, ['pd', 'age']); // новый цикл, пока эхо отправлялось
+    const n = b.sent.length; const events = b.events.length;
+    release(); await voice;
+    assert.equal(b.n.draft, 0, 'модель не вызывается');
+    assert.ok(!b.s().story && !b.s().episode, 'черновик нового цикла не меняется');
+    assert.equal(b.events.length, events, 'метрик нет');
+    const after = b.texts().slice(n);
+    if (unsafeText) assert.deepEqual(after, [helpMessage('urgent')], 'экран остановки');
+    else assert.deepEqual(after, []);
+  }
+});
+
+test('голосовое отклонено (длинное) с подписью: новое согласие во время ответа — подпись не идёт в модель и метрики', async () => {
+  let release; const gate = new Promise((r) => { release = r; });
+  const b = setup(['pd', 'age'], { sendGate: (t) => (t === TEXT.voiceLong ? gate : null) });
+  await consentAll(b, ['pd', 'age']);
+  const voice = b.bot.handleUpdate({ message: { chat: { id: 88001, type: 'private' }, voice: { file_id: 'f9', duration: 100000 }, caption: STORY } });
+  for (let i = 0; i < 50 && !b.texts().includes(TEXT.voiceLong); i++) await tick();
+  await consentAll(b, ['pd', 'age']);
+  const events = b.events.length;
+  release(); await voice;
+  assert.equal(b.n.draft, 0, 'подпись не идёт в модель');
+  assert.equal(b.events.length, events, 'метрик нет');
+  await b.say(STORY); // новый рассказ в новом цикле — обычный путь
+  assert.equal(b.n.draft, 1, 'новый рассказ обрабатывается');
+});
+
+test('рассказ: новое согласие, пока отправлялось «Монтирую…», — модель не вызывается, метрик нет; новый рассказ — обычный путь', async () => {
+  let release; const gate = new Promise((r) => { release = r; });
+  let hold = true;
+  const b = setup(['pd', 'age'], { sendGate: (t) => (hold && t === TEXT.working ? gate : null) });
+  await consentAll(b, ['pd', 'age']);
+  const story = b.say(STORY);
+  for (let i = 0; i < 50 && !b.texts().includes(TEXT.working); i++) await tick();
+  await consentAll(b, ['pd', 'age']);
+  const events = b.events.length;
+  hold = false; release(); await story;
+  assert.equal(b.n.draft, 0, 'модель не вызывается');
+  assert.ok(!b.events.slice(events).includes('draft'), 'метрики draft нет');
+  await b.say(STORY);
+  assert.equal(b.n.draft, 1, 'новый рассказ — обычный путь');
+});
+
+// QA PR 31 (be03e4e): граница скачивания и распознавания голосового.
+test('голосовое: /start, пока показывался индикатор, — ни скачивания, ни распознавания, ни модели', async () => {
+  let release; const gate = new Promise((r) => { release = r; });
+  let hold = false;
+  const b = setup(['pd', 'age'], { actionGate: { then: (r) => (hold ? gate.then(r) : r()) } });
+  await consentAll(b, ['pd', 'age']);
+  hold = true;
+  const voice = b.voice(); await tick();
+  hold = false;
+  await b.say('/start');
+  release(); await voice;
+  assert.deepEqual({ download: b.n.download, stt: b.n.stt, draft: b.n.draft }, { download: 0, stt: 0, draft: 0 });
+});
+
+test('голосовое: /delete или /start во время скачивания — распознавание не запускается; /delete — без ответа', async () => {
+  for (const cmd of ['/delete', '/start']) {
+    for (const busy of [false, true]) {
+      let release; const gate = new Promise((r) => { release = r; });
+      let hold = false;
+      const b = setup(['pd', 'age'], { downloadGate: { then: (r) => (hold ? gate.then(r) : r()) }, renderGate: busy ? new Promise(() => {}) : undefined });
+      if (busy) await delivering(b); else await consentAll(b, ['pd', 'age']);
+      hold = true;
+      const voice = b.voice();
+      for (let i = 0; i < 50 && !b.n.download; i++) await tick();
+      assert.equal(b.n.download, 1, 'скачивание началось');
+      hold = false;
+      await b.say(cmd);
+      const n = b.sent.length; const events = b.events.length;
+      release(); await voice;
+      assert.equal(b.n.stt, 0, `${cmd}${busy ? ' (доставка)' : ''}: распознавание не запускается`);
+      assert.equal(b.events.length, events, 'метрик нет');
+      if (cmd === '/delete') assert.deepEqual(b.texts().slice(n), [], '/delete — без ответа');
+    }
+  }
+});
+
+test('голосовое при действующем согласии: скачивание, распознавание и черновик — как обычно', async () => {
+  const b = setup(['pd', 'age']);
+  await consentAll(b, ['pd', 'age']);
+  await b.voice();
+  assert.deepEqual({ download: b.n.download, stt: b.n.stt, draft: b.n.draft }, { download: 1, stt: 1, draft: 1 });
+});
