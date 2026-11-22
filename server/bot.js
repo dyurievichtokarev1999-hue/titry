@@ -1091,9 +1091,10 @@ export function createBot({
           let story = '';
           try {
             Promise.resolve().then(() => tg.action(chatId, 'typing')).catch((e) => logError('send', e)); // не ждём
-            const buf = await tg.fileBuffer(msg.voice.file_id);
-            // Согласие сменилось или сессию удалили, пока скачивался файл: распознавание не запускается (QA PR 31 be03e4e).
-            if (!sameConsent(chatId, s, cycle)) return outsideConsent(chatId, s, caption);
+            // Согласие сменилось или сессию удалили, пока скачивался файл: распознавание не запускается (QA PR 31 be03e4e);
+            // между получением пути и запросом байтов — аудио не запрашивается (QA PR 31 9649b27).
+            const buf = await tg.fileBuffer(msg.voice.file_id, { ready: () => sameConsent(chatId, s, cycle) });
+            if (buf === null || !sameConsent(chatId, s, cycle)) return outsideConsent(chatId, s, caption);
             story = cleanInput(await transcribe(buf, { duration: msg.voice.duration }));
           } catch (e) { logError('stt', e); }
           story = String(story || '').trim();
@@ -1122,8 +1123,8 @@ export function createBot({
       if (!sameConsent(chatId, s, cycle)) return outsideConsent(chatId, s, caption);
       let story = '';
       try {
-        const buf = await tg.fileBuffer(msg.voice.file_id);
-        if (!sameConsent(chatId, s, cycle)) return outsideConsent(chatId, s, caption);
+        const buf = await tg.fileBuffer(msg.voice.file_id, { ready: () => sameConsent(chatId, s, cycle) });
+        if (buf === null || !sameConsent(chatId, s, cycle)) return outsideConsent(chatId, s, caption);
         story = cleanInput(await transcribe(buf, { duration: msg.voice.duration }));
       } catch (e) { logError('stt', e); }
       if (!alive(chatId, s)) return; // /delete во время распознавания: ничего не отвечаем
@@ -1329,8 +1330,10 @@ export function telegram(token, { callMs = TELEGRAM_CALL_MS } = {}) {
     send: (chat_id, text, extra = {}) => call('sendMessage', { chat_id, text, disable_web_page_preview: true, ...extra }),
     action: (chat_id, action) => call('sendChatAction', { chat_id, action }).catch(() => {}),
     answer: (id) => call('answerCallbackQuery', { callback_query_id: id }).catch(() => {}),
-    async fileBuffer(file_id) {
+    // ready() — проверка между получением пути (getFile) и запросом байтов: false — аудио не запрашивается, null.
+    async fileBuffer(file_id, { ready } = {}) {
       const f = await call('getFile', { file_id });
+      if (ready && !(await ready())) return null;
       const res = await fetch(`https://api.telegram.org/file/bot${token}/${f.file_path}`, { signal: AbortSignal.timeout(30_000) });
       if (!res.ok) throw new Error(`Telegram file ${res.status}`);
       return Buffer.from(await res.arrayBuffer());
