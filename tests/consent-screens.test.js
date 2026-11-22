@@ -15,12 +15,14 @@ const ORDERS = [['pd', 'age'], ['age', 'pd']];
 const INVITES = [CONSENT_TEXT.ready, TEXT.year];
 const STORY = ex.story;
 
-function setup(order, { draftGate, renderGate, unsafe, sendGate, botName, onForget, check, sendVideoGate, hold, transcribeGate, transcript = STORY, actionGate, downloadGate } = {}) {
+function setup(order, { draftGate, renderGate, unsafe, sendGate, botName, onForget, check, sendVideoGate, hold, transcribeGate, transcript = STORY, actionGate, downloadGate, fetchGate } = {}) {
   const sent = [];
   const n = { download: 0, stt: 0, draft: 0, check: 0, story: 0, render: 0, video: 0 };
+  let fetched = 0;
   const tg = {
     send: async (c, text, extra) => { sent.push({ text, extra }); if (sendGate) await sendGate(text); }, action: async () => { await actionGate; }, answer: async () => {},
-    fileBuffer: async () => { n.download++; await downloadGate; return Buffer.from('ogg'); },
+    // Как адаптер Telegram: getFile (download, может ждать), затем ready(), затем запрос байтов (fetched).
+    fileBuffer: async (id, o = {}) => { n.download++; await downloadGate; if (o.ready && !(await o.ready())) return null; fetched++; await fetchGate; return Buffer.from('ogg'); },
     sendVideo: async (c, f, extra, o = {}) => { if (hold?.video) await hold.video; if (o.ready && !(await o.ready())) return null; n.video++; },
   };
   const events = [];
@@ -42,7 +44,7 @@ function setup(order, { draftGate, renderGate, unsafe, sendGate, botName, onForg
   const voiceCaption = () => bot.handleUpdate({ message: { chat, voice: { file_id: 'f2', duration: 5 }, caption: STORY } });
   const photoCaption = () => bot.handleUpdate({ message: { chat, photo: [{ file_id: 'p1' }], caption: STORY } });
   const s = () => bot.sessions.get(chat.id);
-  return { bot, sent, n, events, say, press, voice, voiceCaption, photoCaption, s, texts: () => sent.map((m) => m.text) };
+  return { bot, sent, n, events, say, press, voice, voiceCaption, photoCaption, s, texts: () => sent.map((m) => m.text), fetched: () => fetched };
 }
 
 // Все входящие с рассказом: текст, голосовое, голосовое с подписью, фото с подписью — ничего не обрабатывается.
@@ -960,6 +962,7 @@ test('голосовое: /delete или /start во время скачиван
       const n = b.sent.length; const events = b.events.length;
       release(); await voice;
       assert.equal(b.n.stt, 0, `${cmd}${busy ? ' (доставка)' : ''}: распознавание не запускается`);
+      assert.equal(b.fetched(), 0, `${cmd}${busy ? ' (доставка)' : ''}: байты аудио не запрашиваются`);
       assert.equal(b.events.length, events, 'метрик нет');
       if (cmd === '/delete') assert.deepEqual(b.texts().slice(n), [], '/delete — без ответа');
     }
@@ -971,4 +974,47 @@ test('голосовое при действующем согласии: ска�
   await consentAll(b, ['pd', 'age']);
   await b.voice();
   assert.deepEqual({ download: b.n.download, stt: b.n.stt, draft: b.n.draft }, { download: 1, stt: 1, draft: 1 });
+  assert.equal(b.fetched(), 1, 'файл запрошен один раз');
+});
+
+test('telegram().fileBuffer: ready() между getFile и запросом байтов — false: аудио не запрашивается, null; true — один запрос', async () => {
+  const { telegram } = await import('../server/bot.js');
+  const orig = globalThis.fetch; const urls = [];
+  globalThis.fetch = async (url) => {
+    urls.push(String(url));
+    if (String(url).includes('/getFile')) return { json: async () => ({ ok: true, result: { file_path: 'voice/f.oga' } }) };
+    return { ok: true, arrayBuffer: async () => new ArrayBuffer(3) };
+  };
+  const audio = () => urls.filter((u) => u.includes('/file/bot')).length;
+  try {
+    const tg = telegram('dummy-not-a-token');
+    assert.equal(await tg.fileBuffer('f', { ready: () => false }), null);
+    assert.equal(audio(), 0, 'байты не запрошены');
+    assert.equal(await tg.fileBuffer('f', { ready: async () => false }), null, 'асинхронный ready');
+    assert.equal(audio(), 0);
+    assert.equal((await tg.fileBuffer('f', { ready: () => true })).length, 3);
+    assert.equal(audio(), 1, 'один запрос байтов');
+    assert.equal((await tg.fileBuffer('f')).length, 3, 'без ready — как раньше');
+  } finally { globalThis.fetch = orig; }
+});
+
+test('голосовое: /delete или /start, пока скачивались байты аудио, — распознавание не запускается (обычный путь и доставка)', { timeout: 10000 }, async () => {
+  for (const cmd of ['/delete', '/start']) {
+    for (const busy of [false, true]) {
+      let release; const gate = new Promise((r) => { release = r; });
+      let hold = false;
+      const b = setup(['pd', 'age'], { fetchGate: { then: (r) => (hold ? gate.then(r) : r()) }, renderGate: busy ? new Promise(() => {}) : undefined });
+      if (busy) await delivering(b); else await consentAll(b, ['pd', 'age']);
+      hold = true;
+      const voice = b.voice();
+      for (let i = 0; i < 50 && !b.fetched(); i++) await tick();
+      assert.equal(b.fetched(), 1, 'байты запрашиваются');
+      hold = false;
+      await b.say(cmd);
+      const events = b.events.length;
+      release(); await voice;
+      assert.equal(b.n.stt, 0, `${cmd}${busy ? ' (доставка)' : ''}: распознавание не запускается`);
+      assert.equal(b.events.length, events, 'метрик нет');
+    }
+  }
 });
