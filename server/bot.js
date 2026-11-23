@@ -599,12 +599,15 @@ export function createBot({
     const [, step, answer, cycle] = data.split(':');
     // Кнопка не текущего шага или прежнего прохождения (Критик реализации 18.11 21:40) — ничего не засчитываем.
     if (!c || c.step !== step || cycle !== c.cycle) return;
+    // Только кнопки, которые показаны на этом экране (QA PR 32 03b4b93): 6А — «Далее»; 6Б, 6Г — «Да» и «Нет»
+    // (клавиатуры — в startConsent и consentScreen; менять вместе). На шагах done и declined кнопок нет.
+    // Любое другое значение ничего не меняет: шаг, отметки и метрики остаются, следующий экран не отправляется.
+    if (!(step === 'intro' ? answer === 'next' : consentOrder.includes(step) && (answer === 'yes' || answer === 'no'))) return;
     const next = step === 'intro' ? consentOrder[0] : consentOrder[consentOrder.indexOf(step) + 1] || 'done';
     if (answer === 'next' || answer === 'yes') {
       if (step === 'pd') c.given.pd = { at: now().toISOString(), version: CONSENT_VERSION };
       return consentScreen(chatId, s, next);
     }
-    if (answer !== 'no') return; // отказ — только кнопка «Нет»; иное значение кнопки ничего не делает
     c.step = 'declined'; // отказ как событие не храним; дальше бот ничего не спрашивает и не напоминает
     forgetStory(s);
     // Отзыв согласия = удаление метрик, как /delete (решение Claude 20.11). Запуск — синхронно, до ответов: запись,

@@ -1018,3 +1018,38 @@ test('голосовое: /delete или /start, пока скачивались
     }
   }
 });
+
+// QA PR 32 (03b4b93): экран принимает только свои кнопки — 6А «Далее»; 6Б и 6Г «Да» и «Нет».
+test('кнопки согласия: «Далее» на 6Б/6Г, «Да»/«Нет» на 6А и чужие значения — шаг, отметки и метрики не меняются, экрана нет', { timeout: 15000 }, async () => {
+  for (const order of ORDERS) {
+    let forgot = 0;
+    const b = setup(order, { onForget: () => { forgot++; } });
+    await consentAll(b, order);
+    await b.say(STORY); // метрики участника есть
+    const events = b.events.length;
+    await b.say('/start');
+    const probe = async (step, answers) => {
+      for (const a of answers) {
+        const before = { step: b.s().consent.step, given: JSON.stringify(b.s().consent.given), sent: b.sent.length };
+        await b.bot.handleUpdate({ callback_query: { id: 'q', data: `cs:${step}:${a}:${b.s().consent.cycle}`, message: { chat: { id: 88001, type: 'private' } } } });
+        assert.deepEqual({ step: b.s().consent.step, given: JSON.stringify(b.s().consent.given), sent: b.sent.length }, before, `${order.join('→')}: ${step}:${a}`);
+      }
+    };
+    await probe('intro', ['yes', 'no', 'maybe']);
+    await b.press('cs:intro:next');
+    for (const st of order) {
+      await probe(st, ['next', 'maybe', '']);
+      await b.press(`cs:${st}:yes`);
+    }
+    assert.equal(b.s().consent.step, 'done', 'обычное согласие проходит');
+    await probe('done', ['yes', 'no', 'next']); // после согласия кнопок нет
+    await b.say('/start'); await b.press('cs:intro:next'); await b.press(`cs:${order[0]}:no`);
+    assert.equal(b.s().consent.step, 'declined');
+    const forgotAfterNo = forgot;
+    await probe('declined', ['yes', 'no', 'next']); // после отказа кнопок нет
+    assert.equal(forgot, forgotAfterNo, 'после отказа чужие кнопки удаление не запускают');
+    forgot = 0;
+    assert.equal(forgot, 0, 'удаления метрик не было');
+    assert.equal(b.events.length, events, 'метрики не менялись');
+  }
+});
