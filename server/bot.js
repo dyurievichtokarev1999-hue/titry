@@ -274,13 +274,14 @@ export function draftKeyboard(ep, draftId = 0) {
   };
 }
 
-const FEEDBACK_KB = {
+// Метка цикла согласия в кнопках отклика: отклик пишется в метрики, только если ролик отправлен при текущем согласии.
+const feedbackKeyboard = (cycle) => ({
   inline_keyboard: [[
-    { text: 'Попало', callback_data: 'fb:fit' },
-    { text: 'Не подходит', callback_data: 'fb:miss' },
-    { text: 'Стало тяжелее', callback_data: 'fb:heavier' },
+    { text: 'Попало', callback_data: `fb:fit:${cycle}` },
+    { text: 'Не подходит', callback_data: `fb:miss:${cycle}` },
+    { text: 'Стало тяжелее', callback_data: `fb:heavier:${cycle}` },
   ]],
-};
+});
 
 // ── Метрики без содержимого рассказов ────────────────────────────────────────
 
@@ -366,7 +367,8 @@ export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), sal
     get trackedUsers() { return generation.size; },
     /** Только для тестов и диагностики: сколько временных копий ждут удаления. */
     get pendingTmpCleanup() { return leftovers.size; },
-    async log(chatId, event, extra = {}) {
+    // allow — проверка вызывающего прямо перед записью в файл, уже в очереди (например, действует ли ещё согласие).
+    async log(chatId, event, extra = {}, { allow } = {}) {
       const h = hash(chatId);
       enter(h);
       try {
@@ -375,6 +377,7 @@ export function makeMetrics(file = path.join(ROOT, 'data', 'metrics.jsonl'), sal
         await fs.mkdir(path.dirname(file), { recursive: true });
         return await serialClean(async () => {
           if ((generation.get(h) || 0) !== gen) return; // человек удалил данные, пока запись ждала
+          if (allow && !allow()) return; // согласие отозвано, пока запись ждала
           await fs.appendFile(file, row);
         });
       } finally { leave(h); }
@@ -474,8 +477,26 @@ export function createBot({
   // Рассказ для проверок безопасности: вместе с правками, отклонёнными по длине (s.overflow, только в памяти).
   // Иначе угрозу можно разбить на две правки у предела: первая отклонена и выпала бы из контекста фильтра.
   const seenStory = (s) => (s.overflow?.length ? `${s.story}${EDIT_SEP}${s.overflow.join(EDIT_SEP)}` : s.story);
+  // Метрики — только при действующем согласии (проверка перед запуском, п. 3): до 6Ж, после отказа, /start, /delete
+  // (сессии нет) и для поздних кнопок старых сообщений запись не делается. Запись привязана к циклу согласия, в котором
+  // началось событие (рассказ, доставка, сообщение во время доставки; новый цикл — только через /start), и проверяется
+  // дважды: при вызове и в очереди прямо перед записью
+  // в файл (QA PR 31, п. 1): /start или «Нет», пришедшие, пока запись ждала, её отменяют.
+  // Отложенный сброс относится к своей доставке (forgetGen): после нового согласия и нового рассказа он метрики не держит.
+  const cycleOf = (chatId) => sessions.get(chatId)?.consent?.cycle;
+  // Та же сессия и то же действующее согласие, что при приходе сообщения (без учёта отложенного сброса доставки:
+  // новое согласие во время старой доставки принимает новые рассказы).
+  const sameConsent = (chatId, s, cycle) => sessions.get(chatId) === s && consentDone(s) && s.consent.cycle === cycle;
+  const consented = (chatId, cycle) => {
+    const s = sessions.get(chatId);
+    return !!s && consentDone(s) && s.consent.cycle === cycle && !(s.forgetAfter && s.forgetGen === s.draftId);
+  };
+  const writeMetric = async (chatId, event, data, cycle = cycleOf(chatId)) => {
+    if (consented(chatId, cycle)) await metrics.log(chatId, event, data, { allow: () => consented(chatId, cycle) });
+  };
   // Метрики «как получится»: сбой записи (например, ENOSPC) не должен ломать ответ человеку. В журнал — только код.
-  const logMetric = (chatId, event, data) => Promise.resolve().then(() => metrics.log(chatId, event, data)).catch((e) => logError('metrics', e));
+  // Цикл берётся при вызове: событие относится к согласию, действовавшему в этот момент.
+  const logMetric = (chatId, event, data, cycle = cycleOf(chatId)) => Promise.resolve().then(() => writeMetric(chatId, event, data, cycle)).catch((e) => logError('metrics', e));
   // Незавершённые черновики и отдельные проверки участника: их результат может создать запрет уже после /delete.
   const inFlight = new Map();
   const track = async (chatId, p) => {
@@ -523,11 +544,12 @@ export function createBot({
       gate.markSafety(s.scope, s.originalStory || s.story);
     }
   }
-  async function stopForSafety(chatId, s, level, extra = {}) {
+  // cycle — цикл согласия, в котором началось событие (по умолчанию — текущий при вызове, до первого await).
+  async function stopForSafety(chatId, s, level, extra = {}, cycle = cycleOf(chatId)) {
     applyStop(s);
     // Экран остановки — до записи в журнал: сбой или зависание журнала не задерживает помощь.
     try { await tg.send(chatId, helpMessage('urgent')); }
-    finally { try { await metrics.log(chatId, 'safety', { level, ...extra }); } catch (e) { logError('metrics', e); } }
+    finally { try { await writeMetric(chatId, 'safety', { level, ...extra }, cycle); } catch (e) { logError('metrics', e); } }
   }
 
   // Сессия ещё та же: не удалена через /delete и не заменена новой после истечения срока.
@@ -599,7 +621,20 @@ export function createBot({
   }
   const isBlocked = (s, story) => !!(s.blocked && s.blocked.has(storyKey(story)));
 
-  async function handleStory(chatId, s, story, source) {
+  // Сообщение пришло при другом согласии (отзыв или новый цикл, пока шли распознавание и ответы): по правилам до 6Ж.
+  // Сессии нет (/delete) — ничего не отвечаем. Явная опасность, в том числе продолжение прежнего рассказа, — экран
+  // остановки; иначе модель не вызывается, в сессию и метрики ничего не пишется; до нового согласия — 6З.
+  // После нового согласия старое сообщение не используется (человек отправит рассказ заново).
+  function outsideConsent(chatId, s, text) {
+    if (!alive(chatId, s)) return undefined;
+    if (assessRisk(text).level === 'urgent' || continuationLevel(seenStory(s), text) === 'urgent') return tg.send(chatId, helpMessage('urgent'));
+    return consentDone(s) ? undefined : preConsent(chatId, s);
+  }
+  // cycle — цикл согласия, в котором пришло сообщение (голосовое — до распознавания, QA PR 31 5d24307).
+  async function handleStory(chatId, s, story, source, cycle = cycleOf(chatId)) {
+    // Граница рассказа (QA PR 31 ef95836): сообщение пришло при другом согласии (отзыв или новый цикл, пока шли
+    // распознавание и ответы) — в сессию и в модель не идёт; явная опасность — экран остановки.
+    if (!sameConsent(chatId, s, cycle)) return outsideConsent(chatId, s, story);
     const prevStory = seenStory(s); // с правками, отклонёнными по длине: продолжение видит и их
     // Решение 16.11 (б): тревожный обрывок после бытовой формы прежнего текста — продолжение рассказа уровня concern:
     // черновик строится по обоим сообщениям вместе, дальше решает модельная проверка перед рендером.
@@ -618,10 +653,10 @@ export function createBot({
     s.stage = 'drafting';
     // Решение 16.11 (б): однозначное продолжение бытовой формы прежнего текста — остановка. Собственный urgent нового
     // сообщения после рассказа — тоже сразу, до любых отправок (как до разбора QA PR 16).
-    if (cont === 'urgent' || (prevStory && assessRisk(story).level === 'urgent')) return stopForSafety(chatId, s, 'urgent', { at: 'continuation' });
+    if (cont === 'urgent' || (prevStory && assessRisk(story).level === 'urgent')) return stopForSafety(chatId, s, 'urgent', { at: 'continuation' }, cycle);
     const prior = gate.status(s.scope, story);
     if (isBlocked(s, story) || prior.kind === 'safety') {
-      return stopForSafety(chatId, s, 'urgent', { at: 'repeat' });
+      return stopForSafety(chatId, s, 'urgent', { at: 'repeat' }, cycle);
     }
     if (prior.kind) {
       // Хранилище запретов недоступно: черновик не делается, без карточки помощи.
@@ -629,9 +664,12 @@ export function createBot({
       s.stage = 'idle';
       return tg.send(chatId, TEXT.checkUnavailable);
     }
-    const current = () => alive(chatId, s) && s.draftId === gen && consentDone(s) && !isBlocked(s, story) && gate.status(s.scope, story).kind !== 'safety';
+    const current = () => sameConsent(chatId, s, cycle) && s.draftId === gen && !isBlocked(s, story) && gate.status(s.scope, story).kind !== 'safety';
     await tg.action(chatId, 'typing');
     await tg.send(chatId, TEXT.working);
+    // Согласие сменилось, пока шли ответы: модель не вызывается. Запрет, поставленный за это время, — ниже, после
+    // черновика (поздняя остановка), как раньше.
+    if (!sameConsent(chatId, s, cycle) || s.draftId !== gen) return;
     let r;
     try {
       r = await track(chatId, draft(story, { date: todayIso(now()), period: s.period, tone: 'quiet' }));
@@ -662,16 +700,16 @@ export function createBot({
       s.stage = 'idle';
       return tg.send(chatId, TEXT.renderFail);
     }
-    if (r.insufficient) return replyInsufficient(chatId, s, story, gen, current, r.risk && r.risk.level === 'concern', r.code);
+    if (r.insufficient) return replyInsufficient(chatId, s, story, gen, current, r.risk && r.risk.level === 'concern', r.code, cycle);
     if (!r.episode) {
       // Остановка важнее всего, даже если ответ устарел: рассказ запоминается как запрещённый.
-      if (s.draftId === gen) return stopForSafety(chatId, s, r.risk.level, { byModel: r.risk.byModel });
+      if (s.draftId === gen) return stopForSafety(chatId, s, r.risk.level, { byModel: r.risk.byModel }, cycle);
       s.blocked = s.blocked || new Set();
       s.blocked.add(storyKey(story));
       gate.markSafety(s.scope, story);
       // Если сейчас в работе тот же рассказ или его сбросил повторный /start / отказ, — экран остановки.
       if (s.forgotGen === gen || (s.verdict !== 'blocked' && s.originalStory && storyKey(s.originalStory) === storyKey(story))) {
-        return stopForSafety(chatId, s, r.risk.level, { byModel: r.risk.byModel, at: 'late' });
+        return stopForSafety(chatId, s, r.risk.level, { byModel: r.risk.byModel, at: 'late' }, cycle);
       }
       return;
     }
@@ -679,10 +717,10 @@ export function createBot({
       // Устаревший «можно» молча отбрасывается. Но если тот же рассказ этой сессии тем временем остановлен
       // (например, проверкой прежней сессии до /delete), человек получает карточку помощи, а не тишину.
       if (alive(chatId, s) && (s.forgotGen === gen || (s.verdict !== 'blocked' && s.originalStory && storyKey(s.originalStory) === storyKey(story)))
-        && (isBlocked(s, story) || gate.status(s.scope, story).kind === 'safety')) return stopForSafety(chatId, s, 'urgent', { at: 'late' });
+        && (isBlocked(s, story) || gate.status(s.scope, story).kind === 'safety')) return stopForSafety(chatId, s, 'urgent', { at: 'late' }, cycle);
       return;
     }
-    await logMetric(chatId, 'story', { source, period: s.period, chars: Math.round(story.length / 50) * 50 });
+    await logMetric(chatId, 'story', { source, period: s.period, chars: Math.round(story.length / 50) * 50 }, cycle);
     if (!current()) return;
     if (r.risk.level === 'concern') await tg.send(chatId, helpMessage('concern'));
     // Решение 16.11 (в): флаг модели — мягкий блок с контактами рядом с черновиком, без остановки ролика.
@@ -692,7 +730,7 @@ export function createBot({
     s.verdict = 'ok';
     s.edits = 0;
     s.stage = 'draft';
-    await logMetric(chatId, 'draft', { provider: r.provider, rows: r.episode.rows.length, dropped: (r.dropped || []).length });
+    await logMetric(chatId, 'draft', { provider: r.provider, rows: r.episode.rows.length, dropped: (r.dropped || []).length }, cycle);
     if (!current()) return;
     await showDraft(chatId, s);
   }
@@ -708,14 +746,15 @@ export function createBot({
   // сверх 4096 — сначала блок помощи, затем реплика, код message_too_long в журнале; сейчас 256 знаков.
   // Решение владельца 11.11 12:05, п. 4: обычная нехватка у заготовки (insufficient_material) идёт тем же путём
   // и с той же репликой; в метрику — только код причины из закрытого списка.
-  async function replyInsufficient(chatId, s, story, gen, current, concern, code = INSUFFICIENT_AFTER_EXCLUSION) {
+  // cycle — цикл согласия, в котором пришёл рассказ (из handleStory).
+  async function replyInsufficient(chatId, s, story, gen, current, concern, code = INSUFFICIENT_AFTER_EXCLUSION, cycle = cycleOf(chatId)) {
     // Тот же рассказ сейчас в работе и ещё не остановлен: поздняя остановка (как в ветке !r.episode, at: 'late').
     // Без этого два подряд одинаковых рассказа, у первого из которых проверка вернула true, оставляли человека
     // без карточки помощи: первый ответ устарел, у второго current() уже false из-за safety — оба молча выходили.
     const sameStoryInWork = () => alive(chatId, s) && (s.forgotGen === gen || (s.verdict !== 'blocked' && !!s.originalStory && storyKey(s.originalStory) === storyKey(story)));
     const stoppedNow = () => isBlocked(s, story) || gate.status(s.scope, story).kind === 'safety';
     if (!current()) {
-      if (stoppedNow() && sameStoryInWork()) return stopForSafety(chatId, s, 'urgent', { at: 'late' });
+      if (stoppedNow() && sameStoryInWork()) return stopForSafety(chatId, s, 'urgent', { at: 'late' }, cycle);
       return;
     }
     // Модельной проверки здесь нет (решение владельца кода 13.11 15:00): модельная проверка одна — перед рендером, на
@@ -723,10 +762,10 @@ export function createBot({
     const st = gate.status(s.scope, story);
     if (st.kind) { logError('check', { code: st.code }); s.stage = 'idle'; return tg.send(chatId, TEXT.checkUnavailable); }
     s.stage = 'idle'; // заготовка появится только перед самой отправкой реплики (восьмой разбор)
-    await logMetric(chatId, code === INSUFFICIENT_MATERIAL ? INSUFFICIENT_MATERIAL : INSUFFICIENT_AFTER_EXCLUSION);
+    await logMetric(chatId, code === INSUFFICIENT_MATERIAL ? INSUFFICIENT_MATERIAL : INSUFFICIENT_AFTER_EXCLUSION, undefined, cycle);
     if (!current()) {
       // Пока писалась метрика, тот же рассказ остановлен (например, проверкой прежней сессии): карточка помощи, не тишина.
-      if (stoppedNow() && sameStoryInWork()) return stopForSafety(chatId, s, 'urgent', { at: 'late' });
+      if (stoppedNow() && sameStoryInWork()) return stopForSafety(chatId, s, 'urgent', { at: 'late' }, cycle);
       return;
     }
     // Черновика нет, но человек может написать строки сам (вариант 1): правки ложатся на пустую заготовку эпизода
@@ -741,6 +780,7 @@ export function createBot({
     if (s.verdict !== 'ok' || !s.episode) return tg.send(chatId, TEXT.noDraft);
     // Черновик, сброшенный отзывом согласия во время доставки: ▶ не запускает ни проверку, ни рендер.
     if (!consentDone(s) || (s.forgetAfter && s.forgetGen === s.draftId)) return tg.send(chatId, TEXT.noDraft);
+    const cycle = s.consent.cycle; // метрики этой доставки — только в её цикле согласия (QA PR 31, п. 2)
     const risk = assessEpisodeRisk(joinEdits(seenStory(s)), s.episode); // правки — продолжение рассказа для проверки безопасности
     if (risk.level === 'urgent') return stopForSafety(chatId, s, 'urgent', { at: 'render' });
     const v = validateSafeEpisode(s.episode, s.story);
@@ -767,7 +807,7 @@ export function createBot({
     const text = `${joinEdits(story)}\n${episodeToText(ep)}`;
     const g = await track(chatId, gate.verify(s.scope, original, ep, text));
     if (!alive(chatId, s) || s.draftId !== gen) return; // удалённая или заменённая сессия не оживает
-    if (g.kind === 'safety') return stopForSafety(chatId, s, 'urgent', { at: 'check', byModel: !!g.byModel });
+    if (g.kind === 'safety') return stopForSafety(chatId, s, 'urgent', { at: 'check', byModel: !!g.byModel }, cycle);
     if (g.unknown) {
       // «Неизвестно» и после повтора (условие 3): локально чисто — ролик делается; есть concern — ролика нет.
       logError('check', { code: g.code });
@@ -845,17 +885,17 @@ export function createBot({
       if (!(await clearToSend())) return;
       // ready — та же проверка после чтения файла, прямо перед запросом (QA PR 27, п. 2). Загрузка, уже начатая,
       // не отзывается: Telegram не умеет отменить отправку; окно — время одного HTTP-запроса.
-      const sent = await tg.sendVideo(chatId, r.outPath, { caption: 'Конец сцены.', width: 720, height: 1280, duration: Math.round(r.duration), reply_markup: FEEDBACK_KB }, { ready: clearToSend });
+      const sent = await tg.sendVideo(chatId, r.outPath, { caption: 'Конец сцены.', width: 720, height: 1280, duration: Math.round(r.duration), reply_markup: feedbackKeyboard(cycle) }, { ready: clearToSend });
       if (sent === null) return; // отзыв или отмена во время чтения файла: ролика нет — и метрики render нет
       // /delete во время отправки: после metrics.forget новая запись о человеке не появляется.
       if (!alive(chatId, s)) return;
-      await logMetric(chatId, 'render', { seconds: Math.round(r.seconds), mood: ep.mood, music: ep.music, edits: s.edits || 0 });
+      await logMetric(chatId, 'render', { seconds: Math.round(r.seconds), mood: ep.mood, music: ep.music, edits: s.edits || 0 }, cycle);
       if (current()) s.stage = 'watched';
     } catch (e) {
       release(); // следующая задача и новые запросы — сразу
       const timedOut = e?.code === 'render_timeout';
       // Предел рендера: в журнал и метрики — только код и длительность; новая запись о человеке — только у живой сессии.
-      if (timedOut) { logRenderTimeout('render', e.ms); if (alive(chatId, s)) try { await metrics.log(chatId, 'render_timeout', { ms: Math.round(e.ms) }); } catch (m) { logError('metrics', m); } }
+      if (timedOut) { logRenderTimeout('render', e.ms); if (alive(chatId, s)) try { await writeMetric(chatId, 'render_timeout', { ms: Math.round(e.ms) }, cycle); } catch (m) { logError('metrics', m); } }
       else logError('render', e);
       // Сессия неактуальна (/delete, новый рассказ, отмена доставки) — по отменённой задаче ни одного сообщения.
       if (current() && !(timedOut && cancelled())) {
@@ -940,7 +980,8 @@ export function createBot({
   }
 
   // echo — эхо расшифровки (только при безопасном исходе, после проверки).
-  async function duringRender(chatId, s, text, { echo } = {}) {
+  // cycle — цикл согласия, в котором пришло сообщение (голосовое — до распознавания).
+  async function duringRender(chatId, s, text, { echo, cycle = cycleOf(chatId) } = {}) {
     let body = String(text || '').trim();
     if (body.startsWith('/')) {
       const cmd = parseCommand(body);
@@ -956,7 +997,7 @@ export function createBot({
     holdDelivery(s, hold, level); // синхронно, до первого await
     const r = await hold;
     if (!alive(chatId, s)) return; // /delete во время проверки: ничего не отвечаем (запрет, если был, остаётся)
-    const logSafety = (extra) => Promise.resolve().then(() => metrics.log(chatId, 'safety', extra)).catch((e) => logError('metrics', e));
+    const logSafety = (extra) => Promise.resolve().then(() => writeMetric(chatId, 'safety', extra, cycle)).catch((e) => logError('metrics', e));
     if (r.kind === 'urgent') {
       // Экран остановки — первым и ни от чего не зависит: эха нет (повторять опасную фразу незачем), метрики — после.
       await sendSafe(chatId, helpMessage('urgent'));
@@ -987,15 +1028,16 @@ export function createBot({
     const chatId = msg.chat.id;
     if (msg.chat.type !== 'private') return; // только личные чаты: истории не для групп
     const s = session(chatId);
+    const cycle = cycleOf(chatId); // цикл согласия на момент прихода: метрики голосового — в нём, а не после распознавания
     // Подпись к фото, видео, файлу — такой же текст, как сообщение (условие 1: подписи попадают в ролик и проверяются).
     // Подпись к голосовому разбирается вместе с расшифровкой ниже. Разделитель правок не может прийти от человека.
     const text = cleanInput(msg.text || (msg.voice ? '' : msg.caption) || '').trim();
 
     const cmd = parseCommand(text);
     const bare = cmd && !cmd.tail && KNOWN_COMMANDS.has(cmd.name) ? cmd.name : null; // «/DELETE», «/delete@бот» — как «/delete»
-    // Сброс согласия — синхронно, до записи метрики (QA PR 27, п. 1): идущая доставка сразу видит отзыв.
-    // startConsent меняет состояние синхронно, до первого await; метрика пишется параллельно («как получится»).
-    if (bare === 'start') { s.stage = 'idle'; s.period = 'day'; const logged = logMetric(chatId, 'start'); try { return await startConsent(chatId, s); } finally { await logged; } }
+    // Сброс согласия — синхронно (QA PR 27, п. 1): идущая доставка сразу видит отзыв.
+    // /start всегда начинает подтверждения заново: до нового согласия метрик нет, событие «start» не пишется.
+    if (bare === 'start') { s.stage = 'idle'; s.period = 'day'; return startConsent(chatId, s); }
     if (bare === 'year') {
       s.stage = 'idle'; s.period = 'year';
       const logged = logMetric(chatId, 'year');
@@ -1040,8 +1082,8 @@ export function createBot({
       if (busy) {
         // Голосовое в окне до отправки (условие 2). Не распознано — ролик не отменяется: «не получилось разобрать голосовое, напиши текстом»;
         // подпись проверяется как текст. Распознанное держит доставку с начала распознавания (как в PR 15).
-        if (captionLevel === 'urgent') return duringRender(chatId, s, caption); // ролик отменяется сейчас
-        if (voiceRefused) return caption ? Promise.all([sendSafe(chatId, TEXT.notHeard), duringRender(chatId, s, caption)]) : sendSafe(chatId, TEXT.notHeard);
+        if (captionLevel === 'urgent') return duringRender(chatId, s, caption, { cycle }); // ролик отменяется сейчас
+        if (voiceRefused) return caption ? Promise.all([sendSafe(chatId, TEXT.notHeard), duringRender(chatId, s, caption, { cycle })]) : sendSafe(chatId, TEXT.notHeard);
         let releaseVoice;
         // Уровень удержания — уровень подписи: concern подписи держит «неизвестно» до конца проверки (не none).
         holdDelivery(s, new Promise((r) => { releaseVoice = r; }), captionLevel, Infinity);
@@ -1049,50 +1091,62 @@ export function createBot({
           let story = '';
           try {
             Promise.resolve().then(() => tg.action(chatId, 'typing')).catch((e) => logError('send', e)); // не ждём
-            story = cleanInput(await transcribe(await tg.fileBuffer(msg.voice.file_id), { duration: msg.voice.duration }));
+            // Согласие сменилось или сессию удалили, пока скачивался файл: распознавание не запускается (QA PR 31 be03e4e);
+            // между получением пути и запросом байтов — аудио не запрашивается (QA PR 31 9649b27).
+            const buf = await tg.fileBuffer(msg.voice.file_id, { ready: () => sameConsent(chatId, s, cycle) });
+            if (buf === null || !sameConsent(chatId, s, cycle)) return outsideConsent(chatId, s, caption);
+            story = cleanInput(await transcribe(buf, { duration: msg.voice.duration }));
           } catch (e) { logError('stt', e); }
           story = String(story || '').trim();
           if (!alive(chatId, s)) return;
+          if (!sameConsent(chatId, s, cycle)) return outsideConsent(chatId, s, story ? withCaption(story, caption) : caption);
           if (!story) {
-            const p = caption ? duringRender(chatId, s, caption) : null; // удержание подписи ставится синхронно
+            const p = caption ? duringRender(chatId, s, caption, { cycle }) : null; // удержание подписи ставится синхронно
             releaseVoice();
             await sendSafe(chatId, TEXT.notHeard);
             return await p;
           }
           // duringRender ставит своё удержание синхронно; внешнее снимаем сразу — эхо и typing ожидание не держат.
-          const p = duringRender(chatId, s, withCaption(story, caption), { echo: `Расшифровка:\n«${story}»` });
+          const p = duringRender(chatId, s, withCaption(story, caption), { echo: `Расшифровка:\n«${story}»`, cycle });
           releaseVoice();
           return await p;
         } finally { releaseVoice(); }
       }
-      if (captionLevel === 'urgent') return handleStory(chatId, s, caption, 'text'); // остановка без распознавания
+      if (captionLevel === 'urgent') return handleStory(chatId, s, caption, 'text', cycle); // остановка без распознавания
       if (voiceRefused) {
         await tg.send(chatId, voiceRefused);
-        return caption ? handleStory(chatId, s, caption, 'text') : undefined; // подпись — тот же путь, что текст
+        return caption ? handleStory(chatId, s, caption, 'text', cycle) : undefined; // подпись — тот же путь, что текст
       }
       await tg.action(chatId, 'typing');
+      // Граница скачивания и распознавания (QA PR 31 be03e4e): согласие сменилось или сессию удалили — ни скачивания,
+      // ни распознавания; во время скачивания — распознавание не запускается.
+      if (!sameConsent(chatId, s, cycle)) return outsideConsent(chatId, s, caption);
       let story = '';
-      try { story = cleanInput(await transcribe(await tg.fileBuffer(msg.voice.file_id), { duration: msg.voice.duration })); }
-      catch (e) { logError('stt', e); }
+      try {
+        const buf = await tg.fileBuffer(msg.voice.file_id, { ready: () => sameConsent(chatId, s, cycle) });
+        if (buf === null || !sameConsent(chatId, s, cycle)) return outsideConsent(chatId, s, caption);
+        story = cleanInput(await transcribe(buf, { duration: msg.voice.duration }));
+      } catch (e) { logError('stt', e); }
       if (!alive(chatId, s)) return; // /delete во время распознавания: ничего не отвечаем
+      if (!sameConsent(chatId, s, cycle)) return outsideConsent(chatId, s, story ? withCaption(story, caption) : caption);
       if (!story) {
         await tg.send(chatId, TEXT.voiceEmpty);
-        return caption ? handleStory(chatId, s, caption, 'text') : undefined;
+        return caption ? handleStory(chatId, s, caption, 'text', cycle) : undefined;
       }
       // Подпись к голосовому — продолжение рассказа: те же проверки на всём, что может попасть в ролик.
       const full = withCaption(story, caption);
       await tg.send(chatId, `Расшифровка:\n«${story}»`);
-      return handleStory(chatId, s, full, 'voice');
+      return handleStory(chatId, s, full, 'voice', cycle);
     }
 
     if (busy && !text) {
       // Кружок, аудио, видео, стикер, фото во время подготовки: ролик не отменяется (условие 2). Подпись — как текст.
       const caption = typeof msg.caption === 'string' ? cleanInput(msg.caption).trim() : '';
-      if (caption) return duringRender(chatId, s, caption);
+      if (caption) return duringRender(chatId, s, caption, { cycle });
       return sendSafe(chatId, msg.video_note || msg.audio || msg.video ? TEXT.notHeard : TEXT.rendering);
     }
     if (!text) return;
-    if (busy) return duringRender(chatId, s, text);
+    if (busy) return duringRender(chatId, s, text, { cycle });
     // Пустая заготовка после нехватки: первая правка открывает черновик (рассказ уже прошёл ту же проверку,
     // что перед репликой нехватки: остановка → технические исходы → нехватка).
     if (s.stage === 'compose' && s.skeleton && !s.episode && parseEdit(text)) {
@@ -1202,8 +1256,9 @@ export function createBot({
     const data = q.data || '';
     if (data.startsWith('cs:')) return onConsent(chatId, s, data);
     if (data.startsWith('fb:')) {
-      const v = data.slice(3);
-      await logMetric(chatId, 'feedback', { value: v });
+      const [, v, cycle] = data.split(':');
+      // Отклик на ролик прежнего согласия (после /delete, /start, отказа) в метрики не пишется; ответ — как обычно.
+      if (cycle && cycle === String(s.consent?.cycle)) await logMetric(chatId, 'feedback', { value: v });
       if (v === 'heavier') { await tg.send(chatId, TEXT.heavier); return tg.send(chatId, helpMessage('concern')); }
       return tg.send(chatId, v === 'fit' ? TEXT.fit : TEXT.miss);
     }
@@ -1275,8 +1330,10 @@ export function telegram(token, { callMs = TELEGRAM_CALL_MS } = {}) {
     send: (chat_id, text, extra = {}) => call('sendMessage', { chat_id, text, disable_web_page_preview: true, ...extra }),
     action: (chat_id, action) => call('sendChatAction', { chat_id, action }).catch(() => {}),
     answer: (id) => call('answerCallbackQuery', { callback_query_id: id }).catch(() => {}),
-    async fileBuffer(file_id) {
+    // ready() — проверка между получением пути (getFile) и запросом байтов: false — аудио не запрашивается, null.
+    async fileBuffer(file_id, { ready } = {}) {
       const f = await call('getFile', { file_id });
+      if (ready && !(await ready())) return null;
       const res = await fetch(`https://api.telegram.org/file/bot${token}/${f.file_path}`, { signal: AbortSignal.timeout(30_000) });
       if (!res.ok) throw new Error(`Telegram file ${res.status}`);
       return Buffer.from(await res.arrayBuffer());
