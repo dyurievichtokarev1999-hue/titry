@@ -1042,14 +1042,61 @@ test('кнопки согласия: «Далее» на 6Б/6Г, «Да»/«Н�
       await b.press(`cs:${st}:yes`);
     }
     assert.equal(b.s().consent.step, 'done', 'обычное согласие проходит');
+    assert.equal(forgot, 0, 'до штатного отказа удаления метрик не было');
     await probe('done', ['yes', 'no', 'next']); // после согласия кнопок нет
+    assert.equal(forgot, 0, 'чужие кнопки после согласия удаление не запускают');
     await b.say('/start'); await b.press('cs:intro:next'); await b.press(`cs:${order[0]}:no`);
     assert.equal(b.s().consent.step, 'declined');
     const forgotAfterNo = forgot;
     await probe('declined', ['yes', 'no', 'next']); // после отказа кнопок нет
     assert.equal(forgot, forgotAfterNo, 'после отказа чужие кнопки удаление не запускают');
-    forgot = 0;
-    assert.equal(forgot, 0, 'удаления метрик не было');
+    assert.equal(forgotAfterNo, 1, 'штатное «Нет» — ровно одно удаление');
     assert.equal(b.events.length, events, 'метрики не менялись');
+  }
+});
+
+// QA PR 32 (39b4695): кнопка с чужого экрана не трогает файл метрик — байты и счётчик удаления до и после равны.
+test('кнопки согласия: чужое действие — файл метрик байт в байт и счётчик удаления прежние; «Нет» — удаление (оба порядка)', { timeout: 20000 }, async () => {
+  for (const order of ORDERS) {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-buttons-'));
+    try {
+      const file = path.join(dir, 'm.jsonl');
+      const real = makeMetrics(file, 'fictional-salt-0001');
+      let forgets = 0;
+      const metrics = { ...real, forget: (id) => { forgets++; return real.forget(id); } };
+      const tg = { send: async () => {}, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''), sendVideo: async () => {} };
+      const bot = createBot({ tg, metrics, consentOrder: order, safetyCheck: async () => false, checkRetryMs: 0,
+        draft: async () => ({ episode: structuredClone(ex.episode), risk: { level: 'none' }, provider: 'claude', dropped: [] }),
+        render: async (e, o) => ({ seconds: 1, duration: 24, outPath: o.outPath }) });
+      const chat = { id: 91101, type: 'private' };
+      const press = (step, a) => bot.handleUpdate({ callback_query: { id: 'q', data: `cs:${step}:${a}:${bot.sessions.get(91101).consent.cycle}`, message: { chat } } });
+      const settle = async () => { await real.log(91199, 'probe'); }; // очередь записей пройдена (строка другого вымышленного участника)
+      await bot.handleUpdate({ message: { chat, text: '/start' } });
+      await press('intro', 'next'); for (const st of order) await press(st, 'yes');
+      await bot.handleUpdate({ message: { chat, text: STORY } });
+      await bot.handleUpdate({ message: { chat, text: '/start' } });
+      await settle();
+      const check = async (step, answers) => {
+        for (const a of answers) {
+          const bytes = await fs.readFile(file); const n = forgets;
+          await press(step, a); await settle();
+          const after = await fs.readFile(file);
+          // строка probe дописывается в конец; строки до неё — те же байты
+          assert.ok(after.subarray(0, bytes.length).equals(bytes), `${order.join('→')} ${step}:${a}: прежние строки файла не изменились`);
+          assert.ok(!after.subarray(bytes.length).toString().includes(real.hash(91101)), `${order.join('→')} ${step}:${a}: новых строк участника нет`);
+          assert.equal(forgets, n, `${order.join('→')} ${step}:${a}: удаления нет`);
+        }
+      };
+      assert.ok((await fs.readFile(file, 'utf8')).includes(real.hash(91101)), 'файл метрик участника непустой');
+      await check('intro', ['yes', 'no', 'maybe']);
+      await press('intro', 'next');
+      await check(order[0], ['next', 'maybe', '']);
+      // Положительный контроль: штатное «Нет» удаляет строки участника.
+      const n = forgets;
+      await press(order[0], 'no'); await settle();
+      assert.equal(forgets, n + 1, '«Нет» — одно удаление');
+      assert.ok(!(await fs.readFile(file, 'utf8')).includes(real.hash(91101)), 'строки участника удалены');
+      await check('declined', ['yes', 'no', 'next']);
+    } finally { await fs.rm(dir, { recursive: true, force: true }); }
   }
 });
