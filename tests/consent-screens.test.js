@@ -129,9 +129,19 @@ for (const order of ORDERS) {
   });
 }
 
-test('порядок экранов: по умолчанию как в комплекте (6Б, затем 6Г); TITRY_CONSENT_ORDER=age_first — возраст первым', () => {
-  assert.deepEqual(consentSteps({}), ['pd', 'age']);
-  assert.deepEqual(consentSteps({ TITRY_CONSENT_ORDER: 'age_first' }), ['age', 'pd']);
+test('порядок экранов: возраст первым (6Г), затем согласие (6Б) — решение А8; прежняя переменная окружения порядок не меняет', async () => {
+  assert.deepEqual(consentSteps(), ['age', 'pd']);
+  const prev = process.env.TITRY_CONSENT_ORDER;
+  process.env.TITRY_CONSENT_ORDER = 'pd_first';
+  try {
+    const sent = [];
+    const bot = createBot({ tg: { send: async (c, t) => { sent.push(t); }, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''), sendVideo: async () => {} },
+      metrics: { hash: () => 'x', log: async () => {}, forget: async () => {} }, safetyCheck: async () => false, draft: async () => ({}), render: async () => ({}) });
+    const chat = { id: 93002, type: 'private' };
+    await bot.handleUpdate({ message: { chat, text: '/start' } });
+    await bot.handleUpdate({ callback_query: { id: 'q', data: `cs:intro:next:${bot.sessions.get(93002).consent.cycle}`, message: { chat } } });
+    assert.equal(sent.at(-1), CONSENT_TEXT.age, 'после 6А — возраст');
+  } finally { if (prev === undefined) delete process.env.TITRY_CONSENT_ORDER; else process.env.TITRY_CONSENT_ORDER = prev; }
 });
 
 test('/year без подтверждений — 6А; после подтверждений — 6Ж (решение Claude, п. 5), период года сохранён; голос расшифровывается', async () => {
@@ -671,8 +681,8 @@ test('отзыв согласия «Нет» на 6Б и 6Г — метрики 
     const n = b.sent.length;
     await b.press(`cs:${refuse}:no`);
     assert.equal(forgot, 1, `«Нет» на ${refuse}: метрики удалены`);
-    const hadPd = order.indexOf('pd') < order.indexOf(refuse);
-    const expected = refuse === 'pd' ? [CONSENT_TEXT.pdDeclined] : [CONSENT_TEXT.ageDeclined, ...(hadPd ? [CONSENT_TEXT.ageDeleted] : [])];
+    // Согласие уже давалось в этой сессии (consentAll выше): «Нет» на возрасте — с сообщением «отметки удалены» при любом порядке.
+    const expected = refuse === 'pd' ? [CONSENT_TEXT.pdDeclined] : [CONSENT_TEXT.ageDeclined, CONSENT_TEXT.ageDeleted];
     assert.deepEqual(b.texts().slice(n), expected, `ответы человеку прежние: ${order.join('→')}, «Нет» на ${refuse}`);
   }
 });

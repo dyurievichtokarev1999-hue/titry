@@ -467,7 +467,7 @@ export function createBot({
   renderTimeoutMs = RENDER_TIMEOUT_MS, // предел активного рендера от старта задачи в слоте (server/render.js)
   renderGraceMs = KILL_GRACE_MS, // запасной предел: renderTimeoutMs + 2×renderGraceMs — слот освобождается принудительно
   botName = null, // имя бота (getMe): «/команда@другой_бот» — не наша команда; без имени «@…» отрезается у любой
-  consentOrder = consentSteps(), // порядок 6Б/6Г после 6А (TITRY_CONSENT_ORDER), не утверждён до правовой проверки
+  consentOrder = consentSteps(), // после 6А: возраст (6Г), затем согласие (6Б) — решение А8; в тестах можно задать иначе
 } = {}) {
   const sessions = new Map();
   // Команда: «/имя», без учёта регистра; «@имя_бота» отрезается только для своего бота. Иначе — не команда (null).
@@ -606,6 +606,7 @@ export function createBot({
     const next = step === 'intro' ? consentOrder[0] : consentOrder[consentOrder.indexOf(step) + 1] || 'done';
     if (answer === 'next' || answer === 'yes') {
       if (step === 'pd') c.given.pd = { at: now().toISOString(), version: CONSENT_VERSION };
+      if (next === 'done') s.consentedBefore = true; // согласие в этой сессии было дано (для ответа на отказ после /start)
       return consentScreen(chatId, s, next);
     }
     c.step = 'declined'; // отказ как событие не храним; дальше бот ничего не спрашивает и не напоминает
@@ -616,7 +617,8 @@ export function createBot({
     if (step === 'pd') await tg.send(chatId, CONSENT_TEXT.pdDeclined);
     else {
       // 6Г «Нет»: отметки о согласии удаляются (в памяти — всегда успешно); отметку «младше 18» не храним.
-      const had = Object.keys(c.given).length > 0;
+      // Возраст спрашивается первым (А8): отметок этого прохождения ещё нет, но согласие могло быть дано раньше в этой сессии.
+      const had = Object.keys(c.given).length > 0 || !!s.consentedBefore;
       c.given = {};
       await tg.send(chatId, CONSENT_TEXT.ageDeclined);
       if (had) await tg.send(chatId, CONSENT_TEXT.ageDeleted);
