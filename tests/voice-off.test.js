@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import { TEXT, voiceEnabled, prepareBot } from '../server/bot.js';
+import { TEXT, TEXT_ONLY, voiceEnabled, prepareBot } from '../server/bot.js';
 import { createBot } from './helpers/consent.js';
 import { NOT_HEARD_TEXT, assessRisk } from '../server/safety.js';
 
@@ -32,12 +32,13 @@ function setup({ voice, render } = {}) {
     sent, events, n,
     say: (text) => bot.handleUpdate({ message: { chat, text } }),
     voice: (caption) => bot.handleUpdate({ message: { chat, voice: { file_id: 'f', duration: 5 }, ...(caption ? { caption } : {}) } }),
+    note: () => bot.handleUpdate({ message: { chat, video_note: { file_id: 'v' } } }),
     play: () => bot.handleUpdate({ callback_query: { id: 'q', data: 'play:1', message: { chat } } }),
   };
 }
 
 test('флаг: голос выключен только при TITRY_VOICE=off', () => {
-  assert.equal(voiceEnabled({ TITRY_VOICE: 'off' }), false);
+  for (const v of ['off', 'OFF', ' Off ']) assert.equal(voiceEnabled({ TITRY_VOICE: v }), false, v);
   for (const env of [{}, { TITRY_VOICE: 'on' }, { TITRY_VOICE: '' }]) assert.equal(voiceEnabled(env), true);
 });
 
@@ -53,7 +54,8 @@ test('голос выключен: «пока только текстом», б�
 test('голос выключен: подпись к голосовому — как текст (черновик из подписи, источник text)', async () => {
   const b = setup({ voice: false });
   await b.voice(ex.story);
-  assert.ok(b.sent.includes(TEXT.voiceTextOnly));
+  assert.ok(b.sent.includes(TEXT.voiceTextOnlyCaption), 'подпись взята — не просим прислать ещё раз');
+  assert.ok(!b.sent.includes(TEXT.voiceTextOnly));
   assert.equal(b.n.download + b.n.stt, 0);
   assert.equal(b.n.draft, 1, 'подпись ушла в черновик');
   assert.equal(b.events.find((e) => e.ev === 'story')?.source, 'text');
@@ -81,23 +83,51 @@ test('голос выключен во время подготовки роли�
   assert.equal(b.n.video, 1);
 });
 
-test('голос включён (по умолчанию, без флага): голосовое распознаётся, как раньше', async () => {
-  const prev = process.env.TITRY_VOICE; delete process.env.TITRY_VOICE;
+test('голос выключен во время подготовки ролика: явная опасность в подписи — экран остановки, ролик не уходит', async () => {
+  let release; const gate = new Promise((r) => { release = r; });
+  const b = setup({ voice: false, render: () => gate });
+  await b.say(ex.story);
+  const p = b.play();
+  await waitFor(() => b.n.render === 1);
+  await b.voice('Не хочу жить.');
+  release(); await p;
+  assert.match(b.sent.join('\n'), /Для этого рассказа ролика не будет/, 'экран остановки');
+  assert.equal(b.n.download + b.n.stt, 0);
+  assert.equal(b.n.video, 0);
+});
+
+test('голос выключен во время подготовки ролика: кружок — «пока только текстом»', async () => {
+  let release; const gate = new Promise((r) => { release = r; });
+  const b = setup({ voice: false, render: () => gate });
+  await b.say(ex.story);
+  const p = b.play();
+  await waitFor(() => b.n.render === 1);
+  await b.note();
+  release(); await p;
+  assert.ok(b.sent.includes(TEXT.voiceTextOnly));
+  assert.ok(!b.sent.includes(NOT_HEARD_TEXT));
+});
+
+test('голос выключен: /year и «нет черновика» не предлагают голос', async () => {
+  const b = setup({ voice: false });
+  await b.say('/year');
+  assert.equal(b.sent.at(-1), TEXT_ONLY.year);
+  await b.play(); // черновика нет
+  assert.equal(b.sent.at(-1), TEXT_ONLY.noDraft);
+  for (const t of Object.values(TEXT_ONLY)) assert.doesNotMatch(t, /голос/i);
+  const on = setup();
+  await on.say('/year');
+  assert.equal(on.sent.at(-1), TEXT.year, 'с голосом — прежний текст');
+});
+
+// createBot по умолчанию — с голосом и не читает окружение (тесты не зависят от TITRY_VOICE оболочки); флаг передаёт main.
+test('голос включён (по умолчанию): голосовое распознаётся, как раньше, даже при TITRY_VOICE=off в окружении', async () => {
+  const prev = process.env.TITRY_VOICE; process.env.TITRY_VOICE = 'off';
   try {
     const b = setup();
     await b.voice();
     assert.deepEqual([b.n.download, b.n.stt, b.n.draft], [1, 1, 1]);
     assert.ok(!b.sent.includes(TEXT.voiceTextOnly));
-  } finally { if (prev !== undefined) process.env.TITRY_VOICE = prev; }
-});
-
-test('по умолчанию createBot читает TITRY_VOICE=off', async () => {
-  const prev = process.env.TITRY_VOICE; process.env.TITRY_VOICE = 'off';
-  try {
-    const b = setup();
-    await b.voice();
-    assert.equal(b.sent.at(-1), TEXT.voiceTextOnly);
-    assert.equal(b.n.download + b.n.stt, 0);
   } finally { if (prev === undefined) delete process.env.TITRY_VOICE; else process.env.TITRY_VOICE = prev; }
 });
 
@@ -112,4 +142,5 @@ test('старт на реальных данных (TITRY_RELEASE_REAL_DATA=1) 
   assert.equal(done, 3, 'голос выключен — старт продолжается');
   // Вымышленный стенд без реальных данных — флаг не обязателен.
   await prepareBot({ env: { METRICS_SALT: env.METRICS_SALT, ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY }, ...opts });
+  assert.equal(done, 6, 'вымышленный стенд — старт продолжается');
 });

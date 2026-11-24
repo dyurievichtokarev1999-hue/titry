@@ -56,6 +56,12 @@ test('выпуск для реальных данных: маркеров «[с�
   assert.deepEqual(found, [], 'выпуск для реальных данных запрещён');
 });
 
+// А4 (решение Дмитрия 24.11): в G0 только текст — согласие на реальных данных не обещает голос и распознавание.
+test('выпуск для реальных данных: согласие без голоса и распознавания (А4, TITRY_VOICE=off)', { skip: process.env.TITRY_RELEASE_REAL_DATA !== '1' && 'только при TITRY_RELEASE_REAL_DATA=1' }, () => {
+  const hits = Object.entries(CONSENT_TEXT).filter(([, v]) => /расшифр|SpeechKit|голос/i.test(typeof v === 'function' ? v() : v)).map(([k]) => k);
+  assert.deepEqual(hits, [], 'согласие G0 упоминает голос или распознавание');
+});
+
 // Предмортем G0, п. 1: старт бота на реальных данных сам выполняет проверку — до очистки, хранилища и приёма сообщений.
 test('старт бота с TITRY_RELEASE_REAL_DATA=1: тексты не окончательные — отказ release_texts до очистки; в журнале только ключи', async () => {
   const lines = []; let cleaned = 0; let loaded = 0;
