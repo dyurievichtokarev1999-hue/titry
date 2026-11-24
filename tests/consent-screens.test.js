@@ -130,8 +130,8 @@ for (const order of ORDERS) {
   });
 }
 
-test('порядок экранов: возраст первым (6Г), затем согласие (6Б) — решение А8; прежняя переменная окружения порядок не меняет', async () => {
-  assert.deepEqual(consentSteps(), ['age', 'pd']);
+test('порядок экранов: возраст (6Г), 6А, согласие (6Б) — решение А8; прежняя переменная окружения порядок не меняет', async () => {
+  assert.deepEqual(consentSteps(), ['age', 'intro', 'pd']);
   const prev = process.env.TITRY_CONSENT_ORDER;
   process.env.TITRY_CONSENT_ORDER = 'pd_first';
   try {
@@ -140,8 +140,7 @@ test('порядок экранов: возраст первым (6Г), зате
       metrics: { hash: () => 'x', log: async () => {}, forget: async () => {} }, safetyCheck: async () => false, draft: async () => ({}), render: async () => ({}) });
     const chat = { id: 93002, type: 'private' };
     await bot.handleUpdate({ message: { chat, text: '/start' } });
-    await bot.handleUpdate({ callback_query: { id: 'q', data: `cs:intro:next:${bot.sessions.get(93002).consent.cycle}`, message: { chat } } });
-    assert.equal(sent.at(-1), CONSENT_TEXT.age, 'после 6А — возраст');
+    assert.equal(sent.at(-1), CONSENT_TEXT.age, 'на /start — вопрос о возрасте');
   } finally { if (prev === undefined) delete process.env.TITRY_CONSENT_ORDER; else process.env.TITRY_CONSENT_ORDER = prev; }
 });
 
