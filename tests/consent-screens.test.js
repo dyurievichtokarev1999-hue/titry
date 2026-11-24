@@ -610,19 +610,20 @@ test('метрики после /delete: поздняя кнопка откли�
   assert.equal(b.n.video, 1);
   assert.ok(b.events.includes('story') && b.events.includes('render'), 'после согласия метрики пишутся');
   const cycle = b.s().consent.cycle; // метка в кнопках отклика под роликом
-  await b.press(`fb:fit:${cycle}`);
+  await b.press(`fb:fit:${cycle}:1`);
   assert.equal(b.events.at(-1), 'feedback');
   const before = b.events.length;
   await b.say('/delete');
-  await b.press(`fb:heavier:${cycle}`); // кнопка старого сообщения с роликом
+  await b.press(`fb:heavier:${cycle}:1`); // кнопка старого сообщения с роликом
   await b.say(STORY); await b.say('/year');
   assert.equal(b.events.length, before, 'после /delete записей нет');
   assert.ok(b.texts().includes(helpMessage('concern')), 'помощь по «тяжелее» показана и без записи');
   // Новое согласие: кнопка старого ролика (прежний цикл) по-прежнему не пишется; новый рассказ — пишется.
   await consentAll(b, ['pd', 'age']);
-  await b.press(`fb:fit:${cycle}`);
-  assert.equal(b.events.length, before, 'старый ролик после нового согласия не пишется');
-  await b.say(STORY);
+  await b.say(STORY); await b.press(`play:${b.s().draftId}`); // новый ролик №1 в новой сессии — номер совпадает со старым
+  const fresh = b.events.length;
+  await b.press(`fb:fit:${cycle}:1`); // кнопка старого ролика: номер допустим, цикл прежний
+  assert.equal(b.events.length, fresh, 'старый ролик после нового согласия не пишется (проверка цикла)');
   assert.ok(b.events.length > before, 'при новом согласии метрики пишутся');
 });
 
@@ -1025,15 +1026,16 @@ test('отклик под роликом: чужое значение не пи�
   const b = setup(['pd', 'age']);
   await consentAll(b, ['pd', 'age']);
   const cycle = b.s().consent.cycle;
+  b.s().videoSeq = 3; // три отправленных ролика: по одному отклику на каждый (один отклик на ролик)
   for (const v of ['вымышленный текст', 'fit2', '', 'heavier ']) {
     const n = b.sent.length; const events = b.events.length;
-    await b.press(`fb:${v}:${cycle}`);
+    await b.press(`fb:${v}:${cycle}:1`);
     assert.equal(b.events.length, events, `«${v}»: метрики нет`);
     assert.equal(b.sent.length, n, `«${v}»: ответа нет`);
   }
-  for (const [v, reply] of [['fit', TEXT.fit], ['miss', TEXT.miss], ['heavier', TEXT.heavier]]) {
+  for (const [i, [v, reply]] of [['fit', TEXT.fit], ['miss', TEXT.miss], ['heavier', TEXT.heavier]].entries()) {
     const n = b.sent.length; const e = b.events.length;
-    await b.press(`fb:${v}:${cycle}`);
+    await b.press(`fb:${v}:${cycle}:${i + 1}`);
     assert.equal(b.events.length, e + 1, `${v}: ровно одна метрика`);
     assert.equal(b.events.at(-1), 'feedback');
     assert.deepEqual(b.extras.at(-1), { value: v }, `${v}: записано своё значение`);

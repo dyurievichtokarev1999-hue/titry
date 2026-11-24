@@ -279,11 +279,12 @@ export function draftKeyboard(ep, draftId = 0) {
 }
 
 // Значения кнопок — FEEDBACK_VALUES (менять вместе). Метка цикла согласия в кнопках отклика: отклик пишется в метрики, только если ролик отправлен при текущем согласии.
-const feedbackKeyboard = (cycle) => ({
+// video — номер отправленного ролика в сессии: в метрики пишется один отклик на ролик (первое нажатие).
+const feedbackKeyboard = (cycle, video) => ({
   inline_keyboard: [[
-    { text: 'Попало', callback_data: `fb:fit:${cycle}` },
-    { text: 'Не подходит', callback_data: `fb:miss:${cycle}` },
-    { text: 'Стало тяжелее', callback_data: `fb:heavier:${cycle}` },
+    { text: 'Попало', callback_data: `fb:fit:${cycle}:${video}` },
+    { text: 'Не подходит', callback_data: `fb:miss:${cycle}:${video}` },
+    { text: 'Стало тяжелее', callback_data: `fb:heavier:${cycle}:${video}` },
   ]],
 });
 
@@ -899,7 +900,8 @@ export function createBot({
       if (!(await clearToSend())) return;
       // ready — та же проверка после чтения файла, прямо перед запросом (QA PR 27, п. 2). Загрузка, уже начатая,
       // не отзывается: Telegram не умеет отменить отправку; окно — время одного HTTP-запроса.
-      const sent = await tg.sendVideo(chatId, r.outPath, { caption: 'Конец сцены.', width: 720, height: 1280, duration: Math.round(r.duration), reply_markup: feedbackKeyboard(cycle) }, { ready: clearToSend });
+      const video = s.videoSeq = (s.videoSeq || 0) + 1; // номер ролика в сессии — в кнопки отклика
+      const sent = await tg.sendVideo(chatId, r.outPath, { caption: 'Конец сцены.', width: 720, height: 1280, duration: Math.round(r.duration), reply_markup: feedbackKeyboard(cycle, video) }, { ready: clearToSend });
       if (sent === null) return; // отзыв или отмена во время чтения файла: ролика нет — и метрики render нет
       // /delete во время отправки: после metrics.forget новая запись о человеке не появляется.
       if (!alive(chatId, s)) return;
@@ -1270,11 +1272,21 @@ export function createBot({
     const data = q.data || '';
     if (data.startsWith('cs:')) return onConsent(chatId, s, data);
     if (data.startsWith('fb:')) {
-      const [, v, cycle] = data.split(':');
+      const [, v, cycle, video] = data.split(':');
       // Только значения показанных кнопок (fit, miss, heavier): иное значение не пишется в метрики и ничего не отвечает.
       if (!FEEDBACK_VALUES.has(v)) return;
       // Отклик на ролик прежнего согласия (после /delete, /start, отказа) в метрики не пишется; ответ на одну из трёх кнопок — как обычно.
-      if (cycle && cycle === String(s.consent?.cycle)) await logMetric(chatId, 'feedback', { value: v });
+      // Один отклик на ролик: метрики «Попадание» и «Вред» считаются по роликам, поэтому под каждым роликом в метрики
+      // пишется первый ответ, а «Стало тяжелее» — ещё один раз, если первым был другой ответ (сигнал вреда не теряется).
+      // Кнопки без номера ролика (до этого изменения) или с номером, которого не было, в метрики не пишутся.
+      const n = /^\d+$/.test(video || '') ? Number(video) : 0;
+      s.feedbackFor ||= new Map(); // номер ролика → записанные ответы
+      const done = s.feedbackFor.get(n);
+      const fresh = !done || (v === 'heavier' && !done.has('heavier'));
+      if (cycle && cycle === String(s.consent?.cycle) && n >= 1 && n <= (s.videoSeq || 0) && fresh) {
+        s.feedbackFor.set(n, new Set([...(done || []), v]));
+        await logMetric(chatId, 'feedback', { value: v });
+      }
       if (v === 'heavier') { await tg.send(chatId, TEXT.heavier); return tg.send(chatId, helpMessage('concern')); }
       return tg.send(chatId, v === 'fit' ? TEXT.fit : TEXT.miss);
     }
