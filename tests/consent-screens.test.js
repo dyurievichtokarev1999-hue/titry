@@ -26,7 +26,8 @@ function setup(order, { draftGate, renderGate, unsafe, sendGate, botName, onForg
     sendVideo: async (c, f, extra, o = {}) => { if (hold?.video) await hold.video; if (o.ready && !(await o.ready())) return null; n.video++; },
   };
   const events = [];
-  const metrics = { hash: () => 'qa-fictional', log: async (c, event) => { events.push(event); if (event === 'story') n.story++; if (hold?.[event]) await hold[event]; }, forget: async () => { if (onForget) onForget(); } };
+  const extras = [];
+  const metrics = { hash: () => 'qa-fictional', log: async (c, event, extra) => { events.push(event); extras.push(extra); if (event === 'story') n.story++; if (hold?.[event]) await hold[event]; }, forget: async () => { if (onForget) onForget(); } };
   const bot = createBot({
     tg, metrics, consentOrder: order, botName,
     transcribe: async () => { n.stt++; await transcribeGate; return transcript; },
@@ -44,7 +45,7 @@ function setup(order, { draftGate, renderGate, unsafe, sendGate, botName, onForg
   const voiceCaption = () => bot.handleUpdate({ message: { chat, voice: { file_id: 'f2', duration: 5 }, caption: STORY } });
   const photoCaption = () => bot.handleUpdate({ message: { chat, photo: [{ file_id: 'p1' }], caption: STORY } });
   const s = () => bot.sessions.get(chat.id);
-  return { bot, sent, n, events, say, press, voice, voiceCaption, photoCaption, s, texts: () => sent.map((m) => m.text), fetched: () => fetched };
+  return { bot, sent, n, events, extras, say, press, voice, voiceCaption, photoCaption, s, texts: () => sent.map((m) => m.text), fetched: () => fetched };
 }
 
 // Все входящие с рассказом: текст, голосовое, голосовое с подписью, фото с подписью — ничего не обрабатывается.
@@ -1027,6 +1028,28 @@ test('голосовое: /delete или /start, пока скачивались
       assert.equal(b.events.length, events, 'метрик нет');
     }
   }
+});
+
+// Кнопки отклика под роликом: принимаются только три показанных значения.
+test('отклик под роликом: чужое значение не пишется в метрики и не получает ответа; три кнопки — как обычно', async () => {
+  const b = setup(['pd', 'age']);
+  await consentAll(b, ['pd', 'age']);
+  const cycle = b.s().consent.cycle;
+  for (const v of ['вымышленный текст', 'fit2', '', 'heavier ']) {
+    const n = b.sent.length; const events = b.events.length;
+    await b.press(`fb:${v}:${cycle}`);
+    assert.equal(b.events.length, events, `«${v}»: метрики нет`);
+    assert.equal(b.sent.length, n, `«${v}»: ответа нет`);
+  }
+  for (const [v, reply] of [['fit', TEXT.fit], ['miss', TEXT.miss], ['heavier', TEXT.heavier]]) {
+    const n = b.sent.length; const e = b.events.length;
+    await b.press(`fb:${v}:${cycle}`);
+    assert.equal(b.events.length, e + 1, `${v}: ровно одна метрика`);
+    assert.equal(b.events.at(-1), 'feedback');
+    assert.deepEqual(b.extras.at(-1), { value: v }, `${v}: записано своё значение`);
+    assert.equal(b.texts()[n], reply, `${v}: ответ прежний`);
+  }
+  assert.equal(b.texts().at(-1), helpMessage('concern'), '«Стало тяжелее» — блок помощи');
 });
 
 // QA PR 32 (03b4b93): экран принимает только свои кнопки — 6А «Далее»; 6Б и 6Г «Да» и «Нет».
