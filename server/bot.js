@@ -23,6 +23,8 @@ const WATERMARK = process.env.BOT_WATERMARK ?? 'сделано в титрах';
 
 // Команды бота (setMyCommands). Разбор — parseCommand в createBot: без учёта регистра, «@имя_бота» — только своего бота.
 const KNOWN_COMMANDS = new Set(['start', 'year', 'delete', 'help']);
+// Значения кнопок отклика под роликом — те же, что в feedbackKeyboard (менять вместе).
+const FEEDBACK_VALUES = new Set(['fit', 'miss', 'heavier']);
 // Начало правки черновика: «2:», «2=», «+ …». Короткий текст, который parseEdit не разобрал, — подсказка с /help (без «2.»: так начинаются рассказы-списки).
 const EDIT_START = /^(?:\d{1,2}\s*[:=]|\+)/;
 // Предел, сколько доставка ролика ждёт проверки сообщений, пришедших во время подготовки (страховка от зависания;
@@ -276,7 +278,7 @@ export function draftKeyboard(ep, draftId = 0) {
   };
 }
 
-// Метка цикла согласия в кнопках отклика: отклик пишется в метрики, только если ролик отправлен при текущем согласии.
+// Значения кнопок — FEEDBACK_VALUES (менять вместе). Метка цикла согласия в кнопках отклика: отклик пишется в метрики, только если ролик отправлен при текущем согласии.
 const feedbackKeyboard = (cycle) => ({
   inline_keyboard: [[
     { text: 'Попало', callback_data: `fb:fit:${cycle}` },
@@ -1269,7 +1271,9 @@ export function createBot({
     if (data.startsWith('cs:')) return onConsent(chatId, s, data);
     if (data.startsWith('fb:')) {
       const [, v, cycle] = data.split(':');
-      // Отклик на ролик прежнего согласия (после /delete, /start, отказа) в метрики не пишется; ответ — как обычно.
+      // Только значения показанных кнопок (fit, miss, heavier): иное значение не пишется в метрики и ничего не отвечает.
+      if (!FEEDBACK_VALUES.has(v)) return;
+      // Отклик на ролик прежнего согласия (после /delete, /start, отказа) в метрики не пишется; ответ на одну из трёх кнопок — как обычно.
       if (cycle && cycle === String(s.consent?.cycle)) await logMetric(chatId, 'feedback', { value: v });
       if (v === 'heavier') { await tg.send(chatId, TEXT.heavier); return tg.send(chatId, helpMessage('concern')); }
       return tg.send(chatId, v === 'fit' ? TEXT.fit : TEXT.miss);
