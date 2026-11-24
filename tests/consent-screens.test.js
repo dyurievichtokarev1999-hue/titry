@@ -655,6 +655,72 @@ test('метрики: новое согласие во время старой �
   release(); await playing;
 });
 
+// Решение Claude 20.11: отзыв согласия («Нет» на 6Б/6Г после согласия) = удаление метрик, как /delete.
+test('отзыв согласия «Нет» на 6Б и 6Г — метрики участника удаляются; ответы прежние; повторный /start без «Нет» не стирает', async () => {
+  for (const order of ORDERS) for (const refuse of ['pd', 'age']) {
+    let forgot = 0;
+    const b = setup(order, { onForget: () => { forgot++; } });
+    await consentAll(b, order);
+    await b.say(STORY);
+    assert.ok(b.events.length > 0);
+    await b.say('/start');
+    assert.equal(forgot, 0, '/start сам по себе не стирает');
+    await b.press('cs:intro:next');
+    for (const st of order) { if (st === refuse) break; await b.press(`cs:${st}:yes`); }
+    await b.press(`cs:${refuse}:maybe`); // не «Нет»: ничего не происходит
+    assert.equal(forgot, 0, 'иное значение кнопки — не отказ');
+    const n = b.sent.length;
+    await b.press(`cs:${refuse}:no`);
+    assert.equal(forgot, 1, `«Нет» на ${refuse}: метрики удалены`);
+    const hadPd = order.indexOf('pd') < order.indexOf(refuse);
+    const expected = refuse === 'pd' ? [CONSENT_TEXT.pdDeclined] : [CONSENT_TEXT.ageDeclined, ...(hadPd ? [CONSENT_TEXT.ageDeleted] : [])];
+    assert.deepEqual(b.texts().slice(n), expected, `ответы человеку прежние: ${order.join('→')}, «Нет» на ${refuse}`);
+  }
+});
+
+test('отзыв согласия: удаление метрик не подтверждено — ответы прежние, затем честное сообщение; в журнале только код', async () => {
+  const b = setup(['pd', 'age'], { onForget: () => { throw Object.assign(new Error('x'), { code: 'EIO' }); } });
+  await consentAll(b, ['pd', 'age']);
+  await b.say('/start'); await b.press('cs:intro:next');
+  const errs = []; const orig = console.error; console.error = (l) => errs.push(String(l));
+  const n = b.sent.length;
+  try { await b.press('cs:pd:no'); } finally { console.error = orig; }
+  assert.deepEqual(b.texts().slice(n), [CONSENT_TEXT.pdDeclined, TEXT.withdrawForgetFailed]);
+  // Текст редактора (ПРАВКА-ЗАПРОС 21.11) — литералом; «/delete» отдельным словом, без знаков препинания рядом.
+  assert.equal(TEXT.withdrawForgetFailed, 'Пока не удалось подтвердить удаление твоей статистики. Чтобы повторить запрос, отправь /delete чуть позже.');
+  assert.match(TEXT.withdrawForgetFailed, / \/delete /);
+  assert.match(errs.join('\n'), /metrics\.forget\.withdraw/);
+  assert.ok(!errs.join('\n').includes('88001'), 'идентификатора чата в журнале нет');
+});
+
+test('отзыв согласия: строки участника удалены из файла метрик, строки другого участника остаются', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-withdraw-'));
+  try {
+    const metrics = makeMetrics(path.join(dir, 'm.jsonl'), 'fictional-salt-0001');
+    const sent = [];
+    const tg = { send: async (c, text) => { sent.push(text); }, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''), sendVideo: async () => {} };
+    const bot = createBot({ tg, metrics, consentOrder: ['pd', 'age'], safetyCheck: async () => false, checkRetryMs: 0,
+      draft: async () => ({ episode: structuredClone(ex.episode), risk: { level: 'none' }, provider: 'claude', dropped: [] }),
+      render: async (e, o) => ({ seconds: 1, duration: 24, outPath: o.outPath }) });
+    const run = async (id, steps) => {
+      const chat = { id, type: 'private' };
+      const press = (d) => bot.handleUpdate({ callback_query: { id: 'q', data: `${d}:${bot.sessions.get(id).consent.cycle}`, message: { chat } } });
+      await bot.handleUpdate({ message: { chat, text: '/start' } });
+      await press('cs:intro:next'); await press('cs:pd:yes'); await press('cs:age:yes');
+      await bot.handleUpdate({ message: { chat, text: STORY } });
+      for (const st of steps) await (st.startsWith('/') ? bot.handleUpdate({ message: { chat, text: st } }) : press(st));
+    };
+    await run(91001, []);
+    await run(91002, []);
+    const before = (await fs.readFile(path.join(dir, 'm.jsonl'), 'utf8')).split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    assert.ok(before.some((l) => l.user === metrics.hash(91002)), 'до отзыва строки участника есть');
+    const chat = { id: 91002, type: 'private' };
+    await bot.handleUpdate({ message: { chat, text: '/start' } });
+    for (const d of ['cs:intro:next', 'cs:pd:no']) await bot.handleUpdate({ callback_query: { id: 'q', data: `${d}:${bot.sessions.get(91002).consent.cycle}`, message: { chat } } });
+    const lines = (await fs.readFile(path.join(dir, 'm.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    assert.ok(lines.length > 0 && lines.every((l) => l.user === metrics.hash(91001)), 'остались только строки другого участника');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
 // QA PR 31 (05d5aba): согласие проверяется и в очереди прямо перед записью; метрика старой доставки — только в её цикле.
 function setupQueued(order, { sendVideo } = {}) {
   // Подмена очереди метрик: запись ждёт release, затем — как настоящая очередь — спрашивает allow() перед записью.
@@ -974,4 +1040,86 @@ test('отклик под роликом: чужое значение не пи�
     assert.equal(b.texts()[n], reply, `${v}: ответ прежний`);
   }
   assert.equal(b.texts().at(-1), helpMessage('concern'), '«Стало тяжелее» — блок помощи');
+});
+
+// QA PR 32 (03b4b93): экран принимает только свои кнопки — 6А «Далее»; 6Б и 6Г «Да» и «Нет».
+test('кнопки согласия: «Далее» на 6Б/6Г, «Да»/«Нет» на 6А и чужие значения — шаг, отметки и метрики не меняются, экрана нет', { timeout: 15000 }, async () => {
+  for (const order of ORDERS) {
+    let forgot = 0;
+    const b = setup(order, { onForget: () => { forgot++; } });
+    await consentAll(b, order);
+    await b.say(STORY); // метрики участника есть
+    const events = b.events.length;
+    await b.say('/start');
+    const probe = async (step, answers) => {
+      for (const a of answers) {
+        const before = { step: b.s().consent.step, given: JSON.stringify(b.s().consent.given), sent: b.sent.length };
+        await b.bot.handleUpdate({ callback_query: { id: 'q', data: `cs:${step}:${a}:${b.s().consent.cycle}`, message: { chat: { id: 88001, type: 'private' } } } });
+        assert.deepEqual({ step: b.s().consent.step, given: JSON.stringify(b.s().consent.given), sent: b.sent.length }, before, `${order.join('→')}: ${step}:${a}`);
+      }
+    };
+    await probe('intro', ['yes', 'no', 'maybe']);
+    await b.press('cs:intro:next');
+    for (const st of order) {
+      await probe(st, ['next', 'maybe', '']);
+      await b.press(`cs:${st}:yes`);
+    }
+    assert.equal(b.s().consent.step, 'done', 'обычное согласие проходит');
+    assert.equal(forgot, 0, 'до штатного отказа удаления метрик не было');
+    await probe('done', ['yes', 'no', 'next']); // после согласия кнопок нет
+    assert.equal(forgot, 0, 'чужие кнопки после согласия удаление не запускают');
+    await b.say('/start'); await b.press('cs:intro:next'); await b.press(`cs:${order[0]}:no`);
+    assert.equal(b.s().consent.step, 'declined');
+    const forgotAfterNo = forgot;
+    await probe('declined', ['yes', 'no', 'next']); // после отказа кнопок нет
+    assert.equal(forgot, forgotAfterNo, 'после отказа чужие кнопки удаление не запускают');
+    assert.equal(forgotAfterNo, 1, 'штатное «Нет» — ровно одно удаление');
+    assert.equal(b.events.length, events, 'метрики не менялись');
+  }
+});
+
+// QA PR 32 (39b4695): кнопка с чужого экрана не трогает файл метрик — байты и счётчик удаления до и после равны.
+test('кнопки согласия: чужое действие — файл метрик байт в байт и счётчик удаления прежние; «Нет» — удаление (оба порядка)', { timeout: 20000 }, async () => {
+  for (const order of ORDERS) {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-buttons-'));
+    try {
+      const file = path.join(dir, 'm.jsonl');
+      const real = makeMetrics(file, 'fictional-salt-0001');
+      let forgets = 0;
+      const metrics = { ...real, forget: (id) => { forgets++; return real.forget(id); } };
+      const tg = { send: async () => {}, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''), sendVideo: async () => {} };
+      const bot = createBot({ tg, metrics, consentOrder: order, safetyCheck: async () => false, checkRetryMs: 0,
+        draft: async () => ({ episode: structuredClone(ex.episode), risk: { level: 'none' }, provider: 'claude', dropped: [] }),
+        render: async (e, o) => ({ seconds: 1, duration: 24, outPath: o.outPath }) });
+      const chat = { id: 91101, type: 'private' };
+      const press = (step, a) => bot.handleUpdate({ callback_query: { id: 'q', data: `cs:${step}:${a}:${bot.sessions.get(91101).consent.cycle}`, message: { chat } } });
+      const settle = async () => { await real.log(91199, 'probe'); }; // очередь записей пройдена (строка другого вымышленного участника)
+      await bot.handleUpdate({ message: { chat, text: '/start' } });
+      await press('intro', 'next'); for (const st of order) await press(st, 'yes');
+      await bot.handleUpdate({ message: { chat, text: STORY } });
+      await bot.handleUpdate({ message: { chat, text: '/start' } });
+      await settle();
+      const check = async (step, answers) => {
+        for (const a of answers) {
+          const bytes = await fs.readFile(file); const n = forgets;
+          await press(step, a); await settle();
+          const after = await fs.readFile(file);
+          // строка probe дописывается в конец; строки до неё — те же байты
+          assert.ok(after.subarray(0, bytes.length).equals(bytes), `${order.join('→')} ${step}:${a}: прежние строки файла не изменились`);
+          assert.ok(!after.subarray(bytes.length).toString().includes(real.hash(91101)), `${order.join('→')} ${step}:${a}: новых строк участника нет`);
+          assert.equal(forgets, n, `${order.join('→')} ${step}:${a}: удаления нет`);
+        }
+      };
+      assert.ok((await fs.readFile(file, 'utf8')).includes(real.hash(91101)), 'файл метрик участника непустой');
+      await check('intro', ['yes', 'no', 'maybe']);
+      await press('intro', 'next');
+      await check(order[0], ['next', 'maybe', '']);
+      // Положительный контроль: штатное «Нет» удаляет строки участника.
+      const n = forgets;
+      await press(order[0], 'no'); await settle();
+      assert.equal(forgets, n + 1, '«Нет» — одно удаление');
+      assert.ok(!(await fs.readFile(file, 'utf8')).includes(real.hash(91101)), 'строки участника удалены');
+      await check('declined', ['yes', 'no', 'next']);
+    } finally { await fs.rm(dir, { recursive: true, force: true }); }
+  }
 });
