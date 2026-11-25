@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS, episodeToText, EDIT_SEP, cleanInput, joinEdits } from '../engine/episode.js';
 import { makeDraft, draftRuleBased, modelSafetyCheck, hasClaudeCredentials, pairFromSentence, SAFETY_TIMEOUT_MS, STORY_MAX, TOO_LONG_TEXT } from './draft.js';
 import { makeGate, modelModeAtStart, RETRY_DELAY_MS } from './gate.js';
-import { startsWithContinuation, modelConcernMessage, helpMessage, tryLaterMessage, NOT_HEARD_TEXT, prepareHelp, assessRisk, assessEpisodeRisk, validateSafeEpisode, threatErrors, threatPronounFilter, INSUFFICIENT_TEXT, INSUFFICIENT_INVITE_TEXT, INSUFFICIENT_AFTER_EXCLUSION, INSUFFICIENT_MATERIAL, EDIT_NOT_IN_TITLES_TEXT, editNotInTitlesText, TELEGRAM_TEXT_LIMIT } from './safety.js';
+import { startsWithContinuation, modelConcernMessage, helpMessage, tryLaterMessage, TRY_LATER_TEXT, NOT_HEARD_TEXT, prepareHelp, assessRisk, assessEpisodeRisk, validateSafeEpisode, threatErrors, threatPronounFilter, INSUFFICIENT_TEXT, INSUFFICIENT_INVITE_TEXT, INSUFFICIENT_AFTER_EXCLUSION, INSUFFICIENT_MATERIAL, EDIT_NOT_IN_TITLES_TEXT, editNotInTitlesText, TELEGRAM_TEXT_LIMIT } from './safety.js';
 import { renderEpisode, checkRenderer, ROOT, RENDER_TIMEOUT_MS, KILL_GRACE_MS, renderTimeoutFromEnv, withRenderTimeout, removeQuiet } from './render.js';
 import { logError, safeCode, logRenderTimeout } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS, cleanupVoiceOrphans } from './stt.js';
@@ -826,8 +826,13 @@ export function createBot({
       // «Неизвестно» и после повтора, отказ модели проверять — ролика нет при любом локальном уровне (решение Дмитрия
       // 24.11, Б2 — вариант А, строгий, на время G0; матрица Б-4, строки 4–6). Обратимо правкой кода.
       logError('check', { code: g.code });
+      // Доставку уже отменило сообщение окна (ответ отправлен), отозвано согласие или сессия сменилась — молча.
+      if (cancelled() || !current()) { if (alive(chatId, s) && s.stage === 'rendering') s.stage = s.verdict === 'blocked' ? 'help' : 'draft'; return; }
       s.stage = 'draft';
-      return tg.send(chatId, TEXT.tryLater());
+      // Контакты помощи — только при тревоге (локальный concern, флаг модели в черновике, отказ модели проверять);
+      // спокойному рассказу — мягкое «не получилось» без контактов, как при технических сбоях.
+      const worry = g.refusal || gate.hasConcern(s.scope, original) || assessEpisodeRisk(joinEdits(story), ep).level !== 'none';
+      return tg.send(chatId, worry ? TEXT.tryLater() : TRY_LATER_TEXT);
     } else if (!g.ok) {
       // Хранилище запретов недоступно: выдачи нет.
       logError('check', { code: g.code });
@@ -881,16 +886,15 @@ export function createBot({
       const clearToSend = async () => {
         const pending = await waitHolds(s, holdDeadline);
         if (pending.length) {
-          // Предел ожидания истёк — как «неизвестно» (условие 3): у ждущих сообщений есть concern — ролика нет.
+          // Предел ожидания истёк — «неизвестно»: ролика нет при любом уровне ждущих сообщений (Б2, вариант А;
+          // матрица Б-4, строка 9). Контакты помощи — только если среди них есть concern.
           if (!timeoutLogged) { timeoutLogged = true; logError('check', { code: 'timeout' }); }
-          if (pending.includes('concern')) {
-            s.deliveryEpoch = (s.deliveryEpoch || 0) + 1;
-            s.veto = s.deliveries;
-            if (current()) { s.stage = 'draft'; await sendSafe(chatId, TEXT.tryLater()); }
-            return false;
-          }
+          s.deliveryEpoch = (s.deliveryEpoch || 0) + 1;
+          s.veto = s.deliveries;
+          if (current()) { s.stage = 'draft'; await sendSafe(chatId, pending.includes('concern') ? TEXT.tryLater() : TRY_LATER_TEXT); }
+          return false;
         }
-        // Сообщение окна с concern, по которому модель не ответила, отменило ролик (условие 3): ответ уже отправлен.
+        // Сообщение окна, по которому модель не ответила, отменило ролик (Б2, вариант А): ответ уже отправлен.
         if (cancelled()) { if (current()) s.stage = 'draft'; return false; }
         return current();
       };
@@ -929,8 +933,8 @@ export function createBot({
   // 13.11 15:00, условие 2). Текст сообщения не пишется в журнал и метрики.
   //  - локальный фильтр всегда: urgent → ролик отменяется, экран остановки;
   //  - текст (не эмодзи, не команда, не короткое «ок/спасибо») → отправка ролика ждёт одной модельной проверки
-  //    этого сообщения до применения её результата: опасно → отмена и экран остановки; «неизвестно» и после повтора →
-  //    при локальном concern ролика нет («не получилось» и контакты), при локально чистом — ролик уходит;
+  //    этого сообщения до применения её результата: опасно → отмена и экран остановки; «неизвестно» и после повтора
+  //    (или истёк предел ожидания) → ролика нет: «не получилось», при локальном concern — и контакты (Б2, вариант А);
   //  - concern без опасности по модели → блок помощи, ролик уходит (он сделан из проверенного рассказа).
   // Удержание: Map промис → локальный уровень сообщения (по нему решается истечение предела ожидания).
   // Бюджет ожидания привязан к зарегистрированной проверке (КРИТИКА PR 16, п. 3): один вызов + один повтор
@@ -978,9 +982,10 @@ export function createBot({
           const g = await track(chatId, gate.verify(s.scope, body, null, ask));
           if (g.kind === 'safety') r = { kind: 'urgent', byModel: !!g.byModel };
           else if (g.ok) r = { kind: level };
-          // Модель не ответила или отказалась — доставка отменяется при любом локальном уровне (Б2, вариант А; матрица Б-4, строка 9).
-          else r = { kind: 'unknown', code: g.code };
-        } catch { r = { kind: 'unknown', code: 'error' }; }
+          // Модель не ответила или отказалась — доставка отменяется при любом локальном уровне (Б2, вариант А; матрица Б-4,
+          // строка 9). help — контакты помощи в ответе: при локальном concern или отказе модели.
+          else r = { kind: 'unknown', code: g.code, help: level === 'concern' || !!g.refusal };
+        } catch { r = { kind: 'unknown', code: 'error', help: level === 'concern' }; }
       }
       if (r.kind === 'urgent') { s.story = body; s.originalStory = body; applyStop(s); } // запрет — на это сообщение
       else if (r.kind === 'unknown') {
@@ -1022,7 +1027,7 @@ export function createBot({
     if (r.kind === 'unknown') {
       if (!r.fresh || withdrawn) return; // доставка уже отменена (предел ожидания или другое сообщение): ответ уже отправлен
       if (s.delivering) s.stage = 'draft';
-      return sendSafe(chatId, TEXT.tryLater());
+      return sendSafe(chatId, r.help ? TEXT.tryLater() : TRY_LATER_TEXT);
     }
     if (r.kind === 'concern') {
       // Доставка уже отменена с «не получилось» (предел ожидания): второго ответа нет.

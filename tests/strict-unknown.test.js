@@ -1,11 +1,11 @@
 // Б2, вариант А (решение Дмитрия 24.11; чек-лист G0 v4, матрица Б-4): при любой неопределённости проверки ролика нет,
-// человек видит мягкое «не получилось». Критерии строк 5, 9а, 9б и «после» — по чек-листу. Настоящий createBot
+// человек видит мягкое «не получилось» (спокойному рассказу — без контактов помощи). Критерии строк 5, 9а, 9б и «после» — по чек-листу. Настоящий createBot
 // (подтверждения — хелпер), подставная модель «не отвечает» и после повтора. Только вымышленные данные.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import { createBot } from './helpers/consent.js';
-import { tryLaterMessage } from '../server/safety.js';
+import { TRY_LATER_TEXT } from '../server/safety.js';
 
 const ex = JSON.parse(await fs.readFile(new URL('../examples/day-quiet.json', import.meta.url), 'utf8'));
 const tick = () => new Promise((r) => setImmediate(r));
@@ -33,7 +33,7 @@ test('строка 5: локально чистый рассказ, модель
   await b.say(ex.story); await b.play();
   assert.equal(b.n.check, 2, 'один повтор');
   assert.deepEqual([b.n.render, b.n.video], [0, 0]);
-  assert.equal(b.sent.at(-1), tryLaterMessage());
+  assert.equal(b.sent.at(-1), TRY_LATER_TEXT);
   // После: следующий разрешённый рассказ, модель отвечает «безопасно» — одна сборка и одна отправка.
   b.setCheck(() => false);
   await b.say(ex.story); await b.play();
@@ -46,7 +46,7 @@ test('строка 9а: окно доставки, сообщение без т�
   await b.say(ex.story);
   const p = b.play(); await tick();
   await b.say('Пила чай с соседкой');
-  assert.equal(b.sent.at(-1), tryLaterMessage());
+  assert.equal(b.sent.at(-1), TRY_LATER_TEXT);
   release(false); await p;
   assert.deepEqual([b.n.render, b.n.video], [0, 0]);
   b.setMsg(() => false);
@@ -63,8 +63,31 @@ test('строка 9б: окно доставки, рендер уже нача�
   await b.say('Пила чай с соседкой');
   release(); await p;
   assert.equal(b.n.video, 0, 'отправок после неопределённого результата 0; старт рендера — не нарушение');
-  assert.ok(b.sent.includes(tryLaterMessage()));
+  assert.ok(b.sent.includes(TRY_LATER_TEXT));
   b.setMsg(() => false);
   await b.say(ex.story); await b.play();
   assert.deepEqual([b.n.render, b.n.video], [2, 1], 'после: одна новая сборка и одна отправка');
+});
+
+test('сообщение окна и проверка рассказа обе «неизвестно» — «не получилось» один раз', async () => {
+  let release; const gate = new Promise((r) => { release = r; });
+  const b = setup({ storyCheck: () => gate.then(fail), msgCheck: fail });
+  await b.say(ex.story);
+  const p = b.play(); await tick();
+  await b.say('Пила чай с соседкой');
+  release(); await p;
+  assert.equal(b.sent.filter((t) => t === TRY_LATER_TEXT).length, 1);
+  assert.deepEqual([b.n.render, b.n.video], [0, 0]);
+});
+
+test('отзыв согласия (/start) во время проверки перед сборкой, затем «неизвестно» — без «не получилось»', async () => {
+  let release; const gate = new Promise((r) => { release = r; });
+  const b = setup({ storyCheck: () => gate.then(fail) });
+  await b.say(ex.story);
+  const p = b.play(); await tick();
+  await b.say('/start');
+  const n = b.sent.length;
+  release(); await p;
+  assert.ok(!b.sent.slice(n).includes(TRY_LATER_TEXT), 'после отзыва ответа о ролике нет');
+  assert.deepEqual([b.n.render, b.n.video], [0, 0]);
 });

@@ -4,6 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import { createBot } from './helpers/consent.js'; // подтверждения 6А–6Ж пройдены (хелпер)
+import { TRY_LATER_TEXT } from '../server/safety.js';
 
 const ex = JSON.parse(await fs.readFile(new URL('../examples/day-quiet.json', import.meta.url), 'utf8'));
 const chat = { id: 77001, type: 'private' };
@@ -52,7 +53,8 @@ test('бот U01–U05: неполный ответ и после повтора
   await b.story(); await b.play();
   assert.equal(b.counters.check, 2, 'один повтор');
   assert.doesNotMatch(b.sent.join('\n'), /не завершил|не завершилась/);
-  assert.match(b.last(), /Не получилось собрать ролик/);
+  assert.equal(b.last(), TRY_LATER_TEXT, 'мягкое «не получилось» без контактов: рассказ спокойный');
+  assert.doesNotMatch(b.sent.join('\n'), HELP);
   assert.equal(b.counters.render, 0); assert.equal(b.counters.video, 0);
 });
 

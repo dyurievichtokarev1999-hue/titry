@@ -9,7 +9,7 @@ import { TEXT, prepareBot } from '../server/bot.js';
 import { createBot } from './helpers/consent.js'; // подтверждения 6А–6Ж пройдены (хелпер)
 import { createApp } from '../server/app.js';
 import { makeGate, modelModeAtStart } from '../server/gate.js';
-import { assessRisk, prepareHelp, helpMessage, tryLaterMessage, threatPhrase, threatErrors, HOUSEHOLD_IDIOMS, STOP_SCREEN_TEXT, NOT_HEARD_TEXT } from '../server/safety.js';
+import { assessRisk, prepareHelp, helpMessage, tryLaterMessage, TRY_LATER_TEXT, threatPhrase, threatErrors, HOUSEHOLD_IDIOMS, STOP_SCREEN_TEXT, NOT_HEARD_TEXT } from '../server/safety.js';
 import { modelLike } from './helpers/fake-model.js';
 
 // Контакты с проверенной линией помощи (вымышленный стенд теста): экран остановки — 112 и линия помощи.
@@ -198,7 +198,7 @@ test('«неизвестно» и после повтора: локально ч
   await x.play();
   assert.equal(x.c.check, 2, 'один повтор');
   assert.equal(x.c.video, 0, 'отправок 0');
-  assert.equal(x.sent.at(-1), tryLaterMessage(), 'мягкое «не получилось»');
+  assert.equal(x.sent.at(-1), TRY_LATER_TEXT, 'мягкое «не получилось» без контактов: рассказ спокойный');
   assert.doesNotMatch(x.sent.join('\n'), NOT_DONE);
   const y = bot({ check: fail });
   await y.say(`${SAFE} Я злюсь на брата и хочу его ударить.`);
@@ -462,8 +462,9 @@ test('п. 3: второй текст прямо перед истечением 
   assert.ok(STOP(sent.at(-1)));
 });
 
-test('п. 3: жёсткий предел исчерпан, локально чисто → 1 ролик; «неизвестно» + concern → 0 отправок и один ответ с контактами', async () => {
-  for (const [text, expectVideo] of [['Пила чай с соседкой', 1], ['Я злюсь на брата и хочу его ударить.', 0]]) {
+// Б2, вариант А: предел исчерпан — ролика нет при любом уровне; контакты — только при concern.
+test('п. 3: жёсткий предел исчерпан, локально чисто → 0 отправок, «не получилось» без контактов; concern → с контактами', async () => {
+  for (const [text, reply] of [['Пила чай с соседкой', TRY_LATER_TEXT], ['Я злюсь на брата и хочу его ударить.', tryLaterMessage()]]) {
     const r = deferred();
     const sent = []; let video = 0;
     const b = createBot({
@@ -477,8 +478,8 @@ test('п. 3: жёсткий предел исчерпан, локально чи
     await tick(); await tick();
     b.handleUpdate({ message: { chat, text } });
     r.resolve(); await p;
-    assert.equal(video, expectVideo, text);
-    if (!expectVideo) assert.equal(sent.filter((t) => t === tryLaterMessage()).length, 1, text);
+    assert.equal(video, 0, text);
+    assert.equal(sent.filter((t) => t === reply).length, 1, text);
   }
 });
 
