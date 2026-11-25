@@ -13,10 +13,10 @@ test('состояния: до первого опроса — starting; усп�
   assert.equal(h.snapshot({ stateHealthy: true }).updates, 'starting');
   h.pollOk();
   assert.equal(h.snapshot({ stateHealthy: true }).updates, 'fresh');
-  h.pollFailed(); h.pollFailed();
+  h.pollFailed('timeout'); h.pollFailed('401');
   t += POLL_STALE_MS + 1;
   const s = h.snapshot({ stateHealthy: false });
-  assert.deepEqual([s.updates, s.state, s.poll_failures, s.process], ['stale', 'failed', 2, 'alive']);
+  assert.deepEqual([s.updates, s.state, s.poll_failures, s.last_error], ['stale', 'failed', 2, '401']);
   h.pollOk();
   assert.deepEqual([h.snapshot({ stateHealthy: true }).updates, h.snapshot({ stateHealthy: true }).poll_failures], ['fresh', 0]);
 });
@@ -28,7 +28,7 @@ test('файл снимка: только время, состояния и сч
   h.pollOk();
   await writeHealth(file, h.snapshot({ stateHealthy: true }));
   const snap = JSON.parse(await fs.readFile(file, 'utf8'));
-  assert.deepEqual(Object.keys(snap).sort(), ['at', 'poll_failures', 'process', 'state', 'updates']);
+  assert.deepEqual(Object.keys(snap).sort(), ['at', 'last_error', 'poll_failures', 'state', 'updates']);
   assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
   assert.deepEqual(await fs.readdir(path.dirname(file)), ['health.json']);
 });

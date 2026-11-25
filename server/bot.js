@@ -1435,7 +1435,11 @@ async function main() {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) { console.error('Задайте TELEGRAM_BOT_TOKEN (выдаёт @BotFather).'); process.exit(2); }
   let ledger;
-  try { ledger = await prepareBot(); } catch {
+  try { ledger = await prepareBot(); } catch (e) {
+    if (e?.code === 'ledger_missing') {
+      console.error('Запуск остановлен: файл запретов (data/state/blocked-v1.json) пропал после записи. Восстановите data/state из резервной копии. Удалять метку blocked-v1.json.init — только решением владельца: это снимает все остановки по безопасности.');
+      process.exit(3);
+    }
     console.error(`Запуск остановлен: не задана METRICS_SALT (не короче ${METRICS_SALT_MIN} знаков), нет ключа модели или тексты для участника (согласие, реплики бота) не окончательные при TITRY_RELEASE_REAL_DATA=1, не проверены контакты помощи (config/help.json), не найден Playwright, не запускается Chromium (TITRY_CHROMIUM) или ffmpeg (FFMPEG), не подтверждена очистка временных файлов или хранилище запретов (${KEY_ENV}, ${KEY_VERSION_ENV}). Задачи не принимаются. Остатки tmp и файл хранилища не удаляйте вручную без владельца кода.`);
     process.exit(3);
   }
@@ -1467,7 +1471,7 @@ async function main() {
       }
     } catch (e) {
       logError('poll', e);
-      health.pollFailed();
+      health.pollFailed(safeCode(e));
       await new Promise((r) => setTimeout(r, 3000));
     }
   }

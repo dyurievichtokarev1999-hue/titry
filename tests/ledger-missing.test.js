@@ -35,3 +35,34 @@ test('старт бота: файл запретов пропал после з�
   await assert.rejects(prepareBot({ env, log: () => {}, checkRender: async () => {}, cleanup: async () => {}, cleanupTmp: async () => 0, ledger: processLedger('bot', dir, { key: KEY }) }),
     { code: 'ledger_missing', stage: 'ledger.load' });
 });
+
+test('файл был до этой версии (без метки): загрузка ставит метку — дальше пропажа файла заметна', async () => {
+  const dir = await dirOf();
+  const a = processLedger('bot', dir, { key: KEY });
+  await a.load();
+  await a.put({ scope: 'chat-fictional', story: 'вымышленный рассказ для проверки', kind: 'safety', reason: 'safety' });
+  await fs.rm(path.join(dir, 'blocked-v1.json.init')); // как на развёрнутом боте до обновления
+  await processLedger('bot', dir, { key: KEY }).load();
+  await fs.rm(path.join(dir, 'blocked-v1.json'));
+  await assert.rejects(processLedger('bot', dir, { key: KEY }).load(), { code: 'ledger_missing' });
+});
+
+test('монтажная: файл бота пропал после записи — отказ ledger_missing, а не старт без остановок бота', async () => {
+  const dir = await dirOf();
+  const bot = processLedger('bot', dir, { key: KEY });
+  await bot.load();
+  await bot.put({ scope: 'studio', story: 'вымышленный рассказ для проверки', kind: 'safety', reason: 'safety' });
+  await fs.rm(path.join(dir, 'blocked-v1.json'));
+  await assert.rejects(processLedger('studio', dir, { key: KEY }).load(), { code: 'ledger_missing' });
+});
+
+test('метка есть, файла нет, но остался целый tmp — восстановление, а не отказ', async () => {
+  const dir = await dirOf();
+  const a = processLedger('bot', dir, { key: KEY });
+  await a.load();
+  await a.put({ scope: 'chat-fictional', story: 'вымышленный рассказ для проверки', kind: 'safety', reason: 'safety' });
+  await fs.rename(path.join(dir, 'blocked-v1.json'), path.join(dir, 'blocked-v1.json.tmp-1-abcd')); // авария до rename
+  const b = processLedger('bot', dir, { key: KEY });
+  await b.load();
+  assert.equal(b.lookup('chat-fictional', 'вымышленный рассказ для проверки').kind, 'safety', 'остановка восстановлена');
+});
