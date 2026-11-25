@@ -279,7 +279,7 @@ export function draftKeyboard(ep, draftId = 0) {
 }
 
 // Значения кнопок — FEEDBACK_VALUES (менять вместе). Метка цикла согласия в кнопках отклика: отклик пишется в метрики, только если ролик отправлен при текущем согласии.
-// video — номер отправленного ролика в сессии: в метрики пишется один отклик на ролик (первое нажатие).
+// video — случайный номер ролика (8 hex): связывает отклики с роликом в метриках render и feedback.
 const feedbackKeyboard = (cycle, video) => ({
   inline_keyboard: [[
     { text: 'Попало', callback_data: `fb:fit:${cycle}:${video}` },
@@ -900,12 +900,16 @@ export function createBot({
       if (!(await clearToSend())) return;
       // ready — та же проверка после чтения файла, прямо перед запросом (QA PR 27, п. 2). Загрузка, уже начатая,
       // не отзывается: Telegram не умеет отменить отправку; окно — время одного HTTP-запроса.
-      const video = s.videoSeq = (s.videoSeq || 0) + 1; // номер ролика в сессии — в кнопки отклика
+      // Случайный номер ролика (QA PR 35): по нему отклики в метриках связаны с этим роликом и отделены от других
+      // роликов того же участника (номер в сессии сбрасывался бы с сессией). Сам по себе ничего не раскрывает.
+      const video = crypto.randomBytes(4).toString('hex');
       const sent = await tg.sendVideo(chatId, r.outPath, { caption: 'Конец сцены.', width: 720, height: 1280, duration: Math.round(r.duration), reply_markup: feedbackKeyboard(cycle, video) }, { ready: clearToSend });
       if (sent === null) return; // отзыв или отмена во время чтения файла: ролика нет — и метрики render нет
       // /delete во время отправки: после metrics.forget новая запись о человеке не появляется.
       if (!alive(chatId, s)) return;
-      await logMetric(chatId, 'render', { seconds: Math.round(r.seconds), mood: ep.mood, music: ep.music, edits: s.edits || 0 }, cycle);
+      // Отклик принимается только на доставленный ролик: номер регистрируется после успешной отправки (QA PR 35).
+      (s.feedbackFor ||= new Map()).set(video, new Set()); // номер ролика → записанные ответы
+      await logMetric(chatId, 'render', { seconds: Math.round(r.seconds), mood: ep.mood, music: ep.music, edits: s.edits || 0, video }, cycle);
       if (current()) s.stage = 'watched';
     } catch (e) {
       release(); // следующая задача и новые запросы — сразу
@@ -1278,14 +1282,12 @@ export function createBot({
       // Отклик на ролик прежнего согласия (после /delete, /start, отказа) в метрики не пишется; ответ на одну из трёх кнопок — как обычно.
       // Один отклик на ролик: метрики «Попадание» и «Вред» считаются по роликам, поэтому под каждым роликом в метрики
       // пишется первый ответ, а «Стало тяжелее» — ещё один раз, если первым был другой ответ (сигнал вреда не теряется).
-      // Кнопки без номера ролика (до этого изменения) или с номером, которого не было, в метрики не пишутся.
-      const n = /^\d+$/.test(video || '') ? Number(video) : 0;
-      s.feedbackFor ||= new Map(); // номер ролика → записанные ответы
-      const done = s.feedbackFor.get(n);
-      const fresh = !done || (v === 'heavier' && !done.has('heavier'));
-      if (cycle && cycle === String(s.consent?.cycle) && n >= 1 && n <= (s.videoSeq || 0) && fresh) {
-        s.feedbackFor.set(n, new Set([...(done || []), v]));
-        await logMetric(chatId, 'feedback', { value: v });
+      // Номер ролика — тот же, что в метрике render. Кнопки без номера, с чужим номером или под недоставленным
+      // роликом (отмена перед отправкой) в метрики не пишутся.
+      const done = s.feedbackFor?.get(video || '');
+      if (cycle && cycle === String(s.consent?.cycle) && done && (!done.size || (v === 'heavier' && !done.has('heavier')))) {
+        done.add(v);
+        await logMetric(chatId, 'feedback', { value: v, video });
       }
       if (v === 'heavier') { await tg.send(chatId, TEXT.heavier); return tg.send(chatId, helpMessage('concern')); }
       return tg.send(chatId, v === 'fit' ? TEXT.fit : TEXT.miss);
