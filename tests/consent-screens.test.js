@@ -626,6 +626,9 @@ test('метрики после /delete: поздняя кнопка откли�
   const vid2 = [...b.s().feedbackFor.keys()].at(-1);
   await b.press(`fb:fit:${cycle}:${vid2}`); // номер доставленного ролика допустим, цикл прежний
   assert.equal(b.events.length, fresh, 'старый ролик после нового согласия не пишется (проверка цикла)');
+  // Подделанная кнопка: новый цикл и номер ролика, доставленного до /delete, — сессия новая, номера нет.
+  await b.press(`fb:heavier:${b.s().consent.cycle}:${vid}`);
+  assert.equal(b.events.length, fresh, 'старый ролик с новым циклом не пишется');
   assert.ok(b.events.length > before, 'при новом согласии метрики пишутся');
 });
 
@@ -1029,7 +1032,7 @@ test('отклик под роликом: чужое значение не пи�
   await consentAll(b, ['pd', 'age']);
   const cycle = b.s().consent.cycle;
   const ids = ['0000000a', '0000000b', '0000000c']; // три доставленных ролика: по одному отклику на каждый
-  b.s().feedbackFor = new Map(ids.map((id) => [id, new Set()]));
+  b.s().feedbackFor = new Map(ids.map((id) => [id, { cycle, done: new Set() }]));
   for (const v of ['вымышленный текст', 'fit2', '', 'heavier ']) {
     const n = b.sent.length; const events = b.events.length;
     await b.press(`fb:${v}:${cycle}:${ids[0]}`);

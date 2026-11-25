@@ -280,6 +280,7 @@ export function draftKeyboard(ep, draftId = 0) {
 
 // Значения кнопок — FEEDBACK_VALUES (менять вместе). Метка цикла согласия в кнопках отклика: отклик пишется в метрики, только если ролик отправлен при текущем согласии.
 // video — случайный номер ролика (8 hex): связывает отклики с роликом в метриках render и feedback.
+const FEEDBACK_KEEP = 20; // сколько последних роликов сессии принимают отклик
 const feedbackKeyboard = (cycle, video) => ({
   inline_keyboard: [[
     { text: 'Попало', callback_data: `fb:fit:${cycle}:${video}` },
@@ -903,12 +904,20 @@ export function createBot({
       // Случайный номер ролика (QA PR 35): по нему отклики в метриках связаны с этим роликом и отделены от других
       // роликов того же участника (номер в сессии сбрасывался бы с сессией). Сам по себе ничего не раскрывает.
       const video = crypto.randomBytes(4).toString('hex');
-      const sent = await tg.sendVideo(chatId, r.outPath, { caption: 'Конец сцены.', width: 720, height: 1280, duration: Math.round(r.duration), reply_markup: feedbackKeyboard(cycle, video) }, { ready: clearToSend });
+      const sent = await tg.sendVideo(chatId, r.outPath, { caption: 'Конец сцены.', width: 720, height: 1280, duration: Math.round(r.duration), reply_markup: feedbackKeyboard(cycle, video) }, { ready: async () => {
+        const ok = await clearToSend();
+        // Отклик принимается только на отправляемый ролик (QA PR 35): номер регистрируется прямо перед запросом —
+        // отменённая доставка его не получает, а нажатие, пришедшее раньше ответа Telegram, уже принимается.
+        if (ok) {
+          const fb = (s.feedbackFor ||= new Map()); // номер ролика → цикл согласия доставки и записанные ответы
+          fb.set(video, { cycle, done: new Set() });
+          if (fb.size > FEEDBACK_KEEP) fb.delete(fb.keys().next().value); // хранятся последние ролики сессии
+        }
+        return ok;
+      } });
       if (sent === null) return; // отзыв или отмена во время чтения файла: ролика нет — и метрики render нет
       // /delete во время отправки: после metrics.forget новая запись о человеке не появляется.
       if (!alive(chatId, s)) return;
-      // Отклик принимается только на доставленный ролик: номер регистрируется после успешной отправки (QA PR 35).
-      (s.feedbackFor ||= new Map()).set(video, new Set()); // номер ролика → записанные ответы
       await logMetric(chatId, 'render', { seconds: Math.round(r.seconds), mood: ep.mood, music: ep.music, edits: s.edits || 0, video }, cycle);
       if (current()) s.stage = 'watched';
     } catch (e) {
@@ -1284,10 +1293,13 @@ export function createBot({
       // пишется первый ответ, а «Стало тяжелее» — ещё один раз, если первым был другой ответ (сигнал вреда не теряется).
       // Номер ролика — тот же, что в метрике render. Кнопки без номера, с чужим номером или под недоставленным
       // роликом (отмена перед отправкой) в метрики не пишутся.
-      const done = s.feedbackFor?.get(video || '');
+      // Цикл — и из кнопки, и сохранённый при доставке: подделанная кнопка «новый цикл + старый ролик» не пишется.
+      const entry = s.feedbackFor?.get(video || '');
+      const done = entry && entry.cycle === s.consent?.cycle && entry.done;
       if (cycle && cycle === String(s.consent?.cycle) && done && (!done.size || (v === 'heavier' && !done.has('heavier')))) {
-        done.add(v);
-        await logMetric(chatId, 'feedback', { value: v, video });
+        done.add(v); // до записи: двойное нажатие не пишет дважды
+        // Сбой записи — ответ снимается, следующее нажатие может записать его снова (сигнал вреда не теряется).
+        try { await writeMetric(chatId, 'feedback', { value: v, video }); } catch (e) { done.delete(v); logError('metrics', e); }
       }
       if (v === 'heavier') { await tg.send(chatId, TEXT.heavier); return tg.send(chatId, helpMessage('concern')); }
       return tg.send(chatId, v === 'fit' ? TEXT.fit : TEXT.miss);

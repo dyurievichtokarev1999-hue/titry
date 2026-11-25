@@ -5,13 +5,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import { createBot } from './helpers/consent.js';
+import { createBot, passConsent } from './helpers/consent.js';
 import { TEXT } from '../server/bot.js';
 import { helpMessage } from '../server/safety.js';
 
 const ex = JSON.parse(await fs.readFile(new URL('../examples/day-quiet.json', import.meta.url), 'utf8'));
 
-function setup({ cancelFirst = false } = {}) {
+function setup({ cancelFirst = false, sendGate, failFeedback = 0 } = {}) {
   const sent = []; const log = []; const offered = [];
   let calls = 0;
   const tg = { send: async (c, text, extra) => { sent.push({ text, extra }); }, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''),
@@ -19,9 +19,14 @@ function setup({ cancelFirst = false } = {}) {
       offered.push(extra); // кнопки, которые были бы под роликом
       if (cancelFirst && calls++ === 0) return null; // отмена прямо перед отправкой (ready() вернул false)
       if (o.ready && !(await o.ready())) return null;
+      await sendGate; // загрузка идёт: Telegram уже показал ролик, ответа ещё нет
       sent.push({ video: true, extra }); return {};
     } };
-  const metrics = { hash: () => 'qa-fictional', log: async (c, e, x) => { if (e === 'feedback' || e === 'render') log.push({ e, ...x }); }, forget: async () => {} };
+  const metrics = { hash: () => 'qa-fictional', forget: async () => {},
+    log: async (c, e, x) => {
+      if (e === 'feedback' && failFeedback > 0) { failFeedback--; throw Object.assign(new Error('диск'), { code: 'ENOSPC' }); }
+      if (e === 'feedback' || e === 'render') log.push({ e, ...x });
+    } };
   const bot = createBot({ tg, metrics, safetyCheck: async () => false, checkRetryMs: 0,
     draft: async () => ({ episode: structuredClone(ex.episode), risk: { level: 'none' }, provider: 'claude', dropped: [] }),
     render: async (e, o) => ({ seconds: 1, duration: 24, outPath: o.outPath }) });
@@ -34,8 +39,16 @@ function setup({ cancelFirst = false } = {}) {
     await click(`play:${bot.sessions.get(chat.id).draftId}`);
     return keys(offered.at(-1));
   };
+  // Начать доставку, не дожидаясь её конца: кнопки — как только запрос ушёл.
+  const startVideo = async () => {
+    await say(ex.story);
+    const done = click(`play:${bot.sessions.get(chat.id).draftId}`);
+    for (let i = 0; i < 200 && offered.length === 0; i++) await new Promise((r) => setImmediate(r));
+    for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)); // ready() отработал
+    return { k: keys(offered.at(-1)), done };
+  };
   const fb = () => log.filter((r) => r.e === 'feedback');
-  return { bot, sent, log, fb, say, click, video };
+  return { bot, sent, log, fb, say, click, video, startVideo };
 }
 
 test('один отклик на ролик: повторные нажатия под тем же роликом в метрики не пишутся, ответ — каждый раз', async () => {
@@ -95,4 +108,39 @@ test('кнопка с номером ролика, которого не был�
     assert.equal(t.sent[n].text, TEXT.fit, `${data}: ответ есть`);
   }
   assert.deepEqual(t.fb(), [], 'метрик нет');
+});
+
+test('нажатие до ответа Telegram на отправку (запрос уже ушёл) — отклик записывается', async () => {
+  let release; const sendGate = new Promise((r) => { release = r; });
+  const t = setup({ sendGate });
+  const { k, done } = await t.startVideo();
+  await t.click(k.heavier);
+  release(); await done;
+  assert.deepEqual(t.fb().map((r) => r.value), ['heavier'], '«Стало тяжелее» во время отправки не теряется');
+  assert.equal(t.fb()[0].video, k.heavier.split(':')[3]);
+});
+
+test('сбой записи отклика — ответ не считается записанным, повтор записывает', async () => {
+  const t = setup({ failFeedback: 1 });
+  const k = await t.video();
+  await t.click(k.heavier); // запись упала (ENOSPC)
+  assert.deepEqual(t.fb(), []);
+  assert.equal(t.sent.at(-1).text, helpMessage('concern'), 'помощь показана и при сбое записи');
+  await t.click(k.heavier);
+  assert.deepEqual(t.fb().map((r) => r.value), ['heavier'], 'сигнал вреда записан со второго нажатия');
+});
+
+test('подделанная кнопка: номер ролика прошлого согласия с текущим циклом — в метрики не пишется, помощь есть', async () => {
+  const t = setup();
+  const k = await t.video();
+  await t.say('/start'); // новое прохождение согласия — та же сессия, номер старого ролика в ней остаётся
+  await passConsent(t.bot.handleUpdate, { id: 94001, type: 'private' }, { begin: false, sessions: () => t.bot.sessions });
+  const cycle = t.bot.sessions.get(94001).consent.cycle;
+  assert.equal(t.bot.sessions.get(94001).consent.step, 'done', 'новое согласие дано');
+  assert.notEqual(cycle, k.heavier.split(':')[2], 'цикл сменился');
+  const n = t.sent.length;
+  await t.click(`fb:heavier:${cycle}:${k.heavier.split(':')[3]}`);
+  assert.deepEqual(t.fb(), [], 'отклик на ролик прошлого согласия не пишется');
+  assert.equal(t.sent.at(-1).text, helpMessage('concern'));
+  assert.ok(t.sent.length > n);
 });
