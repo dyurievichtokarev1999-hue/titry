@@ -891,6 +891,7 @@ export function createBot({
           if (!timeoutLogged) { timeoutLogged = true; logError('check', { code: 'timeout' }); }
           s.deliveryEpoch = (s.deliveryEpoch || 0) + 1;
           s.veto = s.deliveries;
+          s.vetoHelp = pending.includes('concern'); // были ли контакты в ответе об отмене
           if (current()) { s.stage = 'draft'; await sendSafe(chatId, pending.includes('concern') ? TEXT.tryLater() : TRY_LATER_TEXT); }
           return false;
         }
@@ -991,6 +992,7 @@ export function createBot({
       else if (r.kind === 'unknown') {
         // Ролика нет: отменяются все идущие доставки. fresh — отмена новая (иначе «не получилось» уже отправлено).
         r.fresh = !!s.delivering && (s.veto || 0) < (s.deliveries || 0); // ролик уже ушёл — «не получилось» не шлём
+        if (r.fresh) s.vetoHelp = r.help; // были ли контакты в ответе об отмене
         s.veto = s.deliveries || 0;
       }
       return r;
@@ -1024,14 +1026,20 @@ export function createBot({
     if (r.code) logError('check', { code: r.code });
     // Согласие отозвано, пока шла проверка: ролик не уйдёт — ни «не получилось», ни «Собираю ролик» (блок помощи — да).
     const withdrawn = !consentDone(s) || s.forgetAfter;
+    // Доставку уже отменили ответом без контактов (спокойное сообщение): тревожное сообщение получает блок помощи
+    // без второго «не получилось» (security-review строгого варианта).
+    const helpOnce = () => { s.vetoHelp = true; return sendSafe(chatId, helpMessage('concern')); };
     if (r.kind === 'unknown') {
-      if (!r.fresh || withdrawn) return; // доставка уже отменена (предел ожидания или другое сообщение): ответ уже отправлен
+      if (!r.fresh || withdrawn) return r.help && !s.vetoHelp ? helpOnce() : undefined; // ответ об отмене уже отправлен
       if (s.delivering) s.stage = 'draft';
       return sendSafe(chatId, r.help ? TEXT.tryLater() : TRY_LATER_TEXT);
     }
     if (r.kind === 'concern') {
-      // Доставка уже отменена с «не получилось» (предел ожидания): второго ответа нет.
-      if ((s.veto || 0) >= (s.deliveries || 0) && (s.deliveries || 0) > 0) return logSafety({ level: 'concern', at: 'rendering' });
+      // Доставка уже отменена с «не получилось»: второго ответа нет; контактов в нём не было — блок помощи.
+      if ((s.veto || 0) >= (s.deliveries || 0) && (s.deliveries || 0) > 0) {
+        if (!s.vetoHelp) await helpOnce();
+        return logSafety({ level: 'concern', at: 'rendering' });
+      }
       await sendSafe(chatId, helpMessage('concern'));
       return logSafety({ level: 'concern', at: 'rendering' });
     }

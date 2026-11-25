@@ -91,3 +91,23 @@ test('отзыв согласия (/start) во время проверки пе
   assert.ok(!b.sent.slice(n).includes(TRY_LATER_TEXT), 'после отзыва ответа о ролике нет');
   assert.deepEqual([b.n.render, b.n.video], [0, 0]);
 });
+
+test('спокойное сообщение отменило ролик (без контактов), затем тревожное — блок помощи приходит один раз', async () => {
+  const { helpMessage } = await import('../server/safety.js');
+  for (const second of [() => false, fail]) { // модель по тревожному: «не опасно» или снова «неизвестно»
+    let release; const gate = new Promise((r) => { release = r; });
+    let calls = 0;
+    const b = setup({ msgCheck: () => (++calls <= 2 ? fail() : second()), render: () => gate });
+    await b.say(ex.story);
+    const p = b.play();
+    await waitFor(() => b.n.render === 1);
+    await b.say('Пила чай с соседкой'); // «неизвестно» и после повтора → отмена, ответ без контактов
+    assert.equal(b.sent.at(-1), TRY_LATER_TEXT);
+    await b.say('Хочу его ударить'); // локально concern
+    await b.say('Хочу его ударить');
+    release(); await p;
+    assert.equal(b.sent.filter((t) => t === helpMessage('concern')).length, 1, 'блок помощи — один раз');
+    assert.equal(b.sent.filter((t) => t.startsWith('Не получилось собрать ролик')).length, 1, 'второго «не получилось» нет');
+    assert.equal(b.n.video, 0);
+  }
+});
