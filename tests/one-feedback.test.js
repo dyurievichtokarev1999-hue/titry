@@ -144,3 +144,33 @@ test('подделанная кнопка: номер ролика прошло�
   assert.equal(t.sent.at(-1).text, helpMessage('concern'));
   assert.ok(t.sent.length > n);
 });
+
+// QA PR 35 на d64c0e0: Telegram показал ролик, но ответ на отправку потерялся — у отклика есть ровно одна парная запись render.
+test('ответ Telegram на отправку потерялся, отклик пришёл — одна запись render перед откликом; подтверждённая отправка — без дубля', async () => {
+  const sent = []; const log = []; const offered = [];
+  let lose = true;
+  const tg = { send: async (c, text) => { sent.push({ text }); }, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''),
+    sendVideo: async (c, f, extra, o = {}) => { offered.push(extra); if (o.ready && !(await o.ready())) return null; if (lose) throw Object.assign(new Error('ответ потерян'), { code: 'timeout' }); return {}; } };
+  const metrics = { hash: () => 'qa-fictional', log: async (c, e, x) => { if (e === 'feedback' || e === 'render') log.push({ e, ...x }); }, forget: async () => {} };
+  const bot = createBot({ tg, metrics, safetyCheck: async () => false, checkRetryMs: 0,
+    draft: async () => ({ episode: structuredClone(ex.episode), risk: { level: 'none' }, provider: 'claude', dropped: [] }),
+    render: async (e, o) => ({ seconds: 1, duration: 24, outPath: o.outPath }) });
+  const chat = { id: 94002, type: 'private' };
+  const click = (data) => bot.handleUpdate({ callback_query: { id: 'q', data, message: { chat } } });
+  const keys = () => Object.fromEntries(offered.at(-1).reply_markup.inline_keyboard[0].map((k) => [k.callback_data.split(':')[1], k.callback_data]));
+  await bot.handleUpdate({ message: { chat, text: ex.story } });
+  await click(`play:${bot.sessions.get(chat.id).draftId}`);
+  assert.equal(log.filter((r) => r.e === 'render').length, 0, 'подтверждения нет — render пока нет');
+  const k = keys();
+  await click(k.fit); await click(k.heavier);
+  const id = k.fit.split(':')[3];
+  assert.deepEqual(log.map((r) => `${r.e}:${r.value || ''}:${r.video}`), [`render::${id}`, `feedback:fit:${id}`, `feedback:heavier:${id}`]);
+  assert.equal(sent.at(-1).text, helpMessage('concern'), 'блок помощи');
+  lose = false; // подтверждённая отправка, затем отклик — render один
+  await bot.handleUpdate({ message: { chat, text: ex.story } });
+  await click(`play:${bot.sessions.get(chat.id).draftId}`);
+  const k2 = keys();
+  await click(k2.miss);
+  const id2 = k2.miss.split(':')[3];
+  assert.equal(log.filter((r) => r.e === 'render' && r.video === id2).length, 1);
+});

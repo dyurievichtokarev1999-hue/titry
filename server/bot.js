@@ -904,13 +904,16 @@ export function createBot({
       // Случайный номер ролика (QA PR 35): по нему отклики в метриках связаны с этим роликом и отделены от других
       // роликов того же участника (номер в сессии сбрасывался бы с сессией). Сам по себе ничего не раскрывает.
       const video = crypto.randomBytes(4).toString('hex');
+      // Запись render — один раз на ролик: после подтверждения отправки или, если ответ Telegram потерялся, перед первым
+      // откликом под этим роликом (нажатие кнопки доказывает доставку; QA PR 35 на d64c0e0).
+      const renderData = { seconds: Math.round(r.seconds), mood: ep.mood, music: ep.music, edits: s.edits || 0, video };
       const sent = await tg.sendVideo(chatId, r.outPath, { caption: 'Конец сцены.', width: 720, height: 1280, duration: Math.round(r.duration), reply_markup: feedbackKeyboard(cycle, video) }, { ready: async () => {
         const ok = await clearToSend();
         // Отклик принимается только на отправляемый ролик (QA PR 35): номер регистрируется прямо перед запросом —
         // отменённая доставка его не получает, а нажатие, пришедшее раньше ответа Telegram, уже принимается.
         if (ok) {
           const fb = (s.feedbackFor ||= new Map()); // номер ролика → цикл согласия доставки и записанные ответы
-          fb.set(video, { cycle, done: new Set() });
+          fb.set(video, { cycle, done: new Set(), render: renderData, rendered: false });
           if (fb.size > FEEDBACK_KEEP) fb.delete(fb.keys().next().value); // хранятся последние ролики сессии
         }
         return ok;
@@ -918,7 +921,8 @@ export function createBot({
       if (sent === null) return; // отзыв или отмена во время чтения файла: ролика нет — и метрики render нет
       // /delete во время отправки: после metrics.forget новая запись о человеке не появляется.
       if (!alive(chatId, s)) return;
-      await logMetric(chatId, 'render', { seconds: Math.round(r.seconds), mood: ep.mood, music: ep.music, edits: s.edits || 0, video }, cycle);
+      const entry = s.feedbackFor?.get(video);
+      if (!entry || !entry.rendered) { if (entry) entry.rendered = true; await logMetric(chatId, 'render', renderData, cycle); }
       if (current()) s.stage = 'watched';
     } catch (e) {
       release(); // следующая задача и новые запросы — сразу
@@ -1298,6 +1302,8 @@ export function createBot({
       const done = entry && entry.cycle === s.consent?.cycle && entry.done;
       if (cycle && cycle === String(s.consent?.cycle) && done && (!done.size || (v === 'heavier' && !done.has('heavier')))) {
         done.add(v); // до записи: двойное нажатие не пишет дважды
+        // Ответ Telegram на отправку не дошёл, а отклик пришёл — ролик доставлен: сначала его запись render (один раз).
+        if (!entry.rendered) { entry.rendered = true; await logMetric(chatId, 'render', entry.render); }
         // Сбой записи — ответ снимается, следующее нажатие может записать его снова (сигнал вреда не теряется).
         try { await writeMetric(chatId, 'feedback', { value: v, video }); } catch (e) { done.delete(v); logError('metrics', e); }
       }
