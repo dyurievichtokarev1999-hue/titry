@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { MOODS, TRACKS, LIMITS, creditRows, dateLabel, todayIso, validateEpisode, PERIODS, episodeToText, EDIT_SEP, cleanInput, joinEdits } from '../engine/episode.js';
 import { makeDraft, draftRuleBased, modelSafetyCheck, hasClaudeCredentials, pairFromSentence, SAFETY_TIMEOUT_MS, STORY_MAX, TOO_LONG_TEXT } from './draft.js';
 import { makeGate, modelModeAtStart, RETRY_DELAY_MS } from './gate.js';
-import { startsWithContinuation, modelConcernMessage, helpMessage, tryLaterMessage, NOT_HEARD_TEXT, prepareHelp, assessRisk, assessEpisodeRisk, validateSafeEpisode, threatErrors, threatPronounFilter, INSUFFICIENT_TEXT, INSUFFICIENT_INVITE_TEXT, INSUFFICIENT_AFTER_EXCLUSION, INSUFFICIENT_MATERIAL, EDIT_NOT_IN_TITLES_TEXT, editNotInTitlesText, TELEGRAM_TEXT_LIMIT } from './safety.js';
+import { startsWithContinuation, modelConcernMessage, helpMessage, tryLaterMessage, TRY_LATER_TEXT, NOT_HEARD_TEXT, prepareHelp, assessRisk, assessEpisodeRisk, validateSafeEpisode, threatErrors, threatPronounFilter, INSUFFICIENT_TEXT, INSUFFICIENT_INVITE_TEXT, INSUFFICIENT_AFTER_EXCLUSION, INSUFFICIENT_MATERIAL, EDIT_NOT_IN_TITLES_TEXT, editNotInTitlesText, TELEGRAM_TEXT_LIMIT } from './safety.js';
 import { renderEpisode, checkRenderer, ROOT, RENDER_TIMEOUT_MS, KILL_GRACE_MS, renderTimeoutFromEnv, withRenderTimeout, removeQuiet } from './render.js';
 import { logError, safeCode, logRenderTimeout } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS, cleanupVoiceOrphans } from './stt.js';
@@ -486,7 +486,7 @@ export function createBot({
   renderTimeoutMs = RENDER_TIMEOUT_MS, // предел активного рендера от старта задачи в слоте (server/render.js)
   renderGraceMs = KILL_GRACE_MS, // запасной предел: renderTimeoutMs + 2×renderGraceMs — слот освобождается принудительно
   botName = null, // имя бота (getMe): «/команда@другой_бот» — не наша команда; без имени «@…» отрезается у любой
-  consentOrder = consentSteps(), // шаги подтверждений: возраст (6Г), 6А, согласие (6Б) — решение А8; без 'intro' — 6А первым (тесты)
+  consentOrder = consentSteps(), // шаги подтверждений: 6Г, 6А, 6Б, 6В — решения А8 и А2; без 'intro' — 6А первым (тесты)
 } = {}) {
   const say = voice ? TEXT : { ...TEXT, ...TEXT_ONLY }; // реплики участнику с учётом флага голоса
   const sessions = new Map();
@@ -600,6 +600,7 @@ export function createBot({
     }
     if (step === 'intro') return tg.send(chatId, CONSENT_TEXT.intro, { reply_markup: consentKb([[[CONSENT_TEXT.introNext, `cs:intro:next:${cycle}`]]]) });
     if (step === 'age') return tg.send(chatId, CONSENT_TEXT.age, { reply_markup: consentKb([[[CONSENT_TEXT.ageYes, `cs:age:yes:${cycle}`], [CONSENT_TEXT.ageNo, `cs:age:no:${cycle}`]]]) });
+    if (step === 'abroad') return tg.send(chatId, CONSENT_TEXT.abroad, { reply_markup: consentKb([[[CONSENT_TEXT.abroadYes, `cs:abroad:yes:${cycle}`], [CONSENT_TEXT.abroadNo, `cs:abroad:no:${cycle}`]]]) });
     // 6Ж — единственное приглашение, и после /year (решение Claude 18.11, п. 5); период года сохраняется в s.period.
     return tg.send(chatId, CONSENT_TEXT.ready);
   }
@@ -627,18 +628,23 @@ export function createBot({
     const [, step, answer, cycle] = data.split(':');
     // Кнопка не текущего шага или прежнего прохождения (Критик реализации 18.11 21:40) — ничего не засчитываем.
     if (!c || c.step !== step || cycle !== c.cycle) return;
-    // Только кнопки, которые показаны на этом экране (QA PR 32 03b4b93): 6А — «Дальше»; 6Б, 6Г — «Да» и «Нет»
+    // Только кнопки, которые показаны на этом экране (QA PR 32 03b4b93): 6А — «Дальше»; 6Б, 6В, 6Г — «Да» и «Нет»
     // (клавиатуры — в consentScreen; менять вместе). На шагах done и declined кнопок нет.
     // Любое другое значение ничего не меняет: шаг, отметки и метрики остаются, следующий экран не отправляется.
     if (!flow.includes(step) || !(step === 'intro' ? answer === 'next' : answer === 'yes' || answer === 'no')) return;
     const next = flow[flow.indexOf(step) + 1] || 'done';
     if (answer === 'next' || answer === 'yes') {
-      if (step === 'pd') c.given.pd = { at: now().toISOString(), version: CONSENT_VERSION };
-      if (next === 'done') s.consentedBefore = true; // согласие в этой сессии было дано (для ответа на отказ после /start)
+      if (step === 'pd' || step === 'abroad') c.given[step] = { at: now().toISOString(), version: CONSENT_VERSION };
+      // Согласие в этой сессии было дано (для ответа на отказ после /start): с «Да» на 6Б — оно остаётся и после отказа на 6В.
+      if (step === 'pd' || next === 'done') s.consentedBefore = true;
       return consentScreen(chatId, s, next);
     }
     c.step = 'declined'; // отказ как событие не храним; дальше бот ничего не спрашивает и не напоминает
     forgetStory(s);
+    // 6В «Не сейчас»: согласие 6Б не отзывается — его можно отозвать через /delete (комплект v2.7, ответ 6В и таблица
+    // «Что остаётся при отказе»). Метрики не удаляются: в этом прохождении до 6Ж они не пишутся, а метрики прежних
+    // циклов сессии остаются по действующему согласию 6Б. Признак consentedBefore остаётся (для «отметки удалены»).
+    if (step === 'abroad') return tg.send(chatId, CONSENT_TEXT.abroadDeclined);
     // Было ли согласие до этого отказа (в этом прохождении или раньше в сессии). После отказа признак сбрасывается:
     // повторный отказ до нового согласия не сообщает об удалении снова (QA PR 34 324cc87). Синхронно, до отправок.
     const had = Object.keys(c.given).length > 0 || !!s.consentedBefore;
@@ -855,13 +861,16 @@ export function createBot({
     if (!alive(chatId, s) || s.draftId !== gen) return; // удалённая или заменённая сессия не оживает
     if (g.kind === 'safety') return stopForSafety(chatId, s, 'urgent', { at: 'check', byModel: !!g.byModel }, cycle);
     if (g.unknown) {
-      // «Неизвестно» и после повтора (условие 3): локально чисто — ролик делается; есть concern — ролика нет.
+      // «Неизвестно» и после повтора, отказ модели проверять — ролика нет при любом локальном уровне (решение Дмитрия
+      // 24.11, Б2 — вариант А, строгий, на время G0; матрица Б-4, строки 4–6). Обратимо правкой кода.
       logError('check', { code: g.code });
-      // Отказ проверяющей модели (refusal) — как локальный concern.
-      if (g.refusal || gate.hasConcern(s.scope, original) || assessEpisodeRisk(joinEdits(story), ep).level !== 'none') {
-        s.stage = 'draft';
-        return tg.send(chatId, TEXT.tryLater());
-      }
+      // Доставку уже отменило сообщение окна (ответ отправлен), отозвано согласие или сессия сменилась — молча.
+      if (cancelled() || !current()) { if (alive(chatId, s) && s.stage === 'rendering') s.stage = s.verdict === 'blocked' ? 'help' : 'draft'; return; }
+      s.stage = 'draft';
+      // Контакты помощи — только при тревоге (локальный concern, флаг модели в черновике, отказ модели проверять);
+      // спокойному рассказу — мягкое «не получилось» без контактов, как при технических сбоях.
+      const worry = g.refusal || gate.hasConcern(s.scope, original) || assessEpisodeRisk(joinEdits(story), ep).level !== 'none';
+      return tg.send(chatId, worry ? TEXT.tryLater() : TRY_LATER_TEXT);
     } else if (!g.ok) {
       // Хранилище запретов недоступно: выдачи нет.
       logError('check', { code: g.code });
@@ -915,16 +924,16 @@ export function createBot({
       const clearToSend = async () => {
         const pending = await waitHolds(s, holdDeadline);
         if (pending.length) {
-          // Предел ожидания истёк — как «неизвестно» (условие 3): у ждущих сообщений есть concern — ролика нет.
+          // Предел ожидания истёк — «неизвестно»: ролика нет при любом уровне ждущих сообщений (Б2, вариант А;
+          // матрица Б-4, строка 9). Контакты помощи — только если среди них есть concern.
           if (!timeoutLogged) { timeoutLogged = true; logError('check', { code: 'timeout' }); }
-          if (pending.includes('concern')) {
-            s.deliveryEpoch = (s.deliveryEpoch || 0) + 1;
-            s.veto = s.deliveries;
-            if (current()) { s.stage = 'draft'; await sendSafe(chatId, TEXT.tryLater()); }
-            return false;
-          }
+          s.deliveryEpoch = (s.deliveryEpoch || 0) + 1;
+          s.veto = s.deliveries;
+          s.vetoHelp = pending.includes('concern'); // были ли контакты в ответе об отмене
+          if (current()) { s.stage = 'draft'; await sendSafe(chatId, pending.includes('concern') ? TEXT.tryLater() : TRY_LATER_TEXT); }
+          return false;
         }
-        // Сообщение окна с concern, по которому модель не ответила, отменило ролик (условие 3): ответ уже отправлен.
+        // Сообщение окна, по которому модель не ответила, отменило ролик (Б2, вариант А): ответ уже отправлен.
         if (cancelled()) { if (current()) s.stage = 'draft'; return false; }
         return current();
       };
@@ -987,8 +996,8 @@ export function createBot({
   // 13.11 15:00, условие 2). Текст сообщения не пишется в журнал и метрики.
   //  - локальный фильтр всегда: urgent → ролик отменяется, экран остановки;
   //  - текст (не эмодзи, не команда, не короткое «ок/спасибо») → отправка ролика ждёт одной модельной проверки
-  //    этого сообщения до применения её результата: опасно → отмена и экран остановки; «неизвестно» и после повтора →
-  //    при локальном concern ролика нет («не получилось» и контакты), при локально чистом — ролик уходит;
+  //    этого сообщения до применения её результата: опасно → отмена и экран остановки; «неизвестно» и после повтора
+  //    (или истёк предел ожидания) → ролика нет: «не получилось», при локальном concern — и контакты (Б2, вариант А);
   //  - concern без опасности по модели → блок помощи, ролик уходит (он сделан из проверенного рассказа).
   // Удержание: Map промис → локальный уровень сообщения (по нему решается истечение предела ожидания).
   // Бюджет ожидания привязан к зарегистрированной проверке (КРИТИКА PR 16, п. 3): один вызов + один повтор
@@ -1036,13 +1045,16 @@ export function createBot({
           const g = await track(chatId, gate.verify(s.scope, body, null, ask));
           if (g.kind === 'safety') r = { kind: 'urgent', byModel: !!g.byModel };
           else if (g.ok) r = { kind: level };
-          else r = { kind: level === 'concern' || g.refusal ? 'unknown' : 'none', code: g.code }; // условие 3; отказ — как concern
-        } catch { r = { kind: level === 'concern' ? 'unknown' : 'none', code: 'error' }; }
+          // Модель не ответила или отказалась — доставка отменяется при любом локальном уровне (Б2, вариант А; матрица Б-4,
+          // строка 9). help — контакты помощи в ответе: при локальном concern или отказе модели.
+          else r = { kind: 'unknown', code: g.code, help: level === 'concern' || !!g.refusal };
+        } catch { r = { kind: 'unknown', code: 'error', help: level === 'concern' }; }
       }
       if (r.kind === 'urgent') { s.story = body; s.originalStory = body; applyStop(s); } // запрет — на это сообщение
       else if (r.kind === 'unknown') {
         // Ролика нет: отменяются все идущие доставки. fresh — отмена новая (иначе «не получилось» уже отправлено).
         r.fresh = !!s.delivering && (s.veto || 0) < (s.deliveries || 0); // ролик уже ушёл — «не получилось» не шлём
+        if (r.fresh) s.vetoHelp = r.help; // были ли контакты в ответе об отмене
         s.veto = s.deliveries || 0;
       }
       return r;
@@ -1076,14 +1088,20 @@ export function createBot({
     if (r.code) logError('check', { code: r.code });
     // Согласие отозвано, пока шла проверка: ролик не уйдёт — ни «не получилось», ни «Собираю ролик» (блок помощи — да).
     const withdrawn = !consentDone(s) || s.forgetAfter;
+    // Доставку уже отменили ответом без контактов (спокойное сообщение): тревожное сообщение получает блок помощи
+    // без второго «не получилось» (security-review строгого варианта).
+    const helpOnce = () => { s.vetoHelp = true; return sendSafe(chatId, helpMessage('concern')); };
     if (r.kind === 'unknown') {
-      if (!r.fresh || withdrawn) return; // доставка уже отменена (предел ожидания или другое сообщение): ответ уже отправлен
+      if (!r.fresh || withdrawn) return r.help && !s.vetoHelp ? helpOnce() : undefined; // ответ об отмене уже отправлен
       if (s.delivering) s.stage = 'draft';
-      return sendSafe(chatId, TEXT.tryLater());
+      return sendSafe(chatId, r.help ? TEXT.tryLater() : TRY_LATER_TEXT);
     }
     if (r.kind === 'concern') {
-      // Доставка уже отменена с «не получилось» (предел ожидания): второго ответа нет.
-      if ((s.veto || 0) >= (s.deliveries || 0) && (s.deliveries || 0) > 0) return logSafety({ level: 'concern', at: 'rendering' });
+      // Доставка уже отменена с «не получилось»: второго ответа нет; контактов в нём не было — блок помощи.
+      if ((s.veto || 0) >= (s.deliveries || 0) && (s.deliveries || 0) > 0) {
+        if (!s.vetoHelp) await helpOnce();
+        return logSafety({ level: 'concern', at: 'rendering' });
+      }
       await sendSafe(chatId, helpMessage('concern'));
       return logSafety({ level: 'concern', at: 'rendering' });
     }

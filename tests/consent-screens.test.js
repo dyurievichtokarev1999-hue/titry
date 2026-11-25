@@ -130,8 +130,8 @@ for (const order of ORDERS) {
   });
 }
 
-test('порядок экранов: возраст (6Г), 6А, согласие (6Б) — решение А8; прежняя переменная окружения порядок не меняет', async () => {
-  assert.deepEqual(consentSteps(), ['age', 'intro', 'pd']);
+test('порядок экранов: возраст (6Г), 6А, согласие (6Б), передача в США (6В) — решения А8 и А2; прежняя переменная окружения порядок не меняет', async () => {
+  assert.deepEqual(consentSteps(), ['age', 'intro', 'pd', 'abroad']);
   const prev = process.env.TITRY_CONSENT_ORDER;
   process.env.TITRY_CONSENT_ORDER = 'pd_first';
   try {
