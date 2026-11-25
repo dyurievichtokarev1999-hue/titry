@@ -469,7 +469,7 @@ export function createBot({
   renderTimeoutMs = RENDER_TIMEOUT_MS, // предел активного рендера от старта задачи в слоте (server/render.js)
   renderGraceMs = KILL_GRACE_MS, // запасной предел: renderTimeoutMs + 2×renderGraceMs — слот освобождается принудительно
   botName = null, // имя бота (getMe): «/команда@другой_бот» — не наша команда; без имени «@…» отрезается у любой
-  consentOrder = consentSteps(), // шаги подтверждений: возраст (6Г), 6А, согласие (6Б) — решение А8; без 'intro' — 6А первым (тесты)
+  consentOrder = consentSteps(), // шаги подтверждений: 6Г, 6А, 6Б, 6В — решения А8 и А2; без 'intro' — 6А первым (тесты)
 } = {}) {
   const sessions = new Map();
   // Команда: «/имя», без учёта регистра; «@имя_бота» отрезается только для своего бота. Иначе — не команда (null).
@@ -577,6 +577,7 @@ export function createBot({
     }
     if (step === 'intro') return tg.send(chatId, CONSENT_TEXT.intro, { reply_markup: consentKb([[[CONSENT_TEXT.introNext, `cs:intro:next:${cycle}`]]]) });
     if (step === 'age') return tg.send(chatId, CONSENT_TEXT.age, { reply_markup: consentKb([[[CONSENT_TEXT.ageYes, `cs:age:yes:${cycle}`], [CONSENT_TEXT.ageNo, `cs:age:no:${cycle}`]]]) });
+    if (step === 'abroad') return tg.send(chatId, CONSENT_TEXT.abroad, { reply_markup: consentKb([[[CONSENT_TEXT.abroadYes, `cs:abroad:yes:${cycle}`], [CONSENT_TEXT.abroadNo, `cs:abroad:no:${cycle}`]]]) });
     // 6Ж — единственное приглашение, и после /year (решение Claude 18.11, п. 5); период года сохраняется в s.period.
     return tg.send(chatId, CONSENT_TEXT.ready);
   }
@@ -604,18 +605,21 @@ export function createBot({
     const [, step, answer, cycle] = data.split(':');
     // Кнопка не текущего шага или прежнего прохождения (Критик реализации 18.11 21:40) — ничего не засчитываем.
     if (!c || c.step !== step || cycle !== c.cycle) return;
-    // Только кнопки, которые показаны на этом экране (QA PR 32 03b4b93): 6А — «Дальше»; 6Б, 6Г — «Да» и «Нет»
+    // Только кнопки, которые показаны на этом экране (QA PR 32 03b4b93): 6А — «Дальше»; 6Б, 6В, 6Г — «Да» и «Нет»
     // (клавиатуры — в consentScreen; менять вместе). На шагах done и declined кнопок нет.
     // Любое другое значение ничего не меняет: шаг, отметки и метрики остаются, следующий экран не отправляется.
     if (!flow.includes(step) || !(step === 'intro' ? answer === 'next' : answer === 'yes' || answer === 'no')) return;
     const next = flow[flow.indexOf(step) + 1] || 'done';
     if (answer === 'next' || answer === 'yes') {
-      if (step === 'pd') c.given.pd = { at: now().toISOString(), version: CONSENT_VERSION };
+      if (step === 'pd' || step === 'abroad') c.given[step] = { at: now().toISOString(), version: CONSENT_VERSION };
       if (next === 'done') s.consentedBefore = true; // согласие в этой сессии было дано (для ответа на отказ после /start)
       return consentScreen(chatId, s, next);
     }
     c.step = 'declined'; // отказ как событие не храним; дальше бот ничего не спрашивает и не напоминает
     forgetStory(s);
+    // 6В «Не сейчас»: согласие 6Б не отзывается — его можно отозвать через /delete (комплект v2.7, ответ 6В и таблица
+    // «Что остаётся при отказе»). Метрики не удаляются: до 6Ж в этом прохождении они не пишутся.
+    if (step === 'abroad') return tg.send(chatId, CONSENT_TEXT.abroadDeclined);
     // Было ли согласие до этого отказа (в этом прохождении или раньше в сессии). После отказа признак сбрасывается:
     // повторный отказ до нового согласия не сообщает об удалении снова (QA PR 34 324cc87). Синхронно, до отправок.
     const had = Object.keys(c.given).length > 0 || !!s.consentedBefore;
