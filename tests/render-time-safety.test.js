@@ -6,7 +6,7 @@ import fs from 'node:fs/promises';
 import { TEXT, telegram } from '../server/bot.js';
 import { createBot } from './helpers/consent.js'; // подтверждения 6А–6Ж пройдены (хелпер)
 import { makeGate } from '../server/gate.js';
-import { helpMessage, tryLaterMessage, NOT_HEARD_TEXT, assessRisk } from '../server/safety.js';
+import { helpMessage, tryLaterMessage, TRY_LATER_TEXT, NOT_HEARD_TEXT, assessRisk } from '../server/safety.js';
 
 const ex = JSON.parse(await fs.readFile(new URL('../examples/day-quiet.json', import.meta.url), 'utf8'));
 const chat = { id: 77901, type: 'private' };
@@ -93,7 +93,8 @@ test('рендер завершён, доставка ждёт проверку 
   assert.match(b.sent.at(-1), URGENT_CARD);
 });
 
-test('проверка второго сообщения не завершена и после повтора: локально чисто → ролик уходит; concern → «не получилось» и контакты, ролика нет', async () => {
+// Б2, вариант А (решение Дмитрия 24.11; матрица Б-4, строка 9): модель не ответила — доставка отменяется при любом локальном уровне.
+test('проверка второго сообщения не завершена и после повтора: локально чисто → «не получилось», ролика нет (строка 9а); concern → так же', async () => {
   let d = deferred();
   let checks = 0;
   const b = setup({ prior: () => d.promise, second: () => { checks++; failCheck(); } });
@@ -101,9 +102,10 @@ test('проверка второго сообщения не завершена
   let p = b.play(); await tick();
   await b.say('Пила чай');
   assert.equal(checks, 2, 'один повтор');
-  assert.equal(b.sent.at(-1), TEXT.rendering);
+  assert.equal(b.sent.at(-1), TRY_LATER_TEXT, 'мягкое «не получилось» без контактов, без «Собираю ролик»');
   d.resolve(false); await p;
-  assert.equal(b.counters.video, 1, 'локально чисто — ролик');
+  assert.equal(b.counters.video, 0, 'локально чисто + «неизвестно» — ролика нет (вариант А)');
+  assert.equal(b.counters.render, 0, 'неопределённость до старта рендера — рендера нет');
   assert.ok(!b.sent.some((t) => /не завершил|не завершилась/.test(t)));
   d = deferred();
   const c = setup({ prior: () => d.promise, second: failCheck, chatId: 77903 });
@@ -176,8 +178,9 @@ test('«/start» во время подготовки не снимает про
   assert.match(b.sent.at(-1), URGENT_CARD);
 });
 
-test('проверка сообщения зависла дольше предела: локально чисто → ролик уходит; concern → ролика нет, «не получилось»', async () => {
-  for (const [text, video] of [['Пила чай', 1], ['Хочу его ударить', 0]]) {
+// Б2, вариант А: истёк предел ожидания — ролика нет при любом уровне; контакты — только при concern.
+test('проверка сообщения зависла дольше предела: локально чисто → ролика нет, «не получилось» без контактов; concern → с контактами', async () => {
+  for (const [text, reply] of [['Пила чай', TRY_LATER_TEXT], ['Хочу его ударить', TRY]]) {
     const d = deferred();
     const b = setup({ prior: () => d.promise, second: () => new Promise(() => {}), holdWaitMs: 30 });
     await b.say(ex.story);
@@ -185,8 +188,8 @@ test('проверка сообщения зависла дольше преде
     b.say(text); await tick();
     d.resolve(false);
     await p;
-    assert.equal(b.counters.video, video, text);
-    if (!video) assert.equal(b.sent.at(-1), TRY, text);
+    assert.equal(b.counters.video, 0, text);
+    assert.equal(b.sent.at(-1), reply, text);
   }
 });
 
@@ -277,10 +280,11 @@ test('после предела ожидания поздний ответ «б�
   const p = b.play(); await tick();
   const q = b.say('Пила чай'); await tick();
   d.resolve(false); await p;
-  assert.equal(b.counters.video, 1, 'локально чисто — ролик ушёл по истечении предела');
+  assert.equal(b.counters.video, 0, 'предел истёк — ролика нет (Б2, вариант А)');
+  assert.equal(b.sent.at(-1), TRY_LATER_TEXT);
   const n = b.sent.length;
   m.resolve(false); await q;
-  assert.equal(b.sent.length, n, 'доставка закончена — обещания ролика нет');
+  assert.equal(b.sent.length, n, 'доставка отменена — ни «Собираю ролик», ни второго «не получилось»');
 });
 
 test('голос во время подготовки: расшифровки нет (сбой распознавания) → «не разобрал голосовое», ролик не отменяется', async () => {
@@ -307,15 +311,16 @@ test('голос во время подготовки длиннее преде�
   assert.ok(b.sent.includes(NOT_HEARD_TEXT));
 });
 
-test('исключение в самой проверке сообщения → «неизвестно»: локально чисто — ролик уходит', async () => {
+test('исключение в самой проверке сообщения → «неизвестно»: локально чисто — ролик не уходит (строка 9б)', async () => {
   const r = deferred();
   const b = setup({ render: () => r.promise, gateWrap: (g) => ({ ...g, verify: async (scope, story, ep, text) => (ep ? g.verify(scope, story, ep, text) : Promise.reject(new Error('хранилище'))) }) });
   await b.say(ex.story);
   const p = b.play();
   await waitFor(() => b.counters.render === 1);
   await b.say('Пила чай');
+  assert.equal(b.sent.at(-1), TRY_LATER_TEXT);
   r.resolve(); await p;
-  assert.equal(b.counters.video, 1);
+  assert.equal(b.counters.video, 0, 'рендер уже начат, неопределённость до отправки — отправок 0');
 });
 
 test('отмена прежней доставки (concern + «неизвестно») не запрещает следующую; подпись к фото проверяется', async () => {
