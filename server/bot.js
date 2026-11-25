@@ -913,8 +913,10 @@ export function createBot({
       // Номер резервируется сразу при выдаче (s.issued): параллельная доставка и номер, вытесненный из последних 20,
       // не повторятся в сессии.
       let video;
-      do video = newVideoId(); while (s.issued?.has(video));
-      (s.issued ||= new Set()).add(video);
+      for (let i = 0; !video || s.issued?.has(video); i++) video = i < 8 ? newVideoId() : crypto.randomBytes(8).toString('hex');
+      const issued = (s.issued ||= new Set());
+      issued.add(video);
+      if (issued.size > 1000) issued.delete(issued.values().next().value); // память сессии ограничена
       // Запись render — один раз на ролик: после подтверждения отправки или, если ответ Telegram потерялся, перед первым
       // откликом под этим роликом (нажатие кнопки доказывает доставку; QA PR 35 на d64c0e0).
       const renderData = { seconds: Math.round(r.seconds), mood: ep.mood, music: ep.music, edits: s.edits || 0, video };
