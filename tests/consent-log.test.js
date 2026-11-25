@@ -91,11 +91,12 @@ test('отзыв: /delete и «Нет» после согласия — отме
   assert.deepEqual(await read(file), []);
   await t.consent();
   await t.say('/start'); await t.press('age', 'no'); // отзыв
-  await t.say('/delete');
+  await t.consent();
+  await t.say('/delete'); // отзыв
   // Отметки отзыва пишутся без ожидания (отказ не задерживается): ждём, пока запись дойдёт до файла.
-  for (let i = 0; i < 100 && (await read(file)).length < 5; i++) await new Promise((r) => setTimeout(r, 5));
+  for (let i = 0; i < 100 && (await read(file)).length < 8; i++) await new Promise((r) => setTimeout(r, 5));
   const rows = (await read(file)).map((r) => `${r.step}:${r.answer}`);
-  assert.deepEqual(rows.slice(-2), ['age:withdraw', 'delete:withdraw']);
+  assert.deepEqual(rows, ['age:yes', 'pd:yes', 'abroad:yes', 'age:withdraw', 'age:yes', 'pd:yes', 'abroad:yes', 'delete:withdraw']);
   const f = bot({ record: async (id, m) => { if (m.answer !== 'yes') throw new Error('диск'); } });
   await f.consent();
   await f.say('/start'); await f.press('age', 'no');
@@ -108,4 +109,88 @@ test('модуль: неизвестная отметка отклоняется
   const log = makeConsentLog(await tmpFile(), { hash: () => 'x' });
   await assert.rejects(log.record(1, { step: 'story', answer: 'yes' }), { code: 'consent_bad_mark' });
   assert.throws(() => makeConsentLog('f', {}));
+});
+
+// Разборы 391b5ec.
+test('/delete без согласия в сессии — без записи; после согласия — отзыв', async () => {
+  const file = await tmpFile();
+  const t = bot(makeConsentLog(file, { hash: () => 'participant-a' }));
+  await t.say('/delete');
+  await t.say('/start'); await t.press('age', 'no'); await t.say('/delete');
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(await read(file), [], 'ни согласия, ни записей');
+});
+
+test('«Нет» во время записи «Да» на 6Б: в хранилище за «Да» следует отзыв', async () => {
+  const rows = []; let release; const gate = new Promise((r) => { release = r; });
+  const t = bot({ record: async (id, m) => { if (m.step === 'pd' && m.answer === 'yes') await gate; rows.push(`${m.step}:${m.answer}`); } });
+  await t.say('/start'); await t.press('age', 'yes'); await t.press('intro', 'next');
+  const p = t.press('pd', 'yes');
+  for (let i = 0; i < 50 && t.step() !== 'pd'; i++) await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  await t.press('pd', 'no');
+  release(); await p;
+  for (let i = 0; i < 50 && rows.length < 3; i++) await new Promise((r) => setImmediate(r));
+  assert.deepEqual(rows, ['age:yes', 'pd:yes', 'pd:withdraw']);
+  assert.equal(t.step(), 'declined');
+});
+
+test('запись висит дольше предела — «не получилось сохранить ответ», шаг не засчитан, повтор возможен', async (ctx) => {
+  ctx.mock.timers.enable({ apis: ['setTimeout'] });
+  let hang = true;
+  const t = bot({ record: async () => { if (hang) await new Promise(() => {}); } });
+  await t.say('/start');
+  const p = t.press('age', 'yes');
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  ctx.mock.timers.tick(5000);
+  await p;
+  assert.equal(t.sent.at(-1).text, TEXT.consentRecordFailed);
+  assert.equal(t.step(), 'age');
+  hang = false;
+  await t.press('age', 'yes');
+  assert.equal(t.sent.at(-1).text, CONSENT_TEXT.intro);
+});
+
+test('ответ «отметки удалены» помечен на согласование: проверка выпуска не пропускает', async () => {
+  const { unfinishedTexts } = await import('../server/release.js');
+  assert.ok(unfinishedTexts({ CONSENT_TEXT }).includes('CONSENT_TEXT.ageDeleted'));
+});
+
+test('отказ на 6В после прежнего согласия — отметка abroad:no; при первом прохождении — без записи', async () => {
+  const rows = [];
+  const t = bot({ record: async (id, m) => { rows.push(`${m.step}:${m.answer}`); } });
+  await t.say('/start'); await t.press('age', 'yes'); await t.press('intro', 'next'); await t.press('pd', 'yes'); await t.press('abroad', 'no');
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(rows, ['age:yes', 'pd:yes', 'abroad:no'], 'согласие 6Б уже было — отказ от передачи записан');
+  const fresh = []; const f = bot({ record: async (id, m) => { fresh.push(`${m.step}:${m.answer}`); } });
+  await f.say('/start'); await f.press('age', 'yes'); await f.press('intro', 'next');
+  assert.deepEqual(fresh, ['age:yes']);
+});
+
+test('старт: хранилище отметок недоступно — отказ consent.log до хранилища запретов; доступно — файл 0600, в т. ч. существующий', async () => {
+  const { prepareBot } = await import('../server/bot.js');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-consent-'));
+  const env = { METRICS_SALT: 'test-salt-fictional-0001', ANTHROPIC_API_KEY: 'dummy-not-a-key' };
+  let loaded = 0;
+  const opts = { env, log: () => {}, checkRender: async () => {}, cleanup: async () => {}, cleanupTmp: async () => 0, ledger: { load: async () => { loaded++; } } };
+  const blocker = path.join(dir, 'file');
+  await fs.writeFile(blocker, 'x');
+  await assert.rejects(prepareBot({ ...opts, consentFile: path.join(blocker, 'consent.jsonl') }), { stage: 'consent.log' });
+  assert.equal(loaded, 0);
+  const file = path.join(dir, 'data', 'consent.jsonl');
+  await fs.mkdir(path.dirname(file)); await fs.writeFile(file, '', { mode: 0o644 });
+  await prepareBot({ ...opts, consentFile: file });
+  assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
+  assert.equal(loaded, 1);
+});
+
+test('код участника — HMAC метрик (как в main): в файле не номер чата', async () => {
+  const { makeMetrics } = await import('../server/bot.js');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'titry-consent-'));
+  const m = makeMetrics(path.join(dir, 'metrics.jsonl'), 'test-salt-fictional-0001');
+  const file = path.join(dir, 'consent.jsonl');
+  await makeConsentLog(file, { hash: m.hash }).record(93201, { step: 'pd', answer: 'yes', version: 'v' });
+  const [row] = await read(file);
+  assert.equal(row.participant, m.hash(93201));
+  assert.ok(!(await fs.readFile(file, 'utf8')).includes('93201'));
 });

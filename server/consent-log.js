@@ -10,6 +10,13 @@ import path from 'node:path';
 const STEPS = new Set(['age', 'pd', 'abroad', 'delete']);
 const ANSWERS = new Set(['yes', 'no', 'withdraw']);
 
+/** Проба при старте: каталог и файл создаются, в файл можно писать, права файла — 0600 (и для уже существующего). */
+export async function probeConsentLog(file) {
+  await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+  await fs.appendFile(file, '', { mode: 0o600 });
+  await fs.chmod(file, 0o600);
+}
+
 export function makeConsentLog(file, { hash, now = () => new Date() }) {
   if (typeof hash !== 'function') throw new Error('consent-log: нужна функция кода участника');
   let ops = Promise.resolve();
