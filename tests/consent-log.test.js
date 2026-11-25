@@ -155,10 +155,10 @@ test('запись висит дольше предела — «не получ�
 // завершается. Последняя отметка 6Б — «да», шаг засчитан; позднее завершение первой попытки вторую не отзывает.
 const flush = async (n = 30) => { for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r)); };
 // Записи идут по очереди, как в makeConsentLog: первая «да» 6Б висит, пока её не отпустят.
-function slowPd() {
+function slowPd(slowStep = 'pd') {
   const rows = []; const gates = []; let ops = Promise.resolve();
   const record = (id, m) => {
-    const slow = m.step === 'pd' && m.answer === 'yes' && gates.length === 0;
+    const slow = m.step === slowStep && m.answer === 'yes' && gates.length === 0;
     const gate = slow ? new Promise((r) => gates.push(r)) : null;
     const op = ops.then(async () => { if (gate) await gate; rows.push(`${m.step}:${m.answer}`); });
     ops = op.catch(() => {});
@@ -235,6 +235,33 @@ test('обе попытки просрочены — обе «да» отозв�
   assert.equal(l.rows.at(-1), 'pd:withdraw');
   assert.ok(l.rows.lastIndexOf('pd:withdraw') > l.rows.lastIndexOf('pd:yes'));
   assert.equal(t.step(), 'pd');
+});
+
+test('просрочка «Да» на возрасте, /start, повтор принят, поздняя запись — отзыва нет (code-review PR 39)', async (ctx) => {
+  ctx.mock.timers.enable({ apis: ['setTimeout'] });
+  const l = slowPd('age');
+  const t = bot({ record: l.record });
+  await t.say('/start');
+  await timeout(ctx, t.press('age', 'yes'));
+  await t.say('/start');
+  const retry = t.press('age', 'yes'); await flush();
+  l.release(); await retry; await flush();
+  assert.equal(t.step(), 'intro');
+  assert.deepEqual(l.rows, ['age:yes', 'age:yes']);
+});
+test('просрочка «Да» на 6Б, /start, поздняя запись — отзыв до нового прохождения; новое согласие действует', async (ctx) => {
+  ctx.mock.timers.enable({ apis: ['setTimeout'] });
+  const l = slowPd();
+  const t = bot({ record: l.record });
+  await t.say('/start'); await t.press('age', 'yes'); await t.press('intro', 'next');
+  await timeout(ctx, t.press('pd', 'yes'));
+  await t.say('/start');
+  const a = t.press('age', 'yes'); await flush();
+  l.release(); await a; await flush();
+  await t.press('intro', 'next'); await t.press('pd', 'yes'); await flush();
+  assert.equal(t.step(), 'abroad');
+  const pd = l.rows.filter((r) => r.startsWith('pd:'));
+  assert.deepEqual(pd, ['pd:yes', 'pd:withdraw', 'pd:yes'], 'старая «да» отозвана до новой; последняя отметка 6Б — «да»');
 });
 
 test('ответ «отметки удалены» помечен на согласование: проверка выпуска не пропускает', async () => {
