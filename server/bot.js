@@ -89,7 +89,7 @@ export const TEXT = {
   draftFail: 'Не получилось собрать черновик. Попробуй ещё раз чуть позже.',
   // Закрытый тест (Б6, п. 2). ТЕКСТЫ НА УТВЕРЖДЕНИЕ Редактору; параметры допуска и пределы не раскрываются.
   notInvited: 'Сейчас «Титры» работают только для участников закрытого теста.',
-  limitReached: 'На сегодня рассказов достаточно. Можно вернуться завтра.',
+  limitReached: 'На сегодня рассказов достаточно. Можно вернуться позже.', // окно — скользящие 24 часа
   // Внутренняя причина insufficient_after_exclusion (редактор повествования), дословно: только эта реплика —
   // без черновика, ролика, просьбы дописать и кнопок. Показывается только после stop и технических исходов.
   insufficient: INSUFFICIENT_TEXT, // текст — в server/safety.js
@@ -666,7 +666,9 @@ export function createBot({
     // Явная опасность модели не требует (остановка локально) и предел не расходует. Рассказ уровня «тяжело» получает
     // контакты помощи и при исчерпании предела. ticket возвращается, если черновика не было.
     const urgentLocal = cont === 'urgent' || assessRisk(story).level === 'urgent';
-    const ticket = admission && !urgentLocal ? admission.take(chatId) : null;
+    // Повтор рассказа, уже остановленного моделью, — экран остановки ниже, предел не расходуется.
+    const stopped = urgentLocal || isBlocked(s, story) || gate.status(s.scope, story).kind === 'safety';
+    const ticket = admission && !stopped ? admission.take(chatId) : null;
     if (ticket === false) {
       await tg.send(chatId, TEXT.limitReached);
       if (cont === 'concern' || assessRisk(story).level === 'concern') await tg.send(chatId, helpMessage('concern'));
@@ -845,6 +847,12 @@ export function createBot({
     const g = await track(chatId, gate.verify(s.scope, original, ep, text));
     if (!alive(chatId, s) || s.draftId !== gen) return; // удалённая или заменённая сессия не оживает
     if (g.kind === 'safety') return stopForSafety(chatId, s, 'urgent', { at: 'check', byModel: !!g.byModel }, cycle);
+    if (g.busy) {
+      // Места для проверки нет (Б6 п. 2): модель рассказ не видела — ролика нет при любом локальном уровне.
+      logError('check', { code: g.code });
+      s.stage = 'draft';
+      return tg.send(chatId, TEXT.busy);
+    }
     if (g.unknown) {
       // «Неизвестно» и после повтора (условие 3): локально чисто — ролик делается; есть concern — ролика нет.
       logError('check', { code: g.code });
@@ -1002,6 +1010,7 @@ export function createBot({
         try {
           const g = await track(chatId, gate.verify(s.scope, body, null, ask));
           if (g.kind === 'safety') r = { kind: 'urgent', byModel: !!g.byModel };
+          else if (g.busy) r = { kind: 'unknown', code: g.code }; // места нет: сообщение не проверено — ролика нет
           else if (g.ok) r = { kind: level };
           else r = { kind: level === 'concern' || g.refusal ? 'unknown' : 'none', code: g.code }; // условие 3; отказ — как concern
         } catch { r = { kind: level === 'concern' ? 'unknown' : 'none', code: 'error' }; }

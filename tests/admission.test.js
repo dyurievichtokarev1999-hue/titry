@@ -168,3 +168,38 @@ test('вне списка: рассказ «тяжело» — контакты 
 test('конфигурация: ожидание места не больше 10 минут', () => {
   assert.throws(() => admissionFromEnv({ TITRY_STORIES_PER_DAY: '3', TITRY_MODEL_WAIT_MS: '9999999999' }), { code: 'admission_config' });
 });
+
+// ponytail-review 3e7df0a, блокер: места заняты — проверка не делалась, ролик не уходит.
+test('места заняты при проверке перед роликом — ролика нет, «очередь заполнена», модель не вызывалась', async () => {
+  let release; const gate = new Promise((r) => { release = r; });
+  let drafts = 0;
+  const t = setup({ limits: { waitMs: 20, perDay: 10 }, draft: async () => { drafts++; if (drafts === 2) await gate; return { episode: structuredClone(ex.episode), risk: { level: 'none' }, provider: 'claude', dropped: [] }; } });
+  await t.say(IN, ex.story);
+  const busy = t.say(1003, ex.story); // занимает единственное место
+  await tick();
+  await t.bot.handleUpdate({ callback_query: { id: 'q', data: `play:${t.bot.sessions.get(IN).draftId}`, message: { chat: { id: IN, type: 'private' } } } });
+  for (let i = 0; i < 100 && t.texts(IN).at(-1) !== TEXT.busy; i++) await new Promise((r) => setTimeout(r, 5));
+  assert.equal(t.texts(IN).at(-1), TEXT.busy);
+  assert.equal(t.n.check, 0, 'модель рассказ не видела');
+  release(); await busy;
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(t.n.check, 0, 'и после освобождения ролик по старому нажатию не делается');
+});
+
+test('повтор рассказа, остановленного моделью, после исчерпания предела — экран остановки, а не «достаточно»', async () => {
+  let checks = 0; const sent = [];
+  // Проверка модели: «опасно».
+  const bot = createBot({ tg: { send: async (c, text) => { sent.push({ c, text }); }, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''), sendVideo: async () => ({}) },
+    metrics: { hash: () => 'h', log: async () => {}, forget: async () => {} }, admission: makeAdmission({ allowed: new Set(['1005']), perDay: 1, concurrency: 1 }), checkRetryMs: 0,
+    draft: async () => ({ episode: structuredClone(ex.episode), risk: { level: 'none' }, provider: 'claude', dropped: [] }),
+    safetyCheck: async () => { checks++; return true; }, render: async (e, o) => ({ seconds: 1, duration: 24, outPath: o.outPath }) });
+  const chat = { id: 1005, type: 'private' };
+  await bot.handleUpdate({ message: { chat, text: ex.story } });
+  await bot.handleUpdate({ callback_query: { id: 'q', data: `play:${bot.sessions.get(1005).draftId}`, message: { chat } } });
+  for (let i = 0; i < 100 && !sent.some((m) => m.c === 1005 && /ролика не будет/.test(m.text)); i++) await new Promise((r) => setTimeout(r, 5));
+  assert.equal(checks, 1, 'модель признала опасным');
+  await bot.handleUpdate({ message: { chat, text: ex.story } }); // предел (1) уже исчерпан
+  const last = sent.filter((m) => m.c === 1005).at(-1).text;
+  assert.notEqual(last, TEXT.limitReached);
+  assert.match(last, /Для этого рассказа ролика не будет/);
+});
