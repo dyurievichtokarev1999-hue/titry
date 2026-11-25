@@ -77,7 +77,7 @@ test('сквозной: два ролика одного участника — 
   // Только сохранённые записи: render и feedback с номером ролика.
   const renders = t.log.filter((r) => r.e === 'render').map((r) => r.video);
   assert.equal(renders.length, 2);
-  assert.match(renders[0], /^[0-9a-f]{8}$/);
+  assert.match(renders[0], /^[0-9a-f]{16}$/);
   assert.notEqual(renders[0], renders[1], 'у роликов разные номера');
   const byVideo = (id) => t.fb().filter((r) => r.video === id).map((r) => r.value);
   assert.deepEqual(byVideo(renders[0]), ['fit', 'heavier'], 'первый ролик: отклик и сигнал вреда');
@@ -165,6 +165,7 @@ test('ответ Telegram на отправку потерялся, отклик
   await click(k.fit); await click(k.heavier);
   const id = k.fit.split(':')[3];
   assert.deepEqual(log.map((r) => `${r.e}:${r.value || ''}:${r.video}`), [`render::${id}`, `feedback:fit:${id}`, `feedback:heavier:${id}`]);
+  assert.equal(log[0].restored, true, 'render восстановлен по отклику — помечен (не для расчёта задержек)');
   assert.equal(sent.at(-1).text, helpMessage('concern'), 'блок помощи');
   lose = false; // подтверждённая отправка, затем отклик — render один
   await bot.handleUpdate({ message: { chat, text: ex.story } });
@@ -206,4 +207,23 @@ test('сбой записи render при отклике — отклик не �
   assert.deepEqual(log, [], 'render не записался — и отклика нет');
   await click(heavier);
   assert.deepEqual(log, ['render', 'feedback']);
+});
+
+// QA PR 35 на 1eb3f77: совпадение случайного номера двух роликов одного участника.
+test('генератор дважды выдал тот же номер — второй ролик получает другой; у каждого отклика свой render, раньше отклика', async () => {
+  const ids = ['aaaaaaaaaaaaaaaa', 'aaaaaaaaaaaaaaaa', 'bbbbbbbbbbbbbbbb'];
+  const log = []; const offered = [];
+  const tg = { send: async () => {}, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''),
+    sendVideo: async (c, f, extra, o = {}) => { offered.push(extra); if (o.ready && !(await o.ready())) return null; return {}; } };
+  const metrics = { hash: () => 'qa-fictional', forget: async () => {}, log: async (c, e, x) => { if (e === 'feedback' || e === 'render') log.push(`${e}:${x.value || ''}:${x.video}`); } };
+  const bot = createBot({ tg, metrics, safetyCheck: async () => false, checkRetryMs: 0, newVideoId: () => ids.shift(),
+    draft: async () => ({ episode: structuredClone(ex.episode), risk: { level: 'none' }, provider: 'claude', dropped: [] }),
+    render: async (e, o) => ({ seconds: 1, duration: 24, outPath: o.outPath }) });
+  const chat = { id: 94004, type: 'private' };
+  const click = (data) => bot.handleUpdate({ callback_query: { id: 'q', data, message: { chat } } });
+  const play = async () => { await bot.handleUpdate({ message: { chat, text: ex.story } }); await click(`play:${bot.sessions.get(chat.id).draftId}`); return offered.at(-1).reply_markup.inline_keyboard[0][0].callback_data; };
+  const fit1 = await play(); const fit2 = await play();
+  assert.notEqual(fit1.split(':')[3], fit2.split(':')[3], 'номера различаются');
+  await click(fit1); await click(fit2);
+  assert.deepEqual(log, ['render::aaaaaaaaaaaaaaaa', 'render::bbbbbbbbbbbbbbbb', 'feedback:fit:aaaaaaaaaaaaaaaa', 'feedback:fit:bbbbbbbbbbbbbbbb']);
 });

@@ -279,7 +279,7 @@ export function draftKeyboard(ep, draftId = 0) {
 }
 
 // Значения кнопок — FEEDBACK_VALUES (менять вместе). Метка цикла согласия в кнопках отклика: отклик пишется в метрики, только если ролик отправлен при текущем согласии.
-// video — случайный номер ролика (8 hex): связывает отклики с роликом в метриках render и feedback.
+// video — случайный номер ролика (16 hex): связывает отклики с роликом в метриках render и feedback.
 const FEEDBACK_KEEP = 20; // сколько последних роликов сессии принимают отклик
 const feedbackKeyboard = (cycle, video) => ({
   inline_keyboard: [[
@@ -460,6 +460,7 @@ const continuationContext = (prev, next) => `${lastPhrase(joinEdits(prev))}\n${S
 
 export function createBot({
   tg, metrics = makeMetrics(), draft = makeDraft, render = renderEpisode, transcribe = transcribeOgg, now = () => new Date(),
+  newVideoId = () => crypto.randomBytes(8).toString('hex'), // номер ролика в кнопках отклика и метриках (подменяется в тестах)
   // Модельная проверка перед рендером (решение владельца кода 13.11 15:00): true — опасно, false — безопасно,
   // исключение — «неизвестно» (один повтор через checkRetryMs). Нет ключа — режим «только локальный фильтр».
   safetyCheck, hasKey = safetyCheck ? () => true : hasClaudeCredentials,
@@ -504,7 +505,9 @@ export function createBot({
   // Цикл берётся при вызове: событие относится к согласию, действовавшему в этот момент.
   // Запись render ролика — ровно одна: общее обещание для подтверждения отправки и первого отклика (QA PR 35);
   // сбой — обещание снимается, следующая попытка пишет заново.
-  const renderOnce = (chatId, entry) => (entry.renderP ||= writeMetric(chatId, 'render', entry.render, entry.cycle).catch((e) => { entry.renderP = null; throw e; }));
+  // restored — запись восстановлена по отклику (ответ Telegram на отправку потерялся): её время — время нажатия,
+  // для расчёта задержек она не годится (QA PR 35 на 1eb3f77).
+  const renderOnce = (chatId, entry, restored = false) => (entry.renderP ||= writeMetric(chatId, 'render', restored ? { ...entry.render, restored: true } : entry.render, entry.cycle).catch((e) => { entry.renderP = null; throw e; }));
   const logMetric = (chatId, event, data, cycle = cycleOf(chatId)) => Promise.resolve().then(() => writeMetric(chatId, event, data, cycle)).catch((e) => logError('metrics', e));
   // Незавершённые черновики и отдельные проверки участника: их результат может создать запрет уже после /delete.
   const inFlight = new Map();
@@ -906,7 +909,9 @@ export function createBot({
       // не отзывается: Telegram не умеет отменить отправку; окно — время одного HTTP-запроса.
       // Случайный номер ролика (QA PR 35): по нему отклики в метриках связаны с этим роликом и отделены от других
       // роликов того же участника (номер в сессии сбрасывался бы с сессией). Сам по себе ничего не раскрывает.
-      const video = crypto.randomBytes(4).toString('hex');
+      // Номер ролика: 64 бита и проверка на совпадение в сессии — две доставки не делят номер (QA PR 35 на 1eb3f77).
+      let video;
+      do video = newVideoId(); while (s.feedbackFor?.has(video));
       // Запись render — один раз на ролик: после подтверждения отправки или, если ответ Telegram потерялся, перед первым
       // откликом под этим роликом (нажатие кнопки доказывает доставку; QA PR 35 на d64c0e0).
       const renderData = { seconds: Math.round(r.seconds), mood: ep.mood, music: ep.music, edits: s.edits || 0, video };
@@ -1308,7 +1313,7 @@ export function createBot({
         // Сначала запись render ролика (одна на ролик, общая с подтверждением отправки), затем feedback — обе в цикле
         // согласия доставки. Ответ Telegram на отправку не дошёл, а отклик пришёл — ролик доставлен.
         // Сбой любой записи — ответ снимается, следующее нажатие повторит обе (сигнал вреда не теряется).
-        try { await renderOnce(chatId, entry); await writeMetric(chatId, 'feedback', { value: v, video }, entry.cycle); } catch (e) { done.delete(v); logError('metrics', e); }
+        try { await renderOnce(chatId, entry, true); await writeMetric(chatId, 'feedback', { value: v, video }, entry.cycle); } catch (e) { done.delete(v); logError('metrics', e); }
       }
       if (v === 'heavier') { await tg.send(chatId, TEXT.heavier); return tg.send(chatId, helpMessage('concern')); }
       return tg.send(chatId, v === 'fit' ? TEXT.fit : TEXT.miss);
