@@ -15,12 +15,12 @@ function bot() {
   const cycle = () => b.sessions.get(chat.id).consent.cycle;
   const press = (step, a) => b.handleUpdate({ callback_query: { id: 'q', data: `cs:${step}:${a}:${cycle()}`, message: { chat } } });
   const buttons = () => sent.at(-1).extra?.reply_markup?.inline_keyboard?.flat().map((k) => k.callback_data.split(':').slice(1, 3).join(':'));
-  const consent = async () => { await say('/start'); await press('age', 'yes'); await press('intro', 'next'); await press('pd', 'yes'); };
+  const consent = async () => { await say('/start'); await press('age', 'yes'); await press('intro', 'next'); await press('pd', 'yes'); await press('abroad', 'yes'); };
   const say = (text) => b.handleUpdate({ message: { chat, text } });
   return { b, sent, events, press, buttons, say, consent, texts: () => sent.map((m) => m.text), forgot: () => forgot, step: () => b.sessions.get(chat.id).consent.step };
 }
 
-test('первым — вопрос о возрасте; «Да» → 6А → 6Б → 6Ж', async () => {
+test('первым — вопрос о возрасте; «Да» → 6А → 6Б → 6В → 6Ж', async () => {
   const t = bot();
   await t.say('/start');
   assert.deepEqual(t.texts(), [CONSENT_TEXT.age], 'на /start — только вопрос о возрасте');
@@ -33,6 +33,8 @@ test('первым — вопрос о возрасте; «Да» → 6А → 6�
   await t.press('intro', 'next');
   assert.deepEqual(t.buttons(), ['pd:yes', 'pd:no'], 'затем 6Б');
   await t.press('pd', 'yes');
+  assert.deepEqual(t.buttons(), ['abroad:yes', 'abroad:no'], 'затем 6В (А2)');
+  await t.press('abroad', 'yes');
   assert.equal(t.step(), 'done');
   assert.equal(t.sent.at(-1).text, CONSENT_TEXT.ready);
 });
@@ -82,8 +84,8 @@ test('согласие было → /start → «Нет» на 6Б → /start �
   assert.deepEqual(t.texts().slice(n), [CONSENT_TEXT.ageDeclined], 'отзыв уже был на 6Б — без «отметки удалены»');
 });
 
-test('6А называет следующий шаг так, как он идёт; версия текста помечена А8', () => {
-  assert.match(CONSENT_TEXT.intro, /Дальше — согласие\./);
+test('6А называет следующие шаги так, как они идут (два согласия, А2); версия текста помечена А8', () => {
+  assert.match(CONSENT_TEXT.intro, /Дальше два согласия: на обработку данных и на передачу рассказа в США\./);
   assert.match(CONSENT_TEXT.intro, /Подробно — на следующем шаге\./);
   assert.match(CONSENT_VERSION, /А8/);
 });
@@ -116,7 +118,7 @@ test('/year при порядке по умолчанию: вопрос о во�
   const t = bot();
   await t.say('/year');
   assert.deepEqual(t.texts(), [CONSENT_TEXT.age]);
-  await t.press('age', 'yes'); await t.press('intro', 'next'); await t.press('pd', 'yes');
+  await t.press('age', 'yes'); await t.press('intro', 'next'); await t.press('pd', 'yes'); await t.press('abroad', 'yes');
   assert.equal(t.sent.at(-1).text, CONSENT_TEXT.ready);
   assert.equal(t.b.sessions.get(93001).period, 'year');
 });

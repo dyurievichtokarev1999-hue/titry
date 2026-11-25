@@ -4,6 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import { createBot } from './helpers/consent.js'; // подтверждения 6А–6Ж пройдены (хелпер)
+import { TRY_LATER_TEXT } from '../server/safety.js';
 
 const ex = JSON.parse(await fs.readFile(new URL('../examples/day-quiet.json', import.meta.url), 'utf8'));
 const chat = { id: 77001, type: 'private' };
@@ -45,15 +46,16 @@ test('бот S02: отдельная проверка true → сообщени�
   assert.equal(b.counters.check, 1, 'после остановки рассказ больше не проверяется');
 });
 
-// Решение владельца кода 13.11 15:00: «неизвестно» — один повтор; рассказ локально чистый — ролик делается (условие 3).
-// Нет ключа — режим «только локальный фильтр» без «проверка не завершилась» (условие 4).
-test('бот U01–U05: неполный ответ и после повтора, локально чисто → ролик, без «не завершил» и без помощи', async () => {
+// «Неизвестно» — один повтор. Б2, вариант А (решение Дмитрия 24.11; было — условие 3 от 13.11): локально чистый рассказ
+// без ответа модели — ролика нет, мягкое «не получилось». Нет ключа — режим «только локальный фильтр» (условие 4).
+test('бот U01–U05: неполный ответ и после повтора, локально чисто → ролика нет, «не получилось», без «не завершил»', async () => {
   const b = setup({ check: fail });
   await b.story(); await b.play();
   assert.equal(b.counters.check, 2, 'один повтор');
   assert.doesNotMatch(b.sent.join('\n'), /не завершил|не завершилась/);
+  assert.equal(b.last(), TRY_LATER_TEXT, 'мягкое «не получилось» без контактов: рассказ спокойный');
   assert.doesNotMatch(b.sent.join('\n'), HELP);
-  assert.equal(b.counters.render, 1); assert.equal(b.counters.video, 1);
+  assert.equal(b.counters.render, 0); assert.equal(b.counters.video, 0);
 });
 
 test('бот U06: нет ключа → только локальный фильтр: ролик, проверка не вызывается', async () => {

@@ -118,9 +118,12 @@ test('бот, модель недоступна: четыре фразы → TRY
   }
 });
 
-test('бот, модель недоступна: гиперболы и бытовые примеры QA → ролик, как раньше', async () => {
+// Б2, вариант А (решение Дмитрия 24.11): модель недоступна — ролика нет и у гипербол; экрана остановки нет.
+test('бот, модель недоступна: гиперболы и бытовые примеры QA → ролика нет, мягкое «не получилось», без остановки', async () => {
   for (const p of [...HYPERBOLE, ...HOUSEHOLD_FALSE]) {
     const r = await bot(`${ex.story} ${p}`);
-    assert.equal(r.n.video, 1, p);
+    assert.equal(r.n.video, 0, p); assert.equal(r.n.render, 0, p);
+    assert.ok(r.sent.join('\n').includes(TRY_LATER_TEXT), p);
+    assert.ok(!r.sent.some((t) => /112/.test(t) && /ролика не будет/.test(t)), `без экрана остановки: ${p}`);
   }
 });
