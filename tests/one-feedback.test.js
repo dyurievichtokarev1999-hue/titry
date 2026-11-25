@@ -77,7 +77,7 @@ test('сквозной: два ролика одного участника — 
   // Только сохранённые записи: render и feedback с номером ролика.
   const renders = t.log.filter((r) => r.e === 'render').map((r) => r.video);
   assert.equal(renders.length, 2);
-  assert.match(renders[0], /^[0-9a-f]{16}[0-9a-z]+$/);
+  assert.match(renders[0], /^[0-9a-f]{16}$/, 'наружу — только случайная часть');
   assert.notEqual(renders[0], renders[1], 'у роликов разные номера');
   const byVideo = (id) => t.fb().filter((r) => r.video === id).map((r) => r.value);
   assert.deepEqual(byVideo(renders[0]), ['fit', 'heavier'], 'первый ролик: отклик и сигнал вреда');
@@ -211,7 +211,7 @@ test('сбой записи render при отклике — отклик не �
 });
 
 // QA PR 35 на 1eb3f77: совпадение случайного номера двух роликов одного участника.
-// QA PR 35 на 1eb3f77 и 67f3133: номер уникален на всём сроке хранения метрик, даже если случайная часть совпала.
+// QA PR 35 на 1eb3f77 и 67f3133: номер не повторяется, даже если генератор выдаёт одно и то же; наружу — только случайная часть.
 function constBot(chatId) {
   const log = []; const offered = [];
   const tg = { send: async () => {}, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''),
@@ -224,15 +224,16 @@ function constBot(chatId) {
   const click = (data) => bot.handleUpdate({ callback_query: { id: 'q', data, message: { chat } } });
   const play = async () => { await bot.handleUpdate({ message: { chat, text: ex.story } }); await click(`play:${bot.sessions.get(chat.id).draftId}`); return offered.at(-1).reply_markup.inline_keyboard[0][0].callback_data; };
   const pairs = (video) => log.filter((r) => r.video === video).map((r) => r.e);
-  return { bot, chat, log, click, play, pairs };
+  const lastKeys = () => offered.at(-1).reply_markup.inline_keyboard[0].map((k) => k.callback_data);
+  return { bot, chat, log, click, play, pairs, lastKeys };
 }
 
-test('случайная часть номера всегда одна и та же — номера роликов различаются; у каждого отклика свой render, раньше отклика', async () => {
+test('генератор всегда выдаёт одно и то же — номера роликов различаются (16 hex); у каждого отклика свой render, раньше отклика', async () => {
   const t = constBot(94004);
   const fit1 = await t.play(); const fit2 = await t.play();
   const [v1, v2] = [fit1.split(':')[3], fit2.split(':')[3]];
   assert.notEqual(v1, v2, 'номера различаются');
-  assert.ok(fit1.length <= 64, 'callback_data в пределе Telegram');
+  for (const k of t.lastKeys()) assert.ok(Buffer.byteLength(k) <= 64, `callback_data в пределе Telegram: ${k}`);
   await t.click(fit1); await t.click(fit2);
   assert.deepEqual(t.pairs(v1), ['render', 'feedback']);
   assert.deepEqual(t.pairs(v2), ['render', 'feedback']);
