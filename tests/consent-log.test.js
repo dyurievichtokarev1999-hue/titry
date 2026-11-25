@@ -154,14 +154,19 @@ test('запись висит дольше предела — «не получ�
 // QA PR 39 c0d69be: первая запись «да» на 6Б висит дольше предела, повторное «Да» принято, потом первая запись
 // завершается. Последняя отметка 6Б — «да», шаг засчитан; позднее завершение первой попытки вторую не отзывает.
 const flush = async (n = 30) => { for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r)); };
+// Записи идут по очереди, как в makeConsentLog: первая «да» 6Б висит, пока её не отпустят.
 function slowPd() {
-  const rows = []; const gates = [];
-  const record = async (id, m) => {
-    if (m.step === 'pd' && m.answer === 'yes' && gates.length === 0) await new Promise((r) => gates.push(r));
-    rows.push(`${m.step}:${m.answer}`);
+  const rows = []; const gates = []; let ops = Promise.resolve();
+  const record = (id, m) => {
+    const slow = m.step === 'pd' && m.answer === 'yes' && gates.length === 0;
+    const gate = slow ? new Promise((r) => gates.push(r)) : null;
+    const op = ops.then(async () => { if (gate) await gate; rows.push(`${m.step}:${m.answer}`); });
+    ops = op.catch(() => {});
+    return op;
   };
   return { rows, record, release: () => gates[0]() };
 }
+const timeout = async (ctx, p) => { await flush(); ctx.mock.timers.tick(5000); await p; };
 test('просрочка первой «Да», повтор принят, первая запись завершилась позже — согласие действует (QA PR 39)', async (ctx) => {
   ctx.mock.timers.enable({ apis: ['setTimeout'] });
   const l = slowPd();
@@ -173,9 +178,10 @@ test('просрочка первой «Да», повтор принят, пе�
   await p;
   assert.equal(t.sent.at(-1).text, TEXT.consentRecordFailed);
   assert.equal(t.step(), 'pd');
-  await t.press('pd', 'yes');
+  const retry = t.press('pd', 'yes'); // встаёт в очередь за висящей первой записью
+  await flush();
+  l.release(); await retry; await flush();
   assert.equal(t.step(), 'abroad', 'повтор засчитан');
-  l.release(); await flush();
   assert.deepEqual(l.rows, ['age:yes', 'pd:yes', 'pd:yes'], 'отзыва нет: последняя отметка 6Б — «да»');
   assert.equal(t.step(), 'abroad');
   await t.press('abroad', 'yes');
@@ -200,12 +206,35 @@ test('просрочка, повтор принят, затем /delete, и то
   const l = slowPd();
   const t = bot({ record: l.record });
   await t.say('/start'); await t.press('age', 'yes'); await t.press('intro', 'next');
-  const p = t.press('pd', 'yes');
-  await flush(); ctx.mock.timers.tick(5000); await p;
-  await t.press('pd', 'yes');
+  await timeout(ctx, t.press('pd', 'yes'));
+  const retry = t.press('pd', 'yes'); await flush();
   await t.say('/delete');
+  l.release(); await retry; await flush();
+  assert.equal(l.rows.at(-1), 'pd:withdraw', 'после /delete последней идёт отзыв');
+});
+test('просрочка, повтор ещё пишется, «Нет» на 6Б — последней идёт отзыв', async (ctx) => {
+  ctx.mock.timers.enable({ apis: ['setTimeout'] });
+  const l = slowPd();
+  const t = bot({ record: l.record });
+  await t.say('/start'); await t.press('age', 'yes'); await t.press('intro', 'next');
+  await timeout(ctx, t.press('pd', 'yes'));
+  const retry = t.press('pd', 'yes'); await flush();
+  await t.press('pd', 'no');
+  l.release(); await retry; await flush();
+  assert.equal(l.rows.at(-1), 'pd:withdraw');
+  assert.equal(t.step(), 'declined');
+});
+test('обе попытки просрочены — обе «да» отозваны, шаг прежний', async (ctx) => {
+  ctx.mock.timers.enable({ apis: ['setTimeout'] });
+  const l = slowPd();
+  const t = bot({ record: l.record });
+  await t.say('/start'); await t.press('age', 'yes'); await t.press('intro', 'next');
+  await timeout(ctx, t.press('pd', 'yes'));
+  await timeout(ctx, t.press('pd', 'yes'));
   l.release(); await flush();
-  assert.equal(l.rows.at(-1), 'pd:withdraw', 'поздняя «да» после /delete отозвана');
+  assert.equal(l.rows.at(-1), 'pd:withdraw');
+  assert.ok(l.rows.lastIndexOf('pd:withdraw') > l.rows.lastIndexOf('pd:yes'));
+  assert.equal(t.step(), 'pd');
 });
 
 test('ответ «отметки удалены» помечен на согласование: проверка выпуска не пропускает', async () => {
