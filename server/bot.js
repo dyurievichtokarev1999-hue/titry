@@ -483,7 +483,7 @@ export function createBot({
   renderTimeoutMs = RENDER_TIMEOUT_MS, // предел активного рендера от старта задачи в слоте (server/render.js)
   renderGraceMs = KILL_GRACE_MS, // запасной предел: renderTimeoutMs + 2×renderGraceMs — слот освобождается принудительно
   botName = null, // имя бота (getMe): «/команда@другой_бот» — не наша команда; без имени «@…» отрезается у любой
-  consentOrder = consentSteps(), // порядок 6Б/6Г после 6А (TITRY_CONSENT_ORDER), не утверждён до правовой проверки
+  consentOrder = consentSteps(), // шаги подтверждений: возраст (6Г), 6А, согласие (6Б) — решение А8; без 'intro' — 6А первым (тесты)
 } = {}) {
   const say = voice ? TEXT : { ...TEXT, ...TEXT_ONLY }; // реплики участнику с учётом флага голоса
   const sessions = new Map();
@@ -580,6 +580,8 @@ export function createBot({
   // До 6Ж и после отказа рассказ не принимается: голос не скачивается, SpeechKit, модель, метрика story и рендер не
   // вызываются, содержание в сессию не пишется (QA «Приём рассказа до подтверждений», критерии 1–3).
   const consentDone = (s) => s.consent?.step === 'done';
+  // Порядок экранов: заданный целиком (с 'intro') или прежний вид «6А, затем шаги» для тестов с явным порядком.
+  const flow = consentOrder.includes('intro') ? consentOrder : ['intro', ...consentOrder];
   async function consentScreen(chatId, s, step) {
     s.consent.step = step;
     const { cycle } = s.consent; // до первой отправки: /start во время отправки частей 6Б не перепишет метку старого экрана
@@ -588,6 +590,7 @@ export function createBot({
       for (const p of parts.slice(0, -1)) await tg.send(chatId, p);
       return tg.send(chatId, parts.at(-1), { reply_markup: consentKb([[[CONSENT_TEXT.pdYes, `cs:pd:yes:${cycle}`], [CONSENT_TEXT.pdNo, `cs:pd:no:${cycle}`]]]) });
     }
+    if (step === 'intro') return tg.send(chatId, CONSENT_TEXT.intro, { reply_markup: consentKb([[[CONSENT_TEXT.introNext, `cs:intro:next:${cycle}`]]]) });
     if (step === 'age') return tg.send(chatId, CONSENT_TEXT.age, { reply_markup: consentKb([[[CONSENT_TEXT.ageYes, `cs:age:yes:${cycle}`], [CONSENT_TEXT.ageNo, `cs:age:no:${cycle}`]]]) });
     // 6Ж — единственное приглашение, и после /year (решение Claude 18.11, п. 5); период года сохраняется в s.period.
     return tg.send(chatId, CONSENT_TEXT.ready);
@@ -604,46 +607,52 @@ export function createBot({
     s.story = s.originalStory = s.overflow = s.episode = s.skeleton = s.verdict = null;
     s.stage = 'idle';
   };
-  // 6А с начала; прежние нажатия не засчитываются (2.1: «Повторный /start начинает с 6А»).
+  // Подтверждения с первого шага (А8: вопрос о возрасте); прежние нажатия не засчитываются. Состояние — синхронно.
   function startConsent(chatId, s) {
     forgetStory(s); // идущая доставка — по прежним правилам, сброс после неё
     // cycle — метка этого прохождения в кнопках: кнопка со старого экрана (до /start, /delete, перезапуска) не засчитывается.
-    s.consent = { step: 'intro', given: {}, notified: null, cycle: crypto.randomBytes(4).toString('hex') };
-    return tg.send(chatId, CONSENT_TEXT.intro, { reply_markup: consentKb([[[CONSENT_TEXT.introNext, `cs:intro:next:${s.consent.cycle}`]]]) });
+    s.consent = { step: flow[0], given: {}, notified: null, cycle: crypto.randomBytes(4).toString('hex') };
+    return consentScreen(chatId, s, flow[0]);
   }
   async function onConsent(chatId, s, data) {
     const c = s.consent;
     const [, step, answer, cycle] = data.split(':');
     // Кнопка не текущего шага или прежнего прохождения (Критик реализации 18.11 21:40) — ничего не засчитываем.
     if (!c || c.step !== step || cycle !== c.cycle) return;
-    // Только кнопки, которые показаны на этом экране (QA PR 32 03b4b93): 6А — «Далее»; 6Б, 6Г — «Да» и «Нет»
-    // (клавиатуры — в startConsent и consentScreen; менять вместе). На шагах done и declined кнопок нет.
+    // Только кнопки, которые показаны на этом экране (QA PR 32 03b4b93): 6А — «Дальше»; 6Б, 6Г — «Да» и «Нет»
+    // (клавиатуры — в consentScreen; менять вместе). На шагах done и declined кнопок нет.
     // Любое другое значение ничего не меняет: шаг, отметки и метрики остаются, следующий экран не отправляется.
-    if (!(step === 'intro' ? answer === 'next' : consentOrder.includes(step) && (answer === 'yes' || answer === 'no'))) return;
-    const next = step === 'intro' ? consentOrder[0] : consentOrder[consentOrder.indexOf(step) + 1] || 'done';
+    if (!flow.includes(step) || !(step === 'intro' ? answer === 'next' : answer === 'yes' || answer === 'no')) return;
+    const next = flow[flow.indexOf(step) + 1] || 'done';
     if (answer === 'next' || answer === 'yes') {
       if (step === 'pd') c.given.pd = { at: now().toISOString(), version: CONSENT_VERSION };
+      if (next === 'done') s.consentedBefore = true; // согласие в этой сессии было дано (для ответа на отказ после /start)
       return consentScreen(chatId, s, next);
     }
     c.step = 'declined'; // отказ как событие не храним; дальше бот ничего не спрашивает и не напоминает
     forgetStory(s);
+    // Было ли согласие до этого отказа (в этом прохождении или раньше в сессии). После отказа признак сбрасывается:
+    // повторный отказ до нового согласия не сообщает об удалении снова (QA PR 34 324cc87). Синхронно, до отправок.
+    const had = Object.keys(c.given).length > 0 || !!s.consentedBefore;
+    s.consentedBefore = false;
     // Отзыв согласия = удаление метрик, как /delete (решение Claude 20.11). Запуск — синхронно, до ответов: запись,
     // уже стоящая в очереди, отбрасывается барьером поколения. Сбой — код в журнал и честное сообщение после ответов.
     const forgot = (async () => metrics.forget(chatId))().then(() => true, (e) => { logError('metrics.forget.withdraw', e); return false; }); // тело — синхронно
     if (step === 'pd') await tg.send(chatId, CONSENT_TEXT.pdDeclined);
     else {
       // 6Г «Нет»: отметки о согласии удаляются (в памяти — всегда успешно); отметку «младше 18» не храним.
-      const had = Object.keys(c.given).length > 0;
+      // Возраст спрашивается первым (А8): отметок этого прохождения ещё нет, но согласие могло быть дано раньше в этой сессии.
       c.given = {};
       await tg.send(chatId, CONSENT_TEXT.ageDeclined);
       if (had) await tg.send(chatId, CONSENT_TEXT.ageDeleted);
     }
     if (!(await forgot)) return tg.send(chatId, TEXT.withdrawForgetFailed);
   }
-  // Сообщение до конца подтверждений: 6З не чаще раза на шаг; без начатого диалога — 6З и 6А; после отказа — тишина.
+  // Сообщение до конца подтверждений: 6З не чаще раза на шаг; без начатого диалога — 6З и первый шаг (вопрос о возрасте, А8);
+  // после отказа — тишина.
   async function preConsent(chatId, s) {
     const c = s.consent;
-    if (!c) { await tg.send(chatId, CONSENT_TEXT.notYet); await startConsent(chatId, s); s.consent.notified = 'intro'; return; }
+    if (!c) { await tg.send(chatId, CONSENT_TEXT.notYet); await startConsent(chatId, s); s.consent.notified = flow[0]; return; }
     if (c.step === 'declined' || c.notified === c.step) return;
     c.notified = c.step;
     return tg.send(chatId, CONSENT_TEXT.notYet);
