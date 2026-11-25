@@ -45,6 +45,9 @@ export const TEXT = {
   // ИР-04: очередь заполнена, черновик сохранён. Текст редактора повествования (10.11), дословно.
   busy: 'Сейчас очередь заполнена. Черновик остаётся здесь. Нажми «▶ Смотреть титры» ещё раз чуть позже.',
   voiceOff: 'Голосовые пока не подключены. Напиши, пожалуйста, текстом.',
+  // TITRY_VOICE=off (А4): ответ на голосовое; с подписью — подпись идёт как рассказ.
+  voiceTextOnly: 'Пока только текстом: голосовые не принимаю. Напиши, пожалуйста, рассказ в чат.',
+  voiceTextOnlyCaption: 'Пока только текстом: голосовые не принимаю, беру текст подписи.',
   voiceLong: `Голосовое дольше ${Math.round(MAX_VOICE_SECONDS / 60)} мин. Для одной сцены хватит минуты.`, // «мин.» — без склонения числа
   voiceEmpty: 'Не получилось разобрать голосовое. Можно повторить или написать текстом.',
   tooLong: TOO_LONG_TEXT, // тот же текст, что у draft.js и монтажной
@@ -454,10 +457,21 @@ const LEVEL_RANK = { none: 0, concern: 1, urgent: 2 };
 // Текст для модельной проверки сообщения: при продолжении — фрагмент и одна предыдущая фраза, не весь рассказ.
 const continuationContext = (prev, next) => `${lastPhrase(joinEdits(prev))}\n${String(next || '').trim()}`;
 
+/** Голос включён, пока не задано TITRY_VOICE=off (А4). На реальных данных prepareBot требует off: согласие G0 без распознавания. */
+export const voiceEnabled = (env = process.env) => String(env.TITRY_VOICE ?? '').trim().toLowerCase() !== 'off';
+// Реплики без упоминания голоса — при выключенном голосе заменяют одноимённые в TEXT.
+export const TEXT_ONLY = {
+  year: 'Расскажи про свой 2026 год за минуту: что случилось, кто был рядом, что осталось с тобой.',
+  noDraft: 'Сначала расскажи о дне текстом.',
+};
+
 // ── Логика бота (транспорт подменяется в тестах) ─────────────────────────────
 
 export function createBot({
   tg, metrics = makeMetrics(), draft = makeDraft, render = renderEpisode, transcribe = transcribeOgg, now = () => new Date(),
+  // false — голос выключен (TITRY_VOICE=off, решение Дмитрия 24.11, А4: в G0 только текст; main передаёт флаг):
+  // голосовое не скачивается и не распознаётся, ответ — «пока только текстом»; подпись к нему идёт как текст.
+  voice = true,
   // Модельная проверка перед рендером (решение владельца кода 13.11 15:00): true — опасно, false — безопасно,
   // исключение — «неизвестно» (один повтор через checkRetryMs). Нет ключа — режим «только локальный фильтр».
   safetyCheck, hasKey = safetyCheck ? () => true : hasClaudeCredentials,
@@ -471,6 +485,7 @@ export function createBot({
   botName = null, // имя бота (getMe): «/команда@другой_бот» — не наша команда; без имени «@…» отрезается у любой
   consentOrder = consentSteps(), // шаги подтверждений: 6Г, 6А, 6Б, 6В — решения А8 и А2; без 'intro' — 6А первым (тесты)
 } = {}) {
+  const say = voice ? TEXT : { ...TEXT, ...TEXT_ONLY }; // реплики участнику с учётом флага голоса
   const sessions = new Map();
   // Команда: «/имя», без учёта регистра; «@имя_бота» отрезается только для своего бота. Иначе — не команда (null).
   const parseCommand = (text) => {
@@ -806,9 +821,9 @@ export function createBot({
 
   async function doRender(chatId, s) {
     // Правки после черновика тоже проверяются: опасная строка не попадёт в ролик.
-    if (s.verdict !== 'ok' || !s.episode) return tg.send(chatId, TEXT.noDraft);
+    if (s.verdict !== 'ok' || !s.episode) return tg.send(chatId, say.noDraft);
     // Черновик, сброшенный отзывом согласия во время доставки: ▶ не запускает ни проверку, ни рендер.
-    if (!consentDone(s) || (s.forgetAfter && s.forgetGen === s.draftId)) return tg.send(chatId, TEXT.noDraft);
+    if (!consentDone(s) || (s.forgetAfter && s.forgetGen === s.draftId)) return tg.send(chatId, say.noDraft);
     const cycle = s.consent.cycle; // метрики этой доставки — только в её цикле согласия (QA PR 31, п. 2)
     const risk = assessEpisodeRisk(joinEdits(seenStory(s)), s.episode); // правки — продолжение рассказа для проверки безопасности
     if (risk.level === 'urgent') return stopForSafety(chatId, s, 'urgent', { at: 'render' });
@@ -1070,7 +1085,7 @@ export function createBot({
     if (bare === 'year') {
       s.stage = 'idle'; s.period = 'year';
       const logged = logMetric(chatId, 'year');
-      try { return await (consentDone(s) ? tg.send(chatId, TEXT.year) : startConsent(chatId, s)); } finally { await logged; }
+      try { return await (consentDone(s) ? tg.send(chatId, say.year) : startConsent(chatId, s)); } finally { await logged; }
     }
     if (bare === 'delete') {
       sessions.delete(chatId);
@@ -1103,7 +1118,7 @@ export function createBot({
     }
 
     if (msg.voice) {
-      const voiceRefused = !sttAvailable() && transcribe === transcribeOgg ? TEXT.voiceOff : msg.voice.duration > MAX_VOICE_SECONDS ? TEXT.voiceLong : null;
+      const voiceRefused = !voice ? TEXT.voiceTextOnly : !sttAvailable() && transcribe === transcribeOgg ? TEXT.voiceOff : msg.voice.duration > MAX_VOICE_SECONDS ? TEXT.voiceLong : null;
       const caption = typeof msg.caption === 'string' ? cleanInput(msg.caption).trim() : ''; // подпись к голосовому — тоже текст
       // Подпись проходит локальный фильтр синхронно, ДО распознавания (КРИТИКА PR 16, п. 1): явный сигнал — сразу путь
       // остановки, без ожидания и без зависимости от распознавания.
@@ -1112,7 +1127,8 @@ export function createBot({
         // Голосовое в окне до отправки (условие 2). Не распознано — ролик не отменяется: «не получилось разобрать голосовое, напиши текстом»;
         // подпись проверяется как текст. Распознанное держит доставку с начала распознавания (как в PR 15).
         if (captionLevel === 'urgent') return duringRender(chatId, s, caption, { cycle }); // ролик отменяется сейчас
-        if (voiceRefused) return caption ? Promise.all([sendSafe(chatId, TEXT.notHeard), duringRender(chatId, s, caption, { cycle })]) : sendSafe(chatId, TEXT.notHeard);
+        // Голос выключен — не «не получилось разобрать», а «пока только текстом».
+        if (voiceRefused) return caption ? Promise.all([sendSafe(chatId, voice ? TEXT.notHeard : TEXT.voiceTextOnlyCaption), duringRender(chatId, s, caption, { cycle })]) : sendSafe(chatId, voice ? TEXT.notHeard : TEXT.voiceTextOnly);
         let releaseVoice;
         // Уровень удержания — уровень подписи: concern подписи держит «неизвестно» до конца проверки (не none).
         holdDelivery(s, new Promise((r) => { releaseVoice = r; }), captionLevel, Infinity);
@@ -1143,7 +1159,7 @@ export function createBot({
       }
       if (captionLevel === 'urgent') return handleStory(chatId, s, caption, 'text', cycle); // остановка без распознавания
       if (voiceRefused) {
-        await tg.send(chatId, voiceRefused);
+        await tg.send(chatId, !voice && caption ? TEXT.voiceTextOnlyCaption : voiceRefused);
         return caption ? handleStory(chatId, s, caption, 'text', cycle) : undefined; // подпись — тот же путь, что текст
       }
       await tg.action(chatId, 'typing');
@@ -1172,7 +1188,7 @@ export function createBot({
       // Кружок, аудио, видео, стикер, фото во время подготовки: ролик не отменяется (условие 2). Подпись — как текст.
       const caption = typeof msg.caption === 'string' ? cleanInput(msg.caption).trim() : '';
       if (caption) return duringRender(chatId, s, caption, { cycle });
-      return sendSafe(chatId, msg.video_note || msg.audio || msg.video ? TEXT.notHeard : TEXT.rendering);
+      return sendSafe(chatId, msg.video_note || msg.audio || msg.video ? (voice ? TEXT.notHeard : TEXT.voiceTextOnly) : TEXT.rendering);
     }
     if (!text) return;
     if (busy) return duringRender(chatId, s, text, { cycle });
@@ -1301,7 +1317,7 @@ export function createBot({
     if (s.stage === 'rendering') return tg.send(chatId, TEXT.rendering);
     // Кнопка работает только для текущего черновика, прошедшего проверку безопасности.
     const current = s.episode && s.verdict === 'ok' && (s.stage === 'draft' || s.stage === 'watched') && Number(idPart) === s.draftId;
-    if (!current) return tg.send(chatId, s.stage === 'help' ? helpMessage('urgent') : TEXT.noDraft);
+    if (!current) return tg.send(chatId, s.stage === 'help' ? helpMessage('urgent') : say.noDraft);
     if (action === 'play') return doRender(chatId, s);
     if (action === 'mood') { s.episode.mood = MOOD_ORDER[(MOOD_ORDER.indexOf(s.episode.mood) + 1) % MOOD_ORDER.length]; s.stage = 'draft'; return showDraft(chatId, s); }
     if (action === 'music') { s.episode.music = MUSIC_ORDER[(MUSIC_ORDER.indexOf(s.episode.music) + 1) % MUSIC_ORDER.length]; s.stage = 'draft'; return showDraft(chatId, s); }
@@ -1411,7 +1427,7 @@ export async function purgeBotTmp(dir = botTmpDir()) {
   return removed;
 }
 
-export async function prepareBot({ checkRender = checkRenderer, cleanup = cleanupVoiceOrphans, cleanupTmp = purgeBotTmp, ledger, helpFile, env = process.env, log = console.error, texts = { CONSENT_TEXT, TEXT } } = {}) {
+export async function prepareBot({ checkRender = checkRenderer, cleanup = cleanupVoiceOrphans, cleanupTmp = purgeBotTmp, ledger, helpFile, env = process.env, log = console.error, texts = { CONSENT_TEXT, TEXT, TEXT_ONLY } } = {}) {
   if (!env.METRICS_SALT || String(env.METRICS_SALT).trim().length < METRICS_SALT_MIN) {
     logError('metrics.salt', { code: 'metrics_salt' });
     throw Object.assign(new Error('startup'), { code: 'metrics_salt', stage: 'metrics.salt' });
@@ -1429,6 +1445,11 @@ export async function prepareBot({ checkRender = checkRenderer, cleanup = cleanu
     if (keys.length) {
       log(JSON.stringify({ at: new Date().toISOString(), level: 'error', stage: 'release.texts', code: 'release_texts', keys }));
       throw Object.assign(new Error('startup'), { code: 'release_texts', stage: 'release.texts' });
+    }
+    // А4: в G0 только текст, согласие G0 без распознавания — на реальных данных голос обязан быть выключен флагом.
+    if (voiceEnabled(env)) {
+      log(JSON.stringify({ at: new Date().toISOString(), level: 'error', stage: 'release.voice', code: 'release_voice' }));
+      throw Object.assign(new Error('startup'), { code: 'release_voice', stage: 'release.voice' });
     }
   }
   // Без Playwright или ffmpeg бот принял бы рассказы, но не собрал бы ни одного ролика.
@@ -1449,7 +1470,7 @@ async function main() {
   if (!token) { console.error('Задайте TELEGRAM_BOT_TOKEN (выдаёт @BotFather).'); process.exit(2); }
   let ledger;
   try { ledger = await prepareBot(); } catch {
-    console.error(`Запуск остановлен: не задана METRICS_SALT (не короче ${METRICS_SALT_MIN} знаков), нет ключа модели или тексты для участника (согласие, реплики бота) не окончательные при TITRY_RELEASE_REAL_DATA=1, не проверены контакты помощи (config/help.json), не найден Playwright, не запускается Chromium (TITRY_CHROMIUM) или ffmpeg (FFMPEG), не подтверждена очистка временных файлов или хранилище запретов (${KEY_ENV}, ${KEY_VERSION_ENV}). Задачи не принимаются. Остатки tmp и файл хранилища не удаляйте вручную без владельца кода.`);
+    console.error(`Запуск остановлен: не задана METRICS_SALT (не короче ${METRICS_SALT_MIN} знаков), нет ключа модели или тексты для участника (согласие, реплики бота) не окончательные при TITRY_RELEASE_REAL_DATA=1, голос не выключен (TITRY_VOICE=off) при TITRY_RELEASE_REAL_DATA=1, не проверены контакты помощи (config/help.json), не найден Playwright, не запускается Chromium (TITRY_CHROMIUM) или ffmpeg (FFMPEG), не подтверждена очистка временных файлов или хранилище запретов (${KEY_ENV}, ${KEY_VERSION_ENV}). Задачи не принимаются. Остатки tmp и файл хранилища не удаляйте вручную без владельца кода.`);
     process.exit(3);
   }
   const tg = telegram(token);
@@ -1460,8 +1481,8 @@ async function main() {
     { command: 'help', description: 'Как поправить строку' },
     { command: 'delete', description: 'Запросить удаление данных' },
   ] }).catch(() => {});
-  console.log(`Бот @${me.username} запущен. Распознавание речи: ${sttAvailable() ? 'SpeechKit' : 'выключено'}.`);
-  const bot = createBot({ tg, ledger, renderTimeoutMs: renderTimeoutFromEnv(), botName: me.username });
+  console.log(`Бот @${me.username} запущен. Распознавание речи: ${!voiceEnabled() ? 'голос выключен (TITRY_VOICE=off)' : sttAvailable() ? 'SpeechKit' : 'выключено'}.`);
+  const bot = createBot({ tg, ledger, renderTimeoutMs: renderTimeoutFromEnv(), botName: me.username, voice: voiceEnabled() });
   setInterval(bot.sweep, 10 * 60 * 1000).unref();
   let offset = 0;
   for (;;) {
