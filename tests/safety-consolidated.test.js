@@ -190,13 +190,15 @@ test('нет ключа: монтажная — рендер по локальн
 
 // ── 4. «Неизвестно» ──────────────────────────────────────────────────────────
 
-test('«неизвестно» и после повтора: локально чисто → ролик; есть concern → ролика нет, «не получилось» и контакты', async () => {
+// Б2, вариант А (решение Дмитрия 24.11; матрица Б-4, строка 5): ролика нет при любом локальном уровне.
+test('«неизвестно» и после повтора: локально чисто → ролика нет (строка 5); есть concern → так же; «не получилось» и контакты', async () => {
   const fail = () => { throw Object.assign(new Error('x'), { code: 'timeout' }); };
   const x = bot({ check: fail });
   await x.say(SAFE);
   await x.play();
   assert.equal(x.c.check, 2, 'один повтор');
-  assert.equal(x.c.video, 1);
+  assert.equal(x.c.video, 0, 'отправок 0');
+  assert.equal(x.sent.at(-1), tryLaterMessage(), 'мягкое «не получилось»');
   assert.doesNotMatch(x.sent.join('\n'), NOT_DONE);
   const y = bot({ check: fail });
   await y.say(`${SAFE} Я злюсь на брата и хочу его ударить.`);
@@ -422,10 +424,13 @@ test('п. 2: явная угроза и совершённое насилие �
     const g = bot(opts);
     await g.say(`${SAFE} Убить готова за кофе.`);
     await g.play();
-    assert.equal(g.c.video, 1, `${mode}: гипербола на входе`);
+    // Модель «неизвестно» — ролика нет и у гиперболы (Б2, вариант А); экрана остановки нет: опасности не найдено.
+    const videos = mode === 'модель «неизвестно»' ? 0 : 1;
+    assert.equal(g.c.video, videos, `${mode}: гипербола на входе`);
     const gw = await inWindow(opts, (y) => y.say('Убить готова за кофе.'));
-    assert.equal(gw.c.video, 1, `${mode}: гипербола в окне`);
+    assert.equal(gw.c.video, videos, `${mode}: гипербола в окне`);
     assert.ok(!gw.sent.some(STOP));
+    assert.ok(!g.sent.some(STOP));
   }
   // Новых concern нет: гнев без глагола расправы — concern, «Брату конец» и пожелания — none.
   // КРИТИКА 14.11: «Убью его, если опоздает» — явная угроза другому (urgent); гнев без глагола расправы — concern.

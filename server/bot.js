@@ -823,13 +823,11 @@ export function createBot({
     if (!alive(chatId, s) || s.draftId !== gen) return; // удалённая или заменённая сессия не оживает
     if (g.kind === 'safety') return stopForSafety(chatId, s, 'urgent', { at: 'check', byModel: !!g.byModel }, cycle);
     if (g.unknown) {
-      // «Неизвестно» и после повтора (условие 3): локально чисто — ролик делается; есть concern — ролика нет.
+      // «Неизвестно» и после повтора, отказ модели проверять — ролика нет при любом локальном уровне (решение Дмитрия
+      // 24.11, Б2 — вариант А, строгий, на время G0; матрица Б-4, строки 4–6). Обратимо правкой кода.
       logError('check', { code: g.code });
-      // Отказ проверяющей модели (refusal) — как локальный concern.
-      if (g.refusal || gate.hasConcern(s.scope, original) || assessEpisodeRisk(joinEdits(story), ep).level !== 'none') {
-        s.stage = 'draft';
-        return tg.send(chatId, TEXT.tryLater());
-      }
+      s.stage = 'draft';
+      return tg.send(chatId, TEXT.tryLater());
     } else if (!g.ok) {
       // Хранилище запретов недоступно: выдачи нет.
       logError('check', { code: g.code });
@@ -980,8 +978,9 @@ export function createBot({
           const g = await track(chatId, gate.verify(s.scope, body, null, ask));
           if (g.kind === 'safety') r = { kind: 'urgent', byModel: !!g.byModel };
           else if (g.ok) r = { kind: level };
-          else r = { kind: level === 'concern' || g.refusal ? 'unknown' : 'none', code: g.code }; // условие 3; отказ — как concern
-        } catch { r = { kind: level === 'concern' ? 'unknown' : 'none', code: 'error' }; }
+          // Модель не ответила или отказалась — доставка отменяется при любом локальном уровне (Б2, вариант А; матрица Б-4, строка 9).
+          else r = { kind: 'unknown', code: g.code };
+        } catch { r = { kind: 'unknown', code: 'error' }; }
       }
       if (r.kind === 'urgent') { s.story = body; s.originalStory = body; applyStop(s); } // запрет — на это сообщение
       else if (r.kind === 'unknown') {
