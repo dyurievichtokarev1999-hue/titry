@@ -114,7 +114,7 @@ test('старт: неверный допуск — отказ admission до о
   const opts = { log: (l) => lines.push(l), texts: { CONSENT_TEXT: { pd: 'Окончательный вымышленный текст.' }, TEXT: { start: 'Привет.' } }, checkRender: async () => {}, cleanup: async () => { done++; }, cleanupTmp: async () => { done++; return 0; }, ledger: { load: async () => { done++; } } };
   const base = { METRICS_SALT: 'test-salt-fictional-0001', ANTHROPIC_API_KEY: 'dummy-not-a-key' };
   await assert.rejects(prepareBot({ env: { ...base, TITRY_CLOSED_TEST: '1' }, ...opts }), { stage: 'admission' });
-  await assert.rejects(prepareBot({ env: { ...base, TITRY_RELEASE_REAL_DATA: '1' }, ...opts }), { stage: 'admission' });
+  await assert.rejects(prepareBot({ env: { ...base, TITRY_RELEASE_REAL_DATA: '1', TITRY_VOICE: 'off' }, ...opts }), { stage: 'admission' });
   assert.equal(done, 0);
   await prepareBot({ env: { ...base, TITRY_CLOSED_TEST: '1', TITRY_ALLOWED_CHATS: '1001', TITRY_STORIES_PER_DAY: '3', TITRY_MODEL_CONCURRENCY: '2' }, ...opts });
   assert.equal(done, 3);

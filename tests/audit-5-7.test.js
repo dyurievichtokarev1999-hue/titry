@@ -29,7 +29,7 @@ test('п. 6: metrics.log бросает ENOSPC — человек получае
   const errs = []; const orig = console.error; console.error = (l) => errs.push(String(l));
   try {
     await bot.handleUpdate({ message: { chat, text: '/start' } });
-    assert.equal(sent.at(-1).text, CONSENT_TEXT.intro); // /start начинает с 6А (PR 24)
+    assert.equal(sent.at(-1).text, CONSENT_TEXT.age); // /start начинает с вопроса о возрасте (А8)
     await bot.handleUpdate({ message: { chat, text: STORY } });
     assert.ok(sent.some((m) => /Похоже на твой день/.test(m.text)), 'черновик показан');
     const m = [...sent].reverse().find((x) => x.extra?.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data?.startsWith('play:'));
