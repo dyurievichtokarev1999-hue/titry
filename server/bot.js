@@ -505,7 +505,7 @@ export function createBot({
   // Цикл берётся при вызове: событие относится к согласию, действовавшему в этот момент.
   // Запись render ролика — ровно одна: общее обещание для подтверждения отправки и первого отклика (QA PR 35);
   // сбой — обещание снимается, следующая попытка пишет заново.
-  // restored — запись восстановлена по отклику (ответ Telegram на отправку потерялся): её время — время нажатия,
+  // restored — запись сделана по нажатию (ответ Telegram на отправку ещё не пришёл или потерялся): её время — время нажатия,
   // для расчёта задержек она не годится (QA PR 35 на 1eb3f77).
   const renderOnce = (chatId, entry, restored = false) => (entry.renderP ||= writeMetric(chatId, 'render', restored ? { ...entry.render, restored: true } : entry.render, entry.cycle).catch((e) => { entry.renderP = null; throw e; }));
   const logMetric = (chatId, event, data, cycle = cycleOf(chatId)) => Promise.resolve().then(() => writeMetric(chatId, event, data, cycle)).catch((e) => logError('metrics', e));
@@ -910,8 +910,11 @@ export function createBot({
       // Случайный номер ролика (QA PR 35): по нему отклики в метриках связаны с этим роликом и отделены от других
       // роликов того же участника (номер в сессии сбрасывался бы с сессией). Сам по себе ничего не раскрывает.
       // Номер ролика: 64 бита и проверка на совпадение в сессии — две доставки не делят номер (QA PR 35 на 1eb3f77).
+      // Номер резервируется сразу при выдаче (s.issued): параллельная доставка и номер, вытесненный из последних 20,
+      // не повторятся в сессии.
       let video;
-      do video = newVideoId(); while (s.feedbackFor?.has(video));
+      do video = newVideoId(); while (s.issued?.has(video));
+      (s.issued ||= new Set()).add(video);
       // Запись render — один раз на ролик: после подтверждения отправки или, если ответ Telegram потерялся, перед первым
       // откликом под этим роликом (нажатие кнопки доказывает доставку; QA PR 35 на d64c0e0).
       const renderData = { seconds: Math.round(r.seconds), mood: ep.mood, music: ep.music, edits: s.edits || 0, video };

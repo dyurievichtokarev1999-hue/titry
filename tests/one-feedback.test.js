@@ -174,6 +174,7 @@ test('ответ Telegram на отправку потерялся, отклик
   await click(k2.miss);
   const id2 = k2.miss.split(':')[3];
   assert.equal(log.filter((r) => r.e === 'render' && r.video === id2).length, 1);
+  assert.equal(log.find((r) => r.e === 'render' && r.video === id2).restored, undefined, 'подтверждённый render не помечен');
 });
 
 // Разборы 8bf68b4: render — ровно один и раньше откликов; сбой render не оставляет отклик без пары; цикл доставки.
