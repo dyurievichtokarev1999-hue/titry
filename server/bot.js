@@ -13,6 +13,7 @@ import { renderEpisode, checkRenderer, ROOT, RENDER_TIMEOUT_MS, KILL_GRACE_MS, r
 import { logError, safeCode, logRenderTimeout } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS, cleanupVoiceOrphans } from './stt.js';
 import { processLedger, KEY_ENV, KEY_VERSION_ENV } from './ledger.js';
+import { makeConsentLog } from './consent-log.js';
 import { CONSENT_TEXT, CONSENT_VERSION, consentSteps } from './consent.js';
 import { unfinishedTexts } from './release.js';
 
@@ -84,6 +85,8 @@ export const TEXT = {
   deleteFailed: 'Сессия удалена, а удаление статистики по тебе подтвердить не получилось. Попробуй /delete ещё раз чуть позже.',
   // Отзыв согласия: удаление статистики не подтверждено. Текст редактора повествования (ПРАВКА-ЗАПРОС 21.11), дословно.
   withdrawForgetFailed: 'Пока не удалось подтвердить удаление твоей статистики. Чтобы повторить запрос, отправь /delete чуть позже.',
+  // Отметку о согласии не удалось записать (А7): шаг не засчитан. ТЕКСТ НА УТВЕРЖДЕНИЕ Редактору.
+  consentRecordFailed: 'Не получилось сохранить ответ. Нажми кнопку ещё раз чуть позже.',
   renderFail: 'Не получилось собрать ролик. Попробуй ещё раз чуть позже.',
   draftFail: 'Не получилось собрать черновик. Попробуй ещё раз чуть позже.',
   // Внутренняя причина insufficient_after_exclusion (редактор повествования), дословно: только эта реплика —
@@ -462,6 +465,7 @@ export function createBot({
   // исключение — «неизвестно» (один повтор через checkRetryMs). Нет ключа — режим «только локальный фильтр».
   safetyCheck, hasKey = safetyCheck ? () => true : hasClaudeCredentials,
   ledger = null, // хранилище запретов (server/ledger.js); область — участник, производная HMAC на диске
+  consentLog = null, // хранилище отметок о согласии (server/consent-log.js, А7); main передаёт файловое, без него — не пишется
   checkRetryMs = RETRY_DELAY_MS,
   gate = makeGate({ check: safetyCheck || ((text) => modelSafetyCheck(text)), hasKey, ledger, retryDelayMs: checkRetryMs }),
   checkBudgetMs = CHECK_BUDGET_MS, // бюджет ожидания одной проверки сообщения в окне (вызов + повтор)
@@ -565,6 +569,8 @@ export function createBot({
   // До 6Ж и после отказа рассказ не принимается: голос не скачивается, SpeechKit, модель, метрика story и рендер не
   // вызываются, содержание в сессию не пишется (QA «Приём рассказа до подтверждений», критерии 1–3).
   const consentDone = (s) => s.consent?.step === 'done';
+  // Отметка о согласии в отдельном хранилище (А7): код участника, шаг, кнопка, версия текста, время — без текстов.
+  const mark = (chatId, step, answer) => (consentLog ? consentLog.record(chatId, { step, answer, version: CONSENT_VERSION }) : Promise.resolve());
   // Порядок экранов: заданный целиком (с 'intro') или прежний вид «6А, затем шаги» для тестов с явным порядком.
   const flow = consentOrder.includes('intro') ? consentOrder : ['intro', ...consentOrder];
   async function consentScreen(chatId, s, step) {
@@ -610,13 +616,26 @@ export function createBot({
     // Любое другое значение ничего не меняет: шаг, отметки и метрики остаются, следующий экран не отправляется.
     if (!flow.includes(step) || !(step === 'intro' ? answer === 'next' : answer === 'yes' || answer === 'no')) return;
     const next = flow[flow.indexOf(step) + 1] || 'done';
+    if (answer === 'yes') {
+      // Отметка о согласии (А7) — до перехода: не записалась — шаг не засчитан, человек нажимает ещё раз.
+      // Повторное нажатие, пока запись идёт, не засчитывается дважды.
+      if (c.marking) return;
+      c.marking = true;
+      try { await mark(chatId, step, 'yes'); } catch (e) {
+        logError('consent.record', e);
+        c.marking = false;
+        return s.consent === c && c.step === step ? tg.send(chatId, TEXT.consentRecordFailed) : undefined;
+      }
+      c.marking = false;
+      if (!alive(chatId, s) || s.consent !== c || c.step !== step) return; // /start или /delete во время записи
+    }
     if (answer === 'next' || answer === 'yes') {
       if (step === 'pd' || step === 'abroad') c.given[step] = { at: now().toISOString(), version: CONSENT_VERSION };
       // Согласие в этой сессии было дано (для ответа на отказ после /start): с «Да» на 6Б — оно остаётся и после отказа на 6В.
       if (step === 'pd' || next === 'done') s.consentedBefore = true;
       return consentScreen(chatId, s, next);
     }
-    c.step = 'declined'; // отказ как событие не храним; дальше бот ничего не спрашивает и не напоминает
+    c.step = 'declined'; // отказ без прежнего согласия не храним; дальше бот ничего не спрашивает и не напоминает
     forgetStory(s);
     // 6В «Не сейчас»: согласие 6Б не отзывается — его можно отозвать через /delete (комплект v2.7, ответ 6В и таблица
     // «Что остаётся при отказе»). Метрики не удаляются: в этом прохождении до 6Ж они не пишутся, а метрики прежних
@@ -626,6 +645,8 @@ export function createBot({
     // повторный отказ до нового согласия не сообщает об удалении снова (QA PR 34 324cc87). Синхронно, до отправок.
     const had = Object.keys(c.given).length > 0 || !!s.consentedBefore;
     s.consentedBefore = false;
+    // Отказ после данного согласия — отзыв: отметка в хранилище (А7). Сбой записи отказ не задерживает.
+    if (had) mark(chatId, step, 'withdraw').catch((e) => logError('consent.record', e));
     // Отзыв согласия = удаление метрик, как /delete (решение Claude 20.11). Запуск — синхронно, до ответов: запись,
     // уже стоящая в очереди, отбрасывается барьером поколения. Сбой — код в журнал и честное сообщение после ответов.
     const forgot = (async () => metrics.forget(chatId))().then(() => true, (e) => { logError('metrics.forget.withdraw', e); return false; }); // тело — синхронно
@@ -1074,6 +1095,8 @@ export function createBot({
     }
     if (bare === 'delete') {
       sessions.delete(chatId);
+      // Запрос удаления — отзыв согласия: отметка в хранилище (А7); /delete её не стирает. Сбой записи удаление не задерживает.
+      mark(chatId, 'delete', 'withdraw').catch((e) => logError('consent.record', e));
       // Честный ответ (редактор 16:24): «удалены» — только если удаление сессии и статистики подтверждено.
       // Запрет safety по /delete не снимается; если они есть, полное удаление не подтверждается.
       let forgot = true;
@@ -1461,7 +1484,9 @@ async function main() {
     { command: 'delete', description: 'Запросить удаление данных' },
   ] }).catch(() => {});
   console.log(`Бот @${me.username} запущен. Распознавание речи: ${sttAvailable() ? 'SpeechKit' : 'выключено'}.`);
-  const bot = createBot({ tg, ledger, renderTimeoutMs: renderTimeoutFromEnv(), botName: me.username });
+  const metrics = makeMetrics();
+  const consentLog = makeConsentLog(path.join(ROOT, 'data', 'consent.jsonl'), { hash: metrics.hash });
+  const bot = createBot({ tg, ledger, metrics, consentLog, renderTimeoutMs: renderTimeoutFromEnv(), botName: me.username });
   setInterval(bot.sweep, 10 * 60 * 1000).unref();
   let offset = 0;
   for (;;) {

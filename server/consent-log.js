@@ -1,0 +1,29 @@
+// Хранилище отметок о согласии (особая зона, сливает Дмитрий). Решение Дмитрия 24.11, А7: отдельное хранилище —
+// код участника, версия текста, кнопка, время; текстов рассказов нет. Срок хранения — после ответа юриста
+// (комплект v2.7, Д-14); до него записи не удаляются, /delete их не стирает (комплект: «отметку о согласии и отзыве»).
+// Код участника — тот же HMAC номера чата, что в метриках (METRICS_SALT): номера Telegram в файле нет.
+// Формат — строка JSON на событие: { at, participant, step, answer, version }.
+import fs from 'node:fs/promises';
+import path from 'node:path';
+
+/** Шаги и ответы, которые попадают в хранилище: кнопки экранов 6Г, 6Б, 6В и команда /delete. */
+const STEPS = new Set(['age', 'pd', 'abroad', 'delete']);
+const ANSWERS = new Set(['yes', 'no', 'withdraw']);
+
+export function makeConsentLog(file, { hash, now = () => new Date() }) {
+  if (typeof hash !== 'function') throw new Error('consent-log: нужна функция кода участника');
+  let ops = Promise.resolve();
+  return {
+    /** Записать отметку. Промис отклоняется при сбое записи: вызывающий решает, засчитывать ли шаг. */
+    record(chatId, { step, answer, version }) {
+      if (!STEPS.has(step) || !ANSWERS.has(answer)) return Promise.reject(Object.assign(new Error('consent-log: неизвестная отметка'), { code: 'consent_bad_mark' }));
+      const line = `${JSON.stringify({ at: now().toISOString(), participant: hash(chatId), step, answer, version: String(version || '') })}\n`;
+      const run = ops.then(async () => {
+        await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+        await fs.appendFile(file, line, { mode: 0o600 });
+      });
+      ops = run.catch(() => {});
+      return run;
+    },
+  };
+}
