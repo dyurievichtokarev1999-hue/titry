@@ -35,7 +35,8 @@ export function admissionFromEnv(env = process.env) {
   const perDay = closed || set('TITRY_STORIES_PER_DAY') ? positive(env.TITRY_STORIES_PER_DAY, 'TITRY_STORIES_PER_DAY') : Infinity;
   const concurrency = closed || set('TITRY_MODEL_CONCURRENCY') ? positive(env.TITRY_MODEL_CONCURRENCY, 'TITRY_MODEL_CONCURRENCY') : Infinity;
   const waitMs = set('TITRY_MODEL_WAIT_MS') ? positive(env.TITRY_MODEL_WAIT_MS, 'TITRY_MODEL_WAIT_MS') : 30000;
-  if (waitMs > 10 * 60 * 1000) throw bad('TITRY_MODEL_WAIT_MS — не больше 600000');
+  // Ожидание места должно уместиться в бюджет проверки сообщения во время подготовки ролика (CHECK_BUDGET_MS).
+  if (waitMs > 30000) throw bad('TITRY_MODEL_WAIT_MS — не больше 30000');
   return { allowed, perDay, concurrency, waitMs };
 }
 

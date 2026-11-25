@@ -165,8 +165,9 @@ test('вне списка: рассказ «тяжело» — контакты 
   assert.ok(t.texts(OUT).at(-1).startsWith(TEXT.deleted));
 });
 
-test('конфигурация: ожидание места не больше 10 минут', () => {
-  assert.throws(() => admissionFromEnv({ TITRY_STORIES_PER_DAY: '3', TITRY_MODEL_WAIT_MS: '9999999999' }), { code: 'admission_config' });
+test('конфигурация: ожидание места не больше 30 секунд (бюджет проверки сообщения)', () => {
+  assert.throws(() => admissionFromEnv({ TITRY_STORIES_PER_DAY: '3', TITRY_MODEL_WAIT_MS: '30001' }), { code: 'admission_config' });
+  assert.equal(admissionFromEnv({ TITRY_STORIES_PER_DAY: '3', TITRY_MODEL_WAIT_MS: '30000' }).waitMs, 30000);
 });
 
 // ponytail-review 3e7df0a, блокер: места заняты — проверка не делалась, ролик не уходит.

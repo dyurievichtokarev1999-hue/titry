@@ -695,6 +695,7 @@ export function createBot({
     if (prior.kind) {
       // Хранилище запретов недоступно: черновик не делается, без карточки помощи.
       logError('check', { code: prior.code });
+      refund(); // черновика нет — предел не расходуется
       s.stage = 'idle';
       return tg.send(chatId, TEXT.checkUnavailable);
     }
