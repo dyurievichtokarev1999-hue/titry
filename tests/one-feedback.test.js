@@ -77,7 +77,7 @@ test('сквозной: два ролика одного участника — 
   // Только сохранённые записи: render и feedback с номером ролика.
   const renders = t.log.filter((r) => r.e === 'render').map((r) => r.video);
   assert.equal(renders.length, 2);
-  assert.match(renders[0], /^[0-9a-f]{16}$/);
+  assert.match(renders[0], /^[0-9a-f]{16}[0-9a-z]+$/);
   assert.notEqual(renders[0], renders[1], 'у роликов разные номера');
   const byVideo = (id) => t.fb().filter((r) => r.video === id).map((r) => r.value);
   assert.deepEqual(byVideo(renders[0]), ['fit', 'heavier'], 'первый ролик: отклик и сигнал вреда');
@@ -211,20 +211,54 @@ test('сбой записи render при отклике — отклик не �
 });
 
 // QA PR 35 на 1eb3f77: совпадение случайного номера двух роликов одного участника.
-test('генератор дважды выдал тот же номер — второй ролик получает другой; у каждого отклика свой render, раньше отклика', async () => {
-  const ids = ['aaaaaaaaaaaaaaaa', 'aaaaaaaaaaaaaaaa', 'bbbbbbbbbbbbbbbb'];
+// QA PR 35 на 1eb3f77 и 67f3133: номер уникален на всём сроке хранения метрик, даже если случайная часть совпала.
+function constBot(chatId) {
   const log = []; const offered = [];
   const tg = { send: async () => {}, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''),
     sendVideo: async (c, f, extra, o = {}) => { offered.push(extra); if (o.ready && !(await o.ready())) return null; return {}; } };
-  const metrics = { hash: () => 'qa-fictional', forget: async () => {}, log: async (c, e, x) => { if (e === 'feedback' || e === 'render') log.push(`${e}:${x.value || ''}:${x.video}`); } };
-  const bot = createBot({ tg, metrics, safetyCheck: async () => false, checkRetryMs: 0, newVideoId: () => ids.shift(),
+  const metrics = { hash: () => 'qa-fictional', forget: async () => {}, log: async (c, e, x) => { if (e === 'feedback' || e === 'render') log.push({ e, v: x.value || '', video: x.video }); } };
+  const bot = createBot({ tg, metrics, safetyCheck: async () => false, checkRetryMs: 0, newVideoId: () => 'aaaaaaaaaaaaaaaa', // всегда одно и то же
     draft: async () => ({ episode: structuredClone(ex.episode), risk: { level: 'none' }, provider: 'claude', dropped: [] }),
     render: async (e, o) => ({ seconds: 1, duration: 24, outPath: o.outPath }) });
-  const chat = { id: 94004, type: 'private' };
+  const chat = { id: chatId, type: 'private' };
   const click = (data) => bot.handleUpdate({ callback_query: { id: 'q', data, message: { chat } } });
   const play = async () => { await bot.handleUpdate({ message: { chat, text: ex.story } }); await click(`play:${bot.sessions.get(chat.id).draftId}`); return offered.at(-1).reply_markup.inline_keyboard[0][0].callback_data; };
-  const fit1 = await play(); const fit2 = await play();
-  assert.notEqual(fit1.split(':')[3], fit2.split(':')[3], 'номера различаются');
-  await click(fit1); await click(fit2);
-  assert.deepEqual(log, ['render::aaaaaaaaaaaaaaaa', 'render::bbbbbbbbbbbbbbbb', 'feedback:fit:aaaaaaaaaaaaaaaa', 'feedback:fit:bbbbbbbbbbbbbbbb']);
+  const pairs = (video) => log.filter((r) => r.video === video).map((r) => r.e);
+  return { bot, chat, log, click, play, pairs };
+}
+
+test('случайная часть номера всегда одна и та же — номера роликов различаются; у каждого отклика свой render, раньше отклика', async () => {
+  const t = constBot(94004);
+  const fit1 = await t.play(); const fit2 = await t.play();
+  const [v1, v2] = [fit1.split(':')[3], fit2.split(':')[3]];
+  assert.notEqual(v1, v2, 'номера различаются');
+  assert.ok(fit1.length <= 64, 'callback_data в пределе Telegram');
+  await t.click(fit1); await t.click(fit2);
+  assert.deepEqual(t.pairs(v1), ['render', 'feedback']);
+  assert.deepEqual(t.pairs(v2), ['render', 'feedback']);
+});
+
+test('регрессия QA: сессия истекла между доставками, случайная часть совпала — у свежего отклика ровно один более ранний render', async () => {
+  const t = constBot(94005);
+  const fitA = await t.play();
+  t.bot.sessions.get(t.chat.id).touched = Date.now() - 4 * 60 * 60 * 1000; // четыре часа без действий
+  t.bot.sweep();
+  assert.ok(!t.bot.sessions.has(t.chat.id), 'сессия удалена');
+  await passConsent(t.bot.handleUpdate, t.chat, { sessions: () => t.bot.sessions });
+  const fitB = await t.play();
+  const vB = fitB.split(':')[3];
+  assert.notEqual(fitA.split(':')[3], vB);
+  await t.click(fitB);
+  assert.deepEqual(t.pairs(vB), ['render', 'feedback'], 'ровно один render раньше отклика');
+});
+
+test('регрессия QA: кнопка ролика, вытесненного из последних 20, при совпавшей случайной части не пишет отклик', async () => {
+  const t = constBot(94006);
+  const first = await t.play();
+  for (let i = 0; i < 21; i++) await t.play();
+  const ids = t.log.filter((r) => r.e === 'render').map((r) => r.video);
+  assert.equal(new Set(ids).size, 22, 'все номера различаются');
+  const before = t.log.filter((r) => r.e === 'feedback').length;
+  await t.click(first); // вытеснен
+  assert.equal(t.log.filter((r) => r.e === 'feedback').length, before, 'число откликов прежнее');
 });

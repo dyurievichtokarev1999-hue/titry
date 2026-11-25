@@ -469,6 +469,9 @@ export const TEXT_ONLY = {
 
 // ── Логика бота (транспорт подменяется в тестах) ─────────────────────────────
 
+const BOOT = Date.now().toString(36); // метка запуска процесса — часть номера ролика
+let videoSeq = 0; // счётчик выдач номеров роликов в процессе (общий для всех ботов процесса)
+
 export function createBot({
   tg, metrics = makeMetrics(), draft = makeDraft, render = renderEpisode, transcribe = transcribeOgg, now = () => new Date(),
   newVideoId = () => crypto.randomBytes(8).toString('hex'), // номер ролика в кнопках отклика и метриках (подменяется в тестах)
@@ -942,14 +945,10 @@ export function createBot({
       // не отзывается: Telegram не умеет отменить отправку; окно — время одного HTTP-запроса.
       // Случайный номер ролика (QA PR 35): по нему отклики в метриках связаны с этим роликом и отделены от других
       // роликов того же участника (номер в сессии сбрасывался бы с сессией). Сам по себе ничего не раскрывает.
-      // Номер ролика: 64 бита и проверка на совпадение в сессии — две доставки не делят номер (QA PR 35 на 1eb3f77).
-      // Номер резервируется сразу при выдаче (s.issued): параллельная доставка и номер, вытесненный из последних 20,
-      // не повторятся в сессии.
-      let video;
-      for (let i = 0; !video || s.issued?.has(video); i++) video = i < 8 ? newVideoId() : crypto.randomBytes(8).toString('hex');
-      const issued = (s.issued ||= new Set());
-      issued.add(video);
-      if (issued.size > 1000) issued.delete(issued.values().next().value); // память сессии ограничена
+      // Номер ролика уникален на всём сроке хранения метрик (QA PR 35 на 67f3133): случайная часть + метка запуска процесса
+      // + счётчик выдач в процессе. Совпадение случайной части, истечение сессии и вытеснение из последних 20 номер не
+      // повторяют; после перезапуска другая метка запуска.
+      const video = `${newVideoId()}${BOOT}${(++videoSeq).toString(36)}`;
       // Запись render — один раз на ролик: после подтверждения отправки или, если ответ Telegram потерялся, перед первым
       // откликом под этим роликом (нажатие кнопки доказывает доставку; QA PR 35 на d64c0e0).
       const renderData = { seconds: Math.round(r.seconds), mood: ep.mood, music: ep.music, edits: s.edits || 0, video };
