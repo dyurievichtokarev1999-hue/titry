@@ -151,6 +151,63 @@ test('запись висит дольше предела — «не получ�
   assert.equal(t.sent.at(-1).text, CONSENT_TEXT.intro);
 });
 
+// QA PR 39 c0d69be: первая запись «да» на 6Б висит дольше предела, повторное «Да» принято, потом первая запись
+// завершается. Последняя отметка 6Б — «да», шаг засчитан; позднее завершение первой попытки вторую не отзывает.
+const flush = async (n = 30) => { for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r)); };
+function slowPd() {
+  const rows = []; const gates = [];
+  const record = async (id, m) => {
+    if (m.step === 'pd' && m.answer === 'yes' && gates.length === 0) await new Promise((r) => gates.push(r));
+    rows.push(`${m.step}:${m.answer}`);
+  };
+  return { rows, record, release: () => gates[0]() };
+}
+test('просрочка первой «Да», повтор принят, первая запись завершилась позже — согласие действует (QA PR 39)', async (ctx) => {
+  ctx.mock.timers.enable({ apis: ['setTimeout'] });
+  const l = slowPd();
+  const t = bot({ record: l.record });
+  await t.say('/start'); await t.press('age', 'yes'); await t.press('intro', 'next');
+  const p = t.press('pd', 'yes');
+  await flush();
+  ctx.mock.timers.tick(5000);
+  await p;
+  assert.equal(t.sent.at(-1).text, TEXT.consentRecordFailed);
+  assert.equal(t.step(), 'pd');
+  await t.press('pd', 'yes');
+  assert.equal(t.step(), 'abroad', 'повтор засчитан');
+  l.release(); await flush();
+  assert.deepEqual(l.rows, ['age:yes', 'pd:yes', 'pd:yes'], 'отзыва нет: последняя отметка 6Б — «да»');
+  assert.equal(t.step(), 'abroad');
+  await t.press('abroad', 'yes');
+  assert.equal(t.step(), 'done');
+});
+test('единственная просроченная «Да»: запись завершилась позже — отзыв, шаг прежний', async (ctx) => {
+  ctx.mock.timers.enable({ apis: ['setTimeout'] });
+  const l = slowPd();
+  const t = bot({ record: l.record });
+  await t.say('/start'); await t.press('age', 'yes'); await t.press('intro', 'next');
+  const p = t.press('pd', 'yes');
+  await flush();
+  ctx.mock.timers.tick(5000);
+  await p;
+  l.release(); await flush();
+  assert.deepEqual(l.rows, ['age:yes', 'pd:yes', 'pd:withdraw']);
+  assert.equal(t.step(), 'pd', 'действующего согласия нет');
+  assert.deepEqual(t.b.sessions.get(93201).consent.given, {});
+});
+test('просрочка, повтор принят, затем /delete, и только потом поздняя запись — последней идёт отзыв', async (ctx) => {
+  ctx.mock.timers.enable({ apis: ['setTimeout'] });
+  const l = slowPd();
+  const t = bot({ record: l.record });
+  await t.say('/start'); await t.press('age', 'yes'); await t.press('intro', 'next');
+  const p = t.press('pd', 'yes');
+  await flush(); ctx.mock.timers.tick(5000); await p;
+  await t.press('pd', 'yes');
+  await t.say('/delete');
+  l.release(); await flush();
+  assert.equal(l.rows.at(-1), 'pd:withdraw', 'поздняя «да» после /delete отозвана');
+});
+
 test('ответ «отметки удалены» помечен на согласование: проверка выпуска не пропускает', async () => {
   const { unfinishedTexts } = await import('../server/release.js');
   assert.ok(unfinishedTexts({ CONSENT_TEXT }).includes('CONSENT_TEXT.ageDeleted'));

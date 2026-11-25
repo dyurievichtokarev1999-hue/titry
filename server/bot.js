@@ -90,7 +90,7 @@ export const TEXT = {
   // Отзыв согласия: удаление статистики не подтверждено. Текст редактора повествования (ПРАВКА-ЗАПРОС 21.11), дословно.
   withdrawForgetFailed: 'Пока не удалось подтвердить удаление твоей статистики. Чтобы повторить запрос, отправь /delete чуть позже.',
   // Отметку о согласии не удалось записать (А7): шаг не засчитан. ТЕКСТ НА УТВЕРЖДЕНИЕ Редактору.
-  consentRecordFailed: 'Не получилось сохранить ответ. Нажми кнопку ещё раз чуть позже.',
+  consentRecordFailed: 'Не получилось сохранить ответ, поэтому дальше пока не идём. Нажми ту же кнопку ещё раз чуть позже.', // «Тексты G0 v2», п. 2: кнопка после сбоя рабочая
   renderFail: 'Не получилось собрать ролик. Попробуй ещё раз чуть позже.',
   draftFail: 'Не получилось собрать черновик. Попробуй ещё раз чуть позже.',
   // Внутренняя причина insufficient_after_exclusion (редактор повествования), дословно: только эта реплика —
@@ -623,6 +623,8 @@ export function createBot({
     s.consent = { step: flow[0], given: {}, notified: null, cycle: crypto.randomBytes(4).toString('hex') };
     return consentScreen(chatId, s, flow[0]);
   }
+  // Отзыв: засчитанные шаги этого прохождения больше не действуют — поздняя запись «да» по ним получит отзыв (settle).
+  const revokeMarks = (c) => { for (const r of Object.values(c?.marks || {})) r.accepted = false; };
   async function onConsent(chatId, s, data) {
     const c = s.consent;
     const [, step, answer, cycle] = data.split(':');
@@ -638,22 +640,34 @@ export function createBot({
       // Повторное нажатие, пока запись идёт, не засчитывается дважды.
       if (c.marking) return;
       c.marking = true;
+      // Итог по шагу, а не по попытке (QA PR 39 c0d69be): «да» просроченной попытки может записаться позже повторной.
+      // Отзыв пишется, когда шаг не засчитан, его никто не ждёт и после последнего отзыва записалась хоть одна «да»:
+      // поздняя запись первой попытки не отменит принятое повторное согласие, а одинокая просроченная — отзывается.
+      const r = (c.marks ||= {})[step] ||= { waiting: 0, accepted: false, dirty: false };
+      const settle = () => {
+        if (r.waiting || r.accepted || !r.dirty) return;
+        r.dirty = false;
+        mark(chatId, step, 'withdraw').catch((e) => logError('consent.withdraw', e));
+      };
+      r.waiting++;
       const write = mark(chatId, step, 'yes');
-      // «Да» записано, а шаг не засчитан (сбой ожидания, /start, «Нет», /delete во время записи) — в хранилище отзыв:
-      // отметка о согласии без отзыва не остаётся.
-      const undo = () => write.then(() => mark(chatId, step, 'withdraw'), () => {}).catch((e) => logError('consent.withdraw', e));
+      write.then(() => { r.dirty = true; settle(); }, () => {});
       let timer;
       const limit = new Promise((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error('consent-log: нет ответа'), { code: 'timeout' })), CONSENT_RECORD_MS); });
       try { await Promise.race([write, limit]); } catch (e) {
         clearTimeout(timer);
         logError('consent.record', e);
         c.marking = false;
-        undo();
+        r.waiting--;
+        settle();
         return alive(chatId, s) && s.consent === c && c.step === step ? tg.send(chatId, TEXT.consentRecordFailed) : undefined;
       }
       clearTimeout(timer);
       c.marking = false;
-      if (!alive(chatId, s) || s.consent !== c || c.step !== step) { undo(); return; } // /start, «Нет» или /delete во время записи
+      r.waiting--;
+      // /start, «Нет» или /delete во время записи — шаг не засчитан, отзыв
+      if (!alive(chatId, s) || s.consent !== c || c.step !== step) { settle(); return; }
+      r.accepted = true;
     }
     if (answer === 'next' || answer === 'yes') {
       if (step === 'pd' || step === 'abroad') c.given[step] = { at: now().toISOString(), version: CONSENT_VERSION };
@@ -673,8 +687,9 @@ export function createBot({
     }
     // Было ли согласие до этого отказа (в этом прохождении или раньше в сессии). После отказа признак сбрасывается:
     // повторный отказ до нового согласия не сообщает об удалении снова (QA PR 34 324cc87). Синхронно, до отправок.
-    const had = Object.keys(c.given).length > 0 || !!s.consentedBefore; // «Да», которое ещё пишется, отзовёт undo()
+    const had = Object.keys(c.given).length > 0 || !!s.consentedBefore; // «Да», которое ещё пишется, отзовёт settle()
     s.consentedBefore = false;
+    revokeMarks(c); // поздняя «да» просроченной попытки после этого отказа будет отозвана
     // Отказ после данного согласия — отзыв: отметка в хранилище (А7). Сбой записи отказ не задерживает.
     if (had) mark(chatId, step, 'withdraw').catch((e) => logError('consent.withdraw', e));
     // Отзыв согласия = удаление метрик, как /delete (решение Claude 20.11). Запуск — синхронно, до ответов: запись,
@@ -1141,6 +1156,7 @@ export function createBot({
       // Без согласия в сессии (или после перезапуска) записи нет. Сбой записи удаление не задерживает.
       const consented = !!(s.consentedBefore || Object.keys(s.consent?.given || {}).length || s.consent?.marking);
       sessions.delete(chatId);
+      revokeMarks(s.consent);
       if (consented) mark(chatId, 'delete', 'withdraw').catch((e) => logError('consent.withdraw', e));
       // Честный ответ (редактор 16:24): «удалены» — только если удаление сессии и статистики подтверждено.
       // Запрет safety по /delete не снимается; если они есть, полное удаление не подтверждается.
