@@ -1,6 +1,6 @@
-// Хелпер «пройти подтверждения» (экраны 6А → 6Б/6Г → 6Ж, server/consent.js) для тестов, которые шлют рассказ сразу.
+// Хелпер «пройти подтверждения» (по умолчанию 6Г → 6А → 6Б → 6Ж, server/consent.js) для тестов, которые шлют рассказ сразу.
 // createBot — настоящий createBot из server/bot.js; перед первым сообщением чата и после каждого «/start» (он начинает
-// с 6А) и «/delete» (стирает сессию с отметкой) хелпер нажимает настоящие кнопки подтверждений. Сообщения и метрики
+// подтверждения заново) и «/delete» (стирает сессию с отметкой) хелпер нажимает настоящие кнопки подтверждений. Сообщения и метрики
 // этих шагов скрыты от подмен теста, поэтому логика их проверок не меняется. Проверки самих экранов —
 // tests/consent-screens.test.js, там этот хелпер не используется.
 import { createBot as realCreateBot } from '../../server/bot.js';
@@ -8,10 +8,11 @@ import { consentSteps } from '../../server/consent.js';
 
 const HELPER_QUERY = 'consent-helper';
 
-/** Пройти подтверждения через handle (handleUpdate бота): начать диалог, нажать «Дальше» и согласия по порядку. */
+/** Пройти подтверждения через handle (handleUpdate бота): начать диалог и нажать кнопки шагов по порядку. */
 export async function passConsent(handle, chat, { order = consentSteps(), begin = true, sessions } = {}) {
-  if (begin) await handle({ message: { chat, text: 'настройки' } }); // до подтверждений — 6З и 6А, рассказ не принимается
-  for (const data of ['cs:intro:next', ...order.map((step) => `cs:${step}:yes`)]) {
+  if (begin) await handle({ message: { chat, text: 'настройки' } }); // до подтверждений — 6З и первый шаг, рассказ не принимается
+  const flow = order.includes('intro') ? order : ['intro', ...order]; // как в боте: без 'intro' — 6А первым
+  for (const data of flow.map((step) => (step === 'intro' ? 'cs:intro:next' : `cs:${step}:yes`))) {
     const cycle = sessions().get(chat.id)?.consent?.cycle; // кнопки привязаны к прохождению (метка в callback_data)
     await handle({ callback_query: { id: HELPER_QUERY, data: `${data}:${cycle}`, message: { chat } } });
   }
