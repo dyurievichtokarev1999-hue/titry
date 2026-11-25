@@ -133,3 +133,38 @@ test('черновик не начат из-за занятых мест — п�
   await t.say(1003, ex.story);
   assert.equal(calls, 2, 'единственный рассказ дня у 1003 не потерян');
 });
+
+// Разборы 3e7df0a.
+test('предел исчерпан: прежний черновик цел (▶ работает); рассказ «тяжело» получает контакты помощи', async () => {
+  const t = setup({ limits: { perDay: 1 } });
+  await t.say(IN, ex.story);
+  const draftId = t.bot.sessions.get(IN).draftId;
+  await t.say(IN, 'Хочу его ударить, злюсь весь вечер.');
+  assert.equal(t.bot.sessions.get(IN).draftId, draftId, 'черновик не сброшен');
+  assert.ok(t.texts(IN).includes(TEXT.limitReached));
+  assert.equal(t.texts(IN).at(-1), helpMessage('concern'), 'контакты помощи');
+  await t.bot.handleUpdate({ callback_query: { id: 'q', data: `play:${draftId}`, message: { chat: { id: IN, type: 'private' } } } });
+  assert.equal(t.n.check, 1, 'прежний черновик идёт в проверку и ролик');
+});
+
+test('черновика не было (сбой модели, недоступно) — предел не расходуется', async () => {
+  let calls = 0;
+  const t = setup({ limits: { perDay: 1 }, draft: async () => { calls++; return calls < 3 ? (calls === 1 ? { draftFailed: true, code: 'timeout' } : { unavailable: true, code: 'timeout' }) : { episode: structuredClone(ex.episode), risk: { level: 'none' }, provider: 'claude', dropped: [] }; } });
+  await t.say(IN, ex.story); await t.say(IN, ex.story); await t.say(IN, ex.story);
+  assert.equal(calls, 3, 'два сбоя не израсходовали единственный рассказ дня');
+  await t.say(IN, 'Утром убежал кофе, днём искали ключи.');
+  assert.equal(calls, 3);
+  assert.equal(t.texts(IN).at(-1), TEXT.limitReached);
+});
+
+test('вне списка: рассказ «тяжело» — контакты помощи; /delete — тот же честный ответ, что у участников', async () => {
+  const t = setup({ real: true });
+  await t.say(OUT, 'Хочу его ударить, злюсь весь вечер.');
+  assert.ok(t.texts(OUT).at(-1).includes(helpMessage('concern')));
+  await t.say(OUT, '/delete');
+  assert.ok(t.texts(OUT).at(-1).startsWith(TEXT.deleted));
+});
+
+test('конфигурация: ожидание места не больше 10 минут', () => {
+  assert.throws(() => admissionFromEnv({ TITRY_STORIES_PER_DAY: '3', TITRY_MODEL_WAIT_MS: '9999999999' }), { code: 'admission_config' });
+});

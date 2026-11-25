@@ -662,6 +662,17 @@ export function createBot({
     const cont = continuationLevel(prevStory, story);
     // У предела длины склейка целиком не поместится в черновик: тогда — последняя фраза и обрывок (как в проверке).
     if (cont === 'concern') story = prevStory.length + story.length < STORY_MAX ? `${prevStory}\n${story}` : continuationContext(prevStory, story);
+    // Предел на участника (Б6 п. 2) — до сброса сессии и до дорогой работы: отклонённый рассказ не трогает черновик.
+    // Явная опасность модели не требует (остановка локально) и предел не расходует. Рассказ уровня «тяжело» получает
+    // контакты помощи и при исчерпании предела. ticket возвращается, если черновика не было.
+    const urgentLocal = cont === 'urgent' || assessRisk(story).level === 'urgent';
+    const ticket = admission && !urgentLocal ? admission.take(chatId) : null;
+    if (ticket === false) {
+      await tg.send(chatId, TEXT.limitReached);
+      if (cont === 'concern' || assessRisk(story).level === 'concern') await tg.send(chatId, helpMessage('concern'));
+      return;
+    }
+    const refund = () => { if (ticket) admission.untake(chatId, ticket); };
     // Новый рассказ сразу отменяет прежний черновик: его кнопки больше ничего не запускают.
     s.episode = null;
     s.skeleton = null;
@@ -686,15 +697,11 @@ export function createBot({
       return tg.send(chatId, TEXT.checkUnavailable);
     }
     const current = () => sameConsent(chatId, s, cycle) && s.draftId === gen && !isBlocked(s, story) && gate.status(s.scope, story).kind !== 'safety';
-    // Предел на участника (Б6 п. 2) — перед дорогой работой. Явная опасность модели не требует (остановка локально
-    // в makeDraft) и предел не расходует: экран остановки показывается и после исчерпания предела.
-    const urgentLocal = assessRisk(story).level === 'urgent';
-    if (admission && !urgentLocal && !admission.take(chatId)) { s.stage = 'idle'; return tg.send(chatId, TEXT.limitReached); }
     await tg.action(chatId, 'typing');
     await tg.send(chatId, TEXT.working);
     // Согласие сменилось, пока шли ответы: модель не вызывается. Запрет, поставленный за это время, — ниже, после
     // черновика (поздняя остановка), как раньше.
-    if (!sameConsent(chatId, s, cycle) || s.draftId !== gen) return;
+    if (!sameConsent(chatId, s, cycle) || s.draftId !== gen) return refund();
     let r;
     try {
       const make = () => draft(story, { date: todayIso(now()), period: s.period, tone: 'quiet' });
@@ -702,7 +709,7 @@ export function createBot({
       r = await track(chatId, admission && !urgentLocal ? admission.run(make) : make());
     } catch (e) {
       logError('draft', e);
-      if (admission && e?.code === 'model_busy') admission.untake(chatId); // модель не вызывалась — предел не расходуется
+      refund(); // черновика нет — предел не расходуется
       if (!current()) return;
       s.stage = 'idle';
       await tg.send(chatId, TEXT.draftFail);
@@ -717,6 +724,7 @@ export function createBot({
       // ИР-02: проверка не завершена — техническое состояние, не остановка: рассказ не запоминается
       // как запрещённый, карточка помощи не показывается, черновика и ролика нет.
       logError('draft', { code: r.code });
+      refund();
       if (!current()) return;
       s.stage = 'idle';
       return tg.send(chatId, TEXT.checkUnavailable);
@@ -724,6 +732,7 @@ export function createBot({
     if (r.draftFailed) {
       // Решение 16.11, п. 1.1: черновика нет и заготовка не собирается — техническая реплика, без контактов.
       logError('draft', { code: r.code });
+      refund();
       if (!current()) return;
       s.stage = 'idle';
       return tg.send(chatId, TEXT.renderFail);
@@ -1052,6 +1061,24 @@ export function createBot({
     if (stillDelivering()) return sendSafe(chatId, TEXT.rendering);
   }
 
+  // Ответ на /delete — и для чатов вне списка закрытого теста.
+  async function deleteReply(chatId) {
+    // Честный ответ (редактор 16:24): «удалены» — только если удаление сессии и статистики подтверждено.
+    // Запрет safety по /delete не снимается; если они есть, полное удаление не подтверждается.
+    let forgot = true;
+    try { await metrics.forget(chatId); } catch { forgot = false; }
+    const kinds = gate.recordsFor(`chat:${chatId}`);
+    const lines = [forgot ? TEXT.deleted : TEXT.deleteFailed];
+    if (kinds === null) lines.push(TEXT.recordUnknown); // намеренное сохранение не утверждаем
+    else {
+      const fictional = process.env.TITRY_STAND === 'fictional';
+      if (fictional && kinds.has('safety')) lines.push(TEXT.keptSafety);
+      // Не вымышленный стенд (срок не утверждён) или черновик/проверка ещё идут и могут поставить запрет.
+      if ((kinds.size && !fictional) || inFlight.has(chatId)) lines.push(TEXT.deleteKept);
+    }
+    return tg.send(chatId, lines.join('\n'));
+  }
+
   // Вне списка закрытого теста (Б6 п. 2): сессия не создаётся, модель не вызывается, метрик нет. /delete и /help работают;
   // явная опасность — экран остановки (локальный фильтр); иначе — короткий ответ не чаще раза в 10 минут на чат.
   const outsiders = new Map(); // номер чата → время последнего ответа (только для частоты ответа)
@@ -1059,14 +1086,12 @@ export function createBot({
     const text = cleanInput(msg.text || msg.caption || '').trim();
     const cmd = parseCommand(text);
     const bare = cmd && !cmd.tail && KNOWN_COMMANDS.has(cmd.name) ? cmd.name : null;
-    if (bare === 'delete') {
-      let forgot = true;
-      try { await metrics.forget(chatId); } catch { forgot = false; }
-      return tg.send(chatId, forgot ? TEXT.deleted : TEXT.deleteFailed);
-    }
+    if (bare === 'delete') return deleteReply(chatId);
     if (bare === 'help') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });
-    if (text && assessRisk(cmd ? cmd.tail || text : text).level === 'urgent') return tg.send(chatId, helpMessage('urgent'));
-    const t = Date.now();
+    const level = text ? assessRisk(cmd ? cmd.tail || text : text).level : 'none';
+    if (level === 'urgent') return tg.send(chatId, helpMessage('urgent'));
+    if (level === 'concern') return tg.send(chatId, `${TEXT.notInvited}\n\n${helpMessage('concern')}`); // контакты — без ограничения частоты
+    const t = now().getTime();
     if (t - (outsiders.get(chatId) || 0) < 10 * 60 * 1000) return;
     if (outsiders.size >= 10000) outsiders.clear();
     outsiders.set(chatId, t);
@@ -1095,20 +1120,7 @@ export function createBot({
     }
     if (bare === 'delete') {
       sessions.delete(chatId);
-      // Честный ответ (редактор 16:24): «удалены» — только если удаление сессии и статистики подтверждено.
-      // Запрет safety по /delete не снимается; если они есть, полное удаление не подтверждается.
-      let forgot = true;
-      try { await metrics.forget(chatId); } catch { forgot = false; }
-      const kinds = gate.recordsFor(`chat:${chatId}`);
-      const lines = [forgot ? TEXT.deleted : TEXT.deleteFailed];
-      if (kinds === null) lines.push(TEXT.recordUnknown); // намеренное сохранение не утверждаем
-      else {
-        const fictional = process.env.TITRY_STAND === 'fictional';
-        if (fictional && kinds.has('safety')) lines.push(TEXT.keptSafety);
-        // Не вымышленный стенд (срок не утверждён) или черновик/проверка ещё идут и могут поставить запрет.
-        if ((kinds.size && !fictional) || inFlight.has(chatId)) lines.push(TEXT.deleteKept);
-      }
-      return tg.send(chatId, lines.join('\n'));
+      return deleteReply(chatId);
     }
     if (bare === 'help') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });
     // До 6Ж и после отказа — ничего из сообщения не обрабатывается. Исключение — уже идущая доставка ролика

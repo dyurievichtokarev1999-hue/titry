@@ -32,6 +32,7 @@ export function admissionFromEnv(env = process.env) {
   const perDay = closed || set('TITRY_STORIES_PER_DAY') ? positive(env.TITRY_STORIES_PER_DAY, 'TITRY_STORIES_PER_DAY') : Infinity;
   const concurrency = closed || set('TITRY_MODEL_CONCURRENCY') ? positive(env.TITRY_MODEL_CONCURRENCY, 'TITRY_MODEL_CONCURRENCY') : Infinity;
   const waitMs = set('TITRY_MODEL_WAIT_MS') ? positive(env.TITRY_MODEL_WAIT_MS, 'TITRY_MODEL_WAIT_MS') : 30000;
+  if (waitMs > 10 * 60 * 1000) throw bad('TITRY_MODEL_WAIT_MS — не больше 600000');
   return { allowed, perDay, concurrency, waitMs };
 }
 
@@ -46,18 +47,19 @@ export function makeAdmission({ allowed = null, perDay = Infinity, concurrency =
   };
   return {
     allowed: (chatId) => !allowed || allowed.has(String(chatId)),
-    /** Учесть рассказ участника; false — предел за 24 часа исчерпан (рассказ не учитывается). */
+    /** Учесть рассказ участника: отметка для untake; false — предел за 24 часа исчерпан (рассказ не учитывается). */
     take(chatId) {
-      if (perDay === Infinity) return true;
+      if (perDay === Infinity) return {};
       const t = now();
-      const list = (taken.get(chatId) || []).filter((x) => t - x < DAY_MS);
+      const list = (taken.get(chatId) || []).filter((x) => t - x.at < DAY_MS);
       if (list.length >= perDay) { taken.set(chatId, list); return false; }
-      list.push(t);
+      const mark = { at: t };
+      list.push(mark);
       taken.set(chatId, list);
-      return true;
+      return mark;
     },
-    /** Вернуть последний учтённый рассказ: черновик не начат из-за занятых мест (model_busy) — предел не расходуется. */
-    untake(chatId) { const list = taken.get(chatId); if (list && list.length) list.pop(); },
+    /** Вернуть ровно эту отметку: черновика не было (занятые места, сбой модели) — предел не расходуется. */
+    untake(chatId, mark) { const list = taken.get(chatId); const i = list ? list.indexOf(mark) : -1; if (i >= 0) list.splice(i, 1); },
     /** Выполнить обращение к модели в пределах общего числа мест; место освобождается при любом исходе. */
     async run(fn) {
       if (concurrency !== Infinity) {
@@ -75,6 +77,6 @@ export function makeAdmission({ allowed = null, perDay = Infinity, concurrency =
       }
       try { return await fn(); } finally { if (concurrency !== Infinity) release(); }
     },
-    sweep() { const t = now(); for (const [k, v] of taken) if (!v.some((x) => t - x < DAY_MS)) taken.delete(k); },
+    sweep() { const t = now(); for (const [k, v] of taken) if (!v.some((x) => t - x.at < DAY_MS)) taken.delete(k); },
   };
 }
