@@ -13,6 +13,7 @@ import { renderEpisode, checkRenderer, ROOT, RENDER_TIMEOUT_MS, KILL_GRACE_MS, r
 import { logError, safeCode, logRenderTimeout } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS, cleanupVoiceOrphans } from './stt.js';
 import { processLedger, KEY_ENV, KEY_VERSION_ENV } from './ledger.js';
+import { admissionFromEnv, makeAdmission } from './admission.js';
 import { CONSENT_TEXT, CONSENT_VERSION, consentSteps } from './consent.js';
 import { unfinishedTexts } from './release.js';
 
@@ -86,6 +87,9 @@ export const TEXT = {
   withdrawForgetFailed: 'Пока не удалось подтвердить удаление твоей статистики. Чтобы повторить запрос, отправь /delete чуть позже.',
   renderFail: 'Не получилось собрать ролик. Попробуй ещё раз чуть позже.',
   draftFail: 'Не получилось собрать черновик. Попробуй ещё раз чуть позже.',
+  // Закрытый тест (Б6, п. 2). ТЕКСТЫ НА УТВЕРЖДЕНИЕ Редактору; параметры допуска и пределы не раскрываются.
+  notInvited: 'Сейчас «Титры» работают только для участников закрытого теста.',
+  limitReached: 'На сегодня рассказов достаточно. Можно вернуться завтра.',
   // Внутренняя причина insufficient_after_exclusion (редактор повествования), дословно: только эта реплика —
   // без черновика, ролика, просьбы дописать и кнопок. Показывается только после stop и технических исходов.
   insufficient: INSUFFICIENT_TEXT, // текст — в server/safety.js
@@ -458,12 +462,15 @@ const continuationContext = (prev, next) => `${lastPhrase(joinEdits(prev))}\n${S
 
 export function createBot({
   tg, metrics = makeMetrics(), draft = makeDraft, render = renderEpisode, transcribe = transcribeOgg, now = () => new Date(),
+  // Допуск и пределы закрытого теста (server/admission.js, Б6 п. 2); null — без допуска и пределов. main передаёт из окружения.
+  admission = null,
   // Модельная проверка перед рендером (решение владельца кода 13.11 15:00): true — опасно, false — безопасно,
   // исключение — «неизвестно» (один повтор через checkRetryMs). Нет ключа — режим «только локальный фильтр».
   safetyCheck, hasKey = safetyCheck ? () => true : hasClaudeCredentials,
   ledger = null, // хранилище запретов (server/ledger.js); область — участник, производная HMAC на диске
   checkRetryMs = RETRY_DELAY_MS,
-  gate = makeGate({ check: safetyCheck || ((text) => modelSafetyCheck(text)), hasKey, ledger, retryDelayMs: checkRetryMs }),
+  // Проверки модели (и повтор) — в пределах общего числа мест обращений к модели (Б6 п. 2).
+  gate = makeGate({ check: ((c) => (admission ? (...a) => admission.run(() => c(...a)) : c))(safetyCheck || ((text) => modelSafetyCheck(text))), hasKey, ledger, retryDelayMs: checkRetryMs }),
   checkBudgetMs = CHECK_BUDGET_MS, // бюджет ожидания одной проверки сообщения в окне (вызов + повтор)
   holdWaitMs = HOLD_WAIT_MS, // жёсткий общий предел ожидания проверок сообщений, пришедших во время подготовки ролика
   renderTimeoutMs = RENDER_TIMEOUT_MS, // предел активного рендера от старта задачи в слоте (server/render.js)
@@ -679,6 +686,10 @@ export function createBot({
       return tg.send(chatId, TEXT.checkUnavailable);
     }
     const current = () => sameConsent(chatId, s, cycle) && s.draftId === gen && !isBlocked(s, story) && gate.status(s.scope, story).kind !== 'safety';
+    // Предел на участника (Б6 п. 2) — перед дорогой работой. Явная опасность модели не требует (остановка локально
+    // в makeDraft) и предел не расходует: экран остановки показывается и после исчерпания предела.
+    const urgentLocal = assessRisk(story).level === 'urgent';
+    if (admission && !urgentLocal && !admission.take(chatId)) { s.stage = 'idle'; return tg.send(chatId, TEXT.limitReached); }
     await tg.action(chatId, 'typing');
     await tg.send(chatId, TEXT.working);
     // Согласие сменилось, пока шли ответы: модель не вызывается. Запрет, поставленный за это время, — ниже, после
@@ -686,9 +697,12 @@ export function createBot({
     if (!sameConsent(chatId, s, cycle) || s.draftId !== gen) return;
     let r;
     try {
-      r = await track(chatId, draft(story, { date: todayIso(now()), period: s.period, tone: 'quiet' }));
+      const make = () => draft(story, { date: todayIso(now()), period: s.period, tone: 'quiet' });
+      // Черновик — в пределах общего числа мест; нет места за время ожидания — «не получилось собрать черновик».
+      r = await track(chatId, admission && !urgentLocal ? admission.run(make) : make());
     } catch (e) {
       logError('draft', e);
+      if (admission && e?.code === 'model_busy') admission.untake(chatId); // модель не вызывалась — предел не расходуется
       if (!current()) return;
       s.stage = 'idle';
       await tg.send(chatId, TEXT.draftFail);
@@ -1038,9 +1052,31 @@ export function createBot({
     if (stillDelivering()) return sendSafe(chatId, TEXT.rendering);
   }
 
+  // Вне списка закрытого теста (Б6 п. 2): сессия не создаётся, модель не вызывается, метрик нет. /delete и /help работают;
+  // явная опасность — экран остановки (локальный фильтр); иначе — короткий ответ не чаще раза в 10 минут на чат.
+  const outsiders = new Map(); // номер чата → время последнего ответа (только для частоты ответа)
+  async function notInvited(chatId, msg) {
+    const text = cleanInput(msg.text || msg.caption || '').trim();
+    const cmd = parseCommand(text);
+    const bare = cmd && !cmd.tail && KNOWN_COMMANDS.has(cmd.name) ? cmd.name : null;
+    if (bare === 'delete') {
+      let forgot = true;
+      try { await metrics.forget(chatId); } catch { forgot = false; }
+      return tg.send(chatId, forgot ? TEXT.deleted : TEXT.deleteFailed);
+    }
+    if (bare === 'help') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });
+    if (text && assessRisk(cmd ? cmd.tail || text : text).level === 'urgent') return tg.send(chatId, helpMessage('urgent'));
+    const t = Date.now();
+    if (t - (outsiders.get(chatId) || 0) < 10 * 60 * 1000) return;
+    if (outsiders.size >= 10000) outsiders.clear();
+    outsiders.set(chatId, t);
+    return tg.send(chatId, TEXT.notInvited);
+  }
+
   async function onMessage(msg) {
     const chatId = msg.chat.id;
     if (msg.chat.type !== 'private') return; // только личные чаты: истории не для групп
+    if (admission && !admission.allowed(chatId)) return notInvited(chatId, msg);
     const s = session(chatId);
     const cycle = cycleOf(chatId); // цикл согласия на момент прихода: метрики голосового — в нём, а не после распознавания
     // Подпись к фото, видео, файлу — такой же текст, как сообщение (условие 1: подписи попадают в ролик и проверяются).
@@ -1266,6 +1302,7 @@ export function createBot({
     const chatId = q.message && q.message.chat.id;
     await tg.answer(q.id);
     if (!chatId) return;
+    if (admission && !admission.allowed(chatId)) return; // вне закрытого теста кнопки ничего не делают
     const s = session(chatId);
     const data = q.data || '';
     if (data.startsWith('cs:')) return onConsent(chatId, s, data);
@@ -1416,6 +1453,11 @@ export async function prepareBot({ checkRender = checkRenderer, cleanup = cleanu
       throw Object.assign(new Error('startup'), { code: 'release_texts', stage: 'release.texts' });
     }
   }
+  // Допуск и пределы закрытого теста (Б6 п. 2): неверная конфигурация — отказ старта; на реальных данных — только закрытый режим.
+  try {
+    admissionFromEnv(env);
+    if (env.TITRY_RELEASE_REAL_DATA === '1' && env.TITRY_CLOSED_TEST !== '1') throw Object.assign(new Error('admission: нужен TITRY_CLOSED_TEST=1'), { code: 'admission_config' });
+  } catch (e) { logError('admission', e); throw Object.assign(new Error('startup'), { code: 'admission_config', stage: 'admission' }); }
   // Без Playwright или ffmpeg бот принял бы рассказы, но не собрал бы ни одного ролика.
   try { await checkRender({ env }); } catch (e) { logError('render.check', e); throw Object.assign(new Error('startup'), { code: safeCode(e), stage: 'render.check' }); }
   try { await cleanup(); } catch (e) { logError('voice.cleanup', e); throw Object.assign(new Error('startup'), { code: safeCode(e), stage: 'voice.cleanup' }); }
@@ -1434,7 +1476,7 @@ async function main() {
   if (!token) { console.error('Задайте TELEGRAM_BOT_TOKEN (выдаёт @BotFather).'); process.exit(2); }
   let ledger;
   try { ledger = await prepareBot(); } catch {
-    console.error(`Запуск остановлен: не задана METRICS_SALT (не короче ${METRICS_SALT_MIN} знаков), нет ключа модели или тексты для участника (согласие, реплики бота) не окончательные при TITRY_RELEASE_REAL_DATA=1, не проверены контакты помощи (config/help.json), не найден Playwright, не запускается Chromium (TITRY_CHROMIUM) или ffmpeg (FFMPEG), не подтверждена очистка временных файлов или хранилище запретов (${KEY_ENV}, ${KEY_VERSION_ENV}). Задачи не принимаются. Остатки tmp и файл хранилища не удаляйте вручную без владельца кода.`);
+    console.error(`Запуск остановлен: не задана METRICS_SALT (не короче ${METRICS_SALT_MIN} знаков), нет ключа модели или тексты для участника (согласие, реплики бота) не окончательные при TITRY_RELEASE_REAL_DATA=1, неверный допуск закрытого теста (TITRY_CLOSED_TEST, TITRY_ALLOWED_CHATS, TITRY_STORIES_PER_DAY, TITRY_MODEL_CONCURRENCY; при TITRY_RELEASE_REAL_DATA=1 — обязателен закрытый режим), не проверены контакты помощи (config/help.json), не найден Playwright, не запускается Chromium (TITRY_CHROMIUM) или ffmpeg (FFMPEG), не подтверждена очистка временных файлов или хранилище запретов (${KEY_ENV}, ${KEY_VERSION_ENV}). Задачи не принимаются. Остатки tmp и файл хранилища не удаляйте вручную без владельца кода.`);
     process.exit(3);
   }
   const tg = telegram(token);
@@ -1446,8 +1488,10 @@ async function main() {
     { command: 'delete', description: 'Запросить удаление данных' },
   ] }).catch(() => {});
   console.log(`Бот @${me.username} запущен. Распознавание речи: ${sttAvailable() ? 'SpeechKit' : 'выключено'}.`);
-  const bot = createBot({ tg, ledger, renderTimeoutMs: renderTimeoutFromEnv(), botName: me.username });
-  setInterval(bot.sweep, 10 * 60 * 1000).unref();
+  const limits = admissionFromEnv();
+  const admission = limits && makeAdmission(limits);
+  const bot = createBot({ tg, ledger, admission, renderTimeoutMs: renderTimeoutFromEnv(), botName: me.username });
+  setInterval(() => { bot.sweep(); if (admission) admission.sweep(); }, 10 * 60 * 1000).unref();
   let offset = 0;
   for (;;) {
     try {

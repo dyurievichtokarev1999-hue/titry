@@ -59,7 +59,8 @@ test('выпуск для реальных данных: маркеров «[с�
 // Предмортем G0, п. 1: старт бота на реальных данных сам выполняет проверку — до очистки, хранилища и приёма сообщений.
 test('старт бота с TITRY_RELEASE_REAL_DATA=1: тексты не окончательные — отказ release_texts до очистки; в журнале только ключи', async () => {
   const lines = []; let cleaned = 0; let loaded = 0;
-  const env = { METRICS_SALT: 'test-salt-fictional-0001', TITRY_RELEASE_REAL_DATA: '1', ANTHROPIC_API_KEY: 'dummy-not-a-key' };
+  const env = { METRICS_SALT: 'test-salt-fictional-0001', TITRY_RELEASE_REAL_DATA: '1', ANTHROPIC_API_KEY: 'dummy-not-a-key',
+    TITRY_CLOSED_TEST: '1', TITRY_ALLOWED_CHATS: '1001', TITRY_STORIES_PER_DAY: '3', TITRY_MODEL_CONCURRENCY: '2' }; // вымышленный список
   // Контрольная заглушка: вымышленные тексты с незаполненным и условным полем (не зависят от текущих текстов).
   const texts = { CONSENT_TEXT: { pd: 'Пишите: [контакт оператора], срок [ждёт решения: срок].', ready: 'Голосом (если включено).' }, TEXT: { start: 'Привет.', fn: () => 'Пока.' } };
   const keys = ['CONSENT_TEXT.pd', 'CONSENT_TEXT.ready'];
