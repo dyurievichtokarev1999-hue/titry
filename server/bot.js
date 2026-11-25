@@ -13,6 +13,7 @@ import { renderEpisode, checkRenderer, ROOT, RENDER_TIMEOUT_MS, KILL_GRACE_MS, r
 import { logError, safeCode, logRenderTimeout } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS, cleanupVoiceOrphans } from './stt.js';
 import { processLedger, KEY_ENV, KEY_VERSION_ENV } from './ledger.js';
+import { makeHealth, writeHealth } from './health.js';
 import { CONSENT_TEXT, CONSENT_VERSION, consentSteps } from './consent.js';
 import { unfinishedTexts } from './release.js';
 
@@ -1425,7 +1426,8 @@ export async function prepareBot({ checkRender = checkRenderer, cleanup = cleanu
     if (removed) log(JSON.stringify({ at: new Date().toISOString(), level: 'info', stage: 'tmp.cleanup', removed }));
   } catch (e) { logError('tmp.cleanup', e); throw Object.assign(new Error('startup'), { code: safeCode(e), stage: 'tmp.cleanup' }); }
   const l = ledger || processLedger('bot', path.join(ROOT, 'data', 'state'));
-  try { await l.load(); } catch (e) { logError('ledger.load', e); throw Object.assign(new Error('startup'), { code: 'ledger', stage: 'ledger.load' }); }
+  // ledger_missing — файл запретов пропал после инициализации (план Критика 20.11, п. 5): старт закрыт до восстановления.
+  try { await l.load(); } catch (e) { logError('ledger.load', e); throw Object.assign(new Error('startup'), { code: e?.code === 'ledger_missing' ? 'ledger_missing' : 'ledger', stage: 'ledger.load' }); }
   return l;
 }
 
@@ -1448,16 +1450,24 @@ async function main() {
   console.log(`Бот @${me.username} запущен. Распознавание речи: ${sttAvailable() ? 'SpeechKit' : 'выключено'}.`);
   const bot = createBot({ tg, ledger, renderTimeoutMs: renderTimeoutFromEnv(), botName: me.username });
   setInterval(bot.sweep, 10 * 60 * 1000).unref();
+  // Снимок состояния для внешнего наблюдателя (Б6 п. 5): раз в минуту, без номеров и текстов; отправок наружу нет.
+  const health = makeHealth();
+  const healthFile = path.join(ROOT, 'data', 'health.json');
+  const snap = () => writeHealth(healthFile, health.snapshot({ stateHealthy: ledger.healthy() })).catch((e) => logError('health', e));
+  snap();
+  setInterval(snap, 60 * 1000).unref();
   let offset = 0;
   for (;;) {
     try {
       const updates = await tg.call('getUpdates', { offset, timeout: 30, allowed_updates: ['message', 'edited_message', 'callback_query'] });
+      health.pollOk();
       for (const u of updates) {
         offset = u.update_id + 1;
         bot.handleUpdate(u); // не ждём: рендер одного пользователя не блокирует ответы другим
       }
     } catch (e) {
       logError('poll', e);
+      health.pollFailed();
       await new Promise((r) => setTimeout(r, 3000));
     }
   }

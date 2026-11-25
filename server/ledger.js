@@ -80,7 +80,11 @@ export function makeLedger({ file, alsoRead = [], key, keyVersion, ttlMs = null,
   const same = (a, b) => a.scope_digest === b.scope_digest && a.story_digest === b.story_digest && a.kind === b.kind;
 
   /** Загрузка до приёма задач. Недописанный tmp после аварии — восстановление объединением (только строже). */
+  const marker = `${file}.init`; // метка «файл записывался»: пустой файл рядом с файлом запретов
+  let missing = false;
+  let marked = false;
   async function load() {
+    missing = false;
     // Ключ — не короче 16 символов (пустой или случайно короткий ключ — закрытый отказ).
     if (!key || String(key).length < 16 || !keyVersion) { state = 'failed'; throw ledgerError(); }
     try {
@@ -90,7 +94,13 @@ export function makeLedger({ file, alsoRead = [], key, keyVersion, ttlMs = null,
       try { await fsImpl.chmod(file, 0o600); } catch (e) { if (e?.code !== 'ENOENT') throw e; }
       let main = [];
       try { main = parse(await fsImpl.readFile(file, 'utf8')); }
-      catch (e) { if (e?.code !== 'ENOENT') throw ledgerError(); }
+      catch (e) {
+        if (e?.code !== 'ENOENT') throw ledgerError();
+        // План Критика реализации 20.11, п. 5: отличить первый запуск от пропажи файла после записи.
+        // Метка есть, файла нет — файл пропал: закрытый отказ, а не молчаливый старт с пустым хранилищем.
+        try { await fsImpl.stat(marker); missing = true; } catch (m) { if (m?.code !== 'ENOENT') throw ledgerError(); }
+        if (missing) throw ledgerError();
+      }
       // Чужие файлы (alsoRead) только читаются и объединяются (только строже); пишем всегда лишь в свой file.
       for (const f of alsoRead) {
         let extra = [];
@@ -110,13 +120,14 @@ export function makeLedger({ file, alsoRead = [], key, keyVersion, ttlMs = null,
       }
       records = main.filter((r) => live(r, wallNow()));
       state = 'ready';
+
       if (tmps.length) {
         await write();
         for (const n of tmps) await fsImpl.rm(path.join(dir, n), { force: true });
       }
     } catch {
       state = 'failed';
-      throw ledgerError();
+      throw missing ? Object.assign(ledgerError(), { code: 'ledger_missing' }) : ledgerError();
     }
   }
 
@@ -128,6 +139,8 @@ export function makeLedger({ file, alsoRead = [], key, keyVersion, ttlMs = null,
     const fh = await fsImpl.open(tmp, 'wx', 0o600);
     try { await fh.writeFile(JSON.stringify(doc)); await fh.sync(); } finally { await fh.close(); }
     await fsImpl.rename(tmp, file);
+    // Метка «файл записывался» (пустая, без данных): без неё пропажа файла неотличима от первого запуска.
+    if (!marked) { await fsImpl.writeFile(marker, '', { mode: 0o600 }); marked = true; }
     const d = await fsImpl.open(dir, 'r');
     try { await d.sync(); } finally { await d.close(); }
   }
