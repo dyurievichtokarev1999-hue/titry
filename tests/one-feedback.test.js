@@ -174,3 +174,36 @@ test('ответ Telegram на отправку потерялся, отклик
   const id2 = k2.miss.split(':')[3];
   assert.equal(log.filter((r) => r.e === 'render' && r.video === id2).length, 1);
 });
+
+// Разборы 8bf68b4: render — ровно один и раньше откликов; сбой render не оставляет отклик без пары; цикл доставки.
+test('нажатие до ответа Telegram, потом подтверждение; два быстрых нажатия — один render, раньше откликов', async () => {
+  let release; const gate = new Promise((r) => { release = r; });
+  const t = setup({ sendGate: gate });
+  const { k, done } = await t.startVideo();
+  const a = t.click(k.fit); const b = t.click(k.heavier);
+  release(); await done; await a; await b;
+  const id = k.fit.split(':')[3];
+  const rows = t.log.filter((r) => r.video === id).map((r) => r.e);
+  assert.deepEqual(rows, ['render', 'feedback', 'feedback'], 'render один и первым');
+});
+
+test('сбой записи render при отклике — отклик не записан; повторное нажатие пишет обе записи', async () => {
+  let fail = 1;
+  const log = []; const offered = [];
+  const tg = { send: async () => {}, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''),
+    sendVideo: async (c, f, extra, o = {}) => { offered.push(extra); if (o.ready && !(await o.ready())) return null; throw Object.assign(new Error('ответ потерян'), { code: 'timeout' }); } };
+  const metrics = { hash: () => 'qa-fictional', forget: async () => {},
+    log: async (c, e, x) => { if (e === 'render' && fail-- > 0) throw Object.assign(new Error('диск'), { code: 'ENOSPC' }); if (e === 'feedback' || e === 'render') log.push(e); } };
+  const bot = createBot({ tg, metrics, safetyCheck: async () => false, checkRetryMs: 0,
+    draft: async () => ({ episode: structuredClone(ex.episode), risk: { level: 'none' }, provider: 'claude', dropped: [] }),
+    render: async (e, o) => ({ seconds: 1, duration: 24, outPath: o.outPath }) });
+  const chat = { id: 94003, type: 'private' };
+  const click = (data) => bot.handleUpdate({ callback_query: { id: 'q', data, message: { chat } } });
+  await bot.handleUpdate({ message: { chat, text: ex.story } });
+  await click(`play:${bot.sessions.get(chat.id).draftId}`);
+  const heavier = offered.at(-1).reply_markup.inline_keyboard[0].find((x) => x.callback_data.startsWith('fb:heavier')).callback_data;
+  await click(heavier);
+  assert.deepEqual(log, [], 'render не записался — и отклика нет');
+  await click(heavier);
+  assert.deepEqual(log, ['render', 'feedback']);
+});

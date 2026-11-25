@@ -1032,7 +1032,7 @@ test('отклик под роликом: чужое значение не пи�
   await consentAll(b, ['pd', 'age']);
   const cycle = b.s().consent.cycle;
   const ids = ['0000000a', '0000000b', '0000000c']; // три доставленных ролика: по одному отклику на каждый
-  b.s().feedbackFor = new Map(ids.map((id) => [id, { cycle, done: new Set(), rendered: true }])); // доставлены, render записан
+  b.s().feedbackFor = new Map(ids.map((id) => [id, { cycle, done: new Set(), renderP: Promise.resolve() }])); // доставлены, render записан
   for (const v of ['вымышленный текст', 'fit2', '', 'heavier ']) {
     const n = b.sent.length; const events = b.events.length;
     await b.press(`fb:${v}:${cycle}:${ids[0]}`);
