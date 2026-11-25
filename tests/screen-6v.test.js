@@ -69,3 +69,32 @@ test('6В — черновик: маркер «на согласование с 
   assert.ok(!unfinishedTexts({ CONSENT_TEXT: { abroadDeclined: CONSENT_TEXT.abroadDeclined } }).length, 'ответ на отказ — без полей');
   assert.match(CONSENT_TEXT.intro, /два согласия/);
 });
+
+// Разборы dec5ea1: отказ на 6В и прежняя логика отказов.
+test('«Да» на 6Б → «Не сейчас» на 6В → /start → «Нет» на возрасте: «отметки удалены» и удаление метрик', async () => {
+  const t = bot();
+  await t.toAbroad(); await t.press('abroad', 'no');
+  await t.say('/start'); await t.press('age', 'no');
+  assert.equal(t.sent.at(-1).text, CONSENT_TEXT.ageDeleted, 'согласие 6Б было — сообщаем об удалении');
+  assert.equal(t.forgot(), 1);
+});
+
+test('«Да» на 6Б → /start прямо на экране 6В → «Нет» на возрасте: «отметки удалены»', async () => {
+  const t = bot();
+  await t.toAbroad(); await t.say('/start'); await t.press('age', 'no');
+  assert.equal(t.sent.at(-1).text, CONSENT_TEXT.ageDeleted);
+});
+
+test('полное согласие → /start → «Не сейчас» на 6В: метрики не удаляются; затем /start → «Нет» на возрасте — удаляются', async () => {
+  const t = bot();
+  await t.toAbroad(); await t.press('abroad', 'yes');
+  await t.say('/start');
+  await t.press('age', 'yes'); await t.press('intro', 'next'); await t.press('pd', 'yes'); await t.press('abroad', 'no');
+  assert.equal(t.forgot(), 0, 'отказ от передачи — не отзыв согласия на обработку');
+  const events = t.events.length;
+  await t.say('Утром убежал кофе.');
+  assert.equal(t.events.length, events, 'после отказа на 6В метрики не пишутся');
+  await t.say('/start'); await t.press('age', 'no');
+  assert.deepEqual(t.texts().slice(-2), [CONSENT_TEXT.ageDeclined, CONSENT_TEXT.ageDeleted]);
+  assert.equal(t.forgot(), 1);
+});
