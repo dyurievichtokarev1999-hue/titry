@@ -15,8 +15,9 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const bad = (what) => Object.assign(new Error(`admission: ${what}`), { code: 'admission_config' });
 // Переполнение («9» × 309 → Infinity) и числа выше MAX_SAFE_INTEGER — ошибка, а не «нет предела» (QA PR 40 25230f9).
 const positive = (v, name) => {
-  const n = Number(String(v ?? '').trim());
-  if (!/^\d+$/.test(String(v ?? '').trim()) || !Number.isSafeInteger(n) || n < 1) throw bad(`${name} — целое число не меньше 1`);
+  const s = String(v ?? '').trim();
+  const n = Number(s);
+  if (!/^\d+$/.test(s) || !Number.isSafeInteger(n) || n < 1) throw bad(`${name} — целое число от 1 до ${Number.MAX_SAFE_INTEGER}`);
   return n;
 };
 

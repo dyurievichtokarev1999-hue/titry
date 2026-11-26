@@ -106,7 +106,8 @@ test('конфигурация: открытый режим без предел�
     { TITRY_CLOSED_TEST: '1', TITRY_ALLOWED_CHATS: '1001', TITRY_STORIES_PER_DAY: '3' },
     { TITRY_ALLOWED_CHATS: '1001' },
     { TITRY_STORIES_PER_DAY: 'много' },
-    // QA PR 40 25230f9: переполнение и число выше MAX_SAFE_INTEGER — не «нет предела», а ошибка; для каждого порога
+    // QA PR 40 25230f9: переполнение и число выше MAX_SAFE_INTEGER — не «нет предела», а ошибка; для каждого порога.
+    // Для TITRY_MODEL_WAIT_MS случаи только закрепляют поведение: их отсекал и прежний предел 30000.
     ...['TITRY_STORIES_PER_DAY', 'TITRY_MODEL_CONCURRENCY', 'TITRY_MODEL_WAIT_MS'].flatMap((k) => ['9'.repeat(309), String(Number.MAX_SAFE_INTEGER + 1) + '0'].map((v) => (
       { TITRY_CLOSED_TEST: '1', TITRY_ALLOWED_CHATS: '1001', TITRY_STORIES_PER_DAY: '3', TITRY_MODEL_CONCURRENCY: '2', [k]: v }))),
   ]) assert.throws(() => admissionFromEnv(env), { code: 'admission_config' }, JSON.stringify(env));
