@@ -705,7 +705,7 @@ export function createBot({
     }
     // Было ли согласие до этого отказа (в этом прохождении или раньше в сессии). После отказа признак сбрасывается:
     // повторный отказ до нового согласия не сообщает об удалении снова (QA PR 34 324cc87). Синхронно, до отправок.
-    const had = Object.keys(c.given).length > 0 || !!s.consentedBefore; // «Да», которое ещё пишется, отзовёт settle()
+    const had = Object.keys(c.given).length > 0 || !!s.consentedBefore || consentedChats.has(chatId); // «Да», которое ещё пишется, отзовёт settle()
     s.consentedBefore = false;
     consentedChats.delete(chatId);
     revokeMarks(chatId); // поздняя «да» просроченной попытки после этого отказа будет отозвана

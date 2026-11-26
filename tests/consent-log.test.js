@@ -322,10 +322,12 @@ test('модуль: запись висит дольше предела — но
     const queued = log.record(1, { step: 'pd', answer: 'withdraw', version: 'v' }); // ещё не зависла — встаёт в очередь
     t = 2000;
     await assert.rejects(log.record(1, { step: 'abroad', answer: 'yes', version: 'v' }), { code: 'consent_log_stuck' });
+    const late = log.record(2, { step: 'delete', answer: 'withdraw', version: 'v' }); // отзыв при зависании — в очередь
     first(); await hung;
     (await held())(); await queued;
+    (await held())(); await late;
   } finally { fs.appendFile = orig; }
-  assert.deepEqual((await read(file)).map((r) => `${r.step}:${r.answer}`), ['age:yes', 'pd:yes', 'pd:withdraw']);
+  assert.deepEqual((await read(file)).map((r) => `${r.step}:${r.answer}`), ['age:yes', 'pd:yes', 'pd:withdraw', 'delete:withdraw'], 'отзыв во время зависания не потерян');
   await log.record(1, { step: 'delete', answer: 'withdraw', version: 'v' }); // после освобождения — снова пишет
   assert.equal((await read(file)).at(-1).step, 'delete');
 });
@@ -339,6 +341,15 @@ test('/delete после истечения сессии: отзыв пишет�
   const n = rows.length;
   await t.say('/delete'); await flush();
   assert.equal(rows.length, n, 'повторный /delete без нового согласия — без записи');
+});
+test('после истечения сессии /start → «Нет» на возрасте — отзыв и текст ageDeleted, как при живой сессии', async () => {
+  const rows = [];
+  const t = bot({ record: async (id, m) => { rows.push(`${m.step}:${m.answer}`); } });
+  await t.consent();
+  t.b.sessions.delete(93201);
+  await t.say('/start'); await t.press('age', 'no'); await flush();
+  assert.equal(rows.at(-1), 'age:withdraw');
+  assert.equal(t.sent.at(-1).text, CONSENT_TEXT.ageDeleted);
 });
 
 test('ответ «отметки удалены» помечен на согласование: проверка выпуска не пропускает', async () => {

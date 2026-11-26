@@ -20,7 +20,7 @@ export async function probeConsentLog(file) {
 /** Запись дольше этого — зависла (диск, сеть): новые отметки отклоняются сразу, а не копятся за ней. */
 export const CONSENT_STUCK_MS = 30 * 1000;
 
-export function makeConsentLog(file, { hash, now = () => new Date(), stuckMs = CONSENT_STUCK_MS, clock = Date.now }) {
+export function makeConsentLog(file, { hash, now = () => new Date(), stuckMs = CONSENT_STUCK_MS, clock = () => performance.now() }) {
   if (typeof hash !== 'function') throw new Error('consent-log: нужна функция кода участника');
   let ops = Promise.resolve();
   let busySince = 0; // время начала текущей записи; 0 — записи нет
@@ -28,9 +28,10 @@ export function makeConsentLog(file, { hash, now = () => new Date(), stuckMs = C
     /** Записать отметку. Промис отклоняется при сбое записи: вызывающий решает, засчитывать ли шаг. */
     record(chatId, { step, answer, version }) {
       if (!STEPS.has(step) || !ANSWERS.has(answer)) return Promise.reject(Object.assign(new Error('consent-log: неизвестная отметка'), { code: 'consent_bad_mark' }));
-      // Очередь не обгоняет зависшую запись: порядок строк (да → отзыв) важнее. Пока она висит, отметки не принимаются —
-      // «Да» не засчитывается, бот отвечает «не получилось сохранить»; отказ и /delete не задерживаются (сбой в журнал ошибок).
-      if (busySince && clock() - busySince > stuckMs) return Promise.reject(Object.assign(new Error('consent-log: запись зависла'), { code: 'consent_log_stuck' }));
+      // Очередь не обгоняет зависшую запись: порядок строк (да → отзыв) важнее. Пока она висит, новые «да» отклоняются
+      // сразу — шаг не засчитывается, бот отвечает «не получилось сохранить». Отказ и отзыв встают в очередь, как раньше:
+      // они запишутся после освобождения (человека это не задерживает — бот их не ждёт), отзыв не теряется.
+      if (answer === 'yes' && busySince && clock() - busySince > stuckMs) return Promise.reject(Object.assign(new Error('consent-log: запись зависла'), { code: 'consent_log_stuck' }));
       const line = `${JSON.stringify({ at: now().toISOString(), participant: hash(chatId), step, answer, version: String(version || '') })}\n`;
       const run = ops.then(async () => {
         busySince = clock();
