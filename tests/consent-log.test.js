@@ -264,6 +264,48 @@ test('просрочка «Да» на 6Б, /start, поздняя запись 
   assert.deepEqual(pd, ['pd:yes', 'pd:withdraw', 'pd:yes'], 'старая «да» отозвана до новой; последняя отметка 6Б — «да»');
 });
 
+// QA PR 39 3548ae8: /delete заменяет сессию; поздняя запись первой попытки не должна отзывать «Да» новой сессии.
+test('просрочка «Да» на возрасте, /delete, /start, «Да» принято, поздняя запись — отзыва после нового «Да» нет', async (ctx) => {
+  ctx.mock.timers.enable({ apis: ['setTimeout'] });
+  const l = slowPd('age');
+  const t = bot({ record: l.record });
+  await t.say('/start');
+  await timeout(ctx, t.press('age', 'yes'));
+  await t.say('/delete');
+  await t.say('/start');
+  const retry = t.press('age', 'yes'); await flush();
+  l.release(); await retry; await flush();
+  assert.equal(t.step(), 'intro');
+  assert.equal(l.rows.filter((r) => r.startsWith('age:')).at(-1), 'age:yes', 'последняя отметка возраста — «да»');
+});
+test('просрочка «Да» на 6Б, /delete, новое прохождение до 6Б, поздняя запись — отзыва после нового «Да» нет', async (ctx) => {
+  ctx.mock.timers.enable({ apis: ['setTimeout'] });
+  const l = slowPd();
+  const t = bot({ record: l.record });
+  await t.say('/start'); await t.press('age', 'yes'); await t.press('intro', 'next');
+  await timeout(ctx, t.press('pd', 'yes'));
+  await t.say('/delete');
+  await t.say('/start');
+  const a = t.press('age', 'yes'); await flush();
+  l.release(); await a; await flush();
+  await t.press('intro', 'next'); await t.press('pd', 'yes'); await flush();
+  assert.equal(t.step(), 'abroad');
+  assert.equal(l.rows.filter((r) => r.startsWith('pd:')).at(-1), 'pd:yes');
+});
+test('просрочка «Да» на 6В, /delete, повтор в новой сессии принят до поздней записи — последняя отметка 6В «да»', async (ctx) => {
+  ctx.mock.timers.enable({ apis: ['setTimeout'] });
+  const l = slowPd('abroad');
+  const t = bot({ record: l.record });
+  await t.say('/start'); await t.press('age', 'yes'); await t.press('intro', 'next'); await t.press('pd', 'yes');
+  await timeout(ctx, t.press('abroad', 'yes'));
+  await t.say('/delete');
+  await t.say('/start');
+  const a = t.press('age', 'yes'); await flush();
+  l.release(); await a; await flush();
+  await t.press('intro', 'next'); await t.press('pd', 'yes'); await t.press('abroad', 'yes'); await flush();
+  assert.equal(t.step(), 'done');
+  assert.equal(l.rows.filter((r) => r.startsWith('abroad:')).at(-1), 'abroad:yes');
+});
 test('ответ «отметки удалены» помечен на согласование: проверка выпуска не пропускает', async () => {
   const { unfinishedTexts } = await import('../server/release.js');
   assert.ok(unfinishedTexts({ CONSENT_TEXT }).includes('CONSENT_TEXT.ageDeleted'));
