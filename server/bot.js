@@ -627,6 +627,10 @@ export function createBot({
   // Состояние записей отметок — по участнику (чату), а не по сессии или прохождению: /start и /delete между
   // просроченной попыткой и повтором не должны давать отзыв после принятого повтора (QA PR 39 3548ae8).
   // Запись о чате живёт, пока по нему есть записи «да» в работе или ожидание; потом удаляется.
+  // Чаты, где в этом процессе было дано согласие 6Б и не отозвано: /delete пишет отзыв и после того, как сессия
+  // истекла (3 ч без сообщений). После перезапуска программы набор пуст — тогда, как и раньше, отзыв не пишется.
+  // Только номера чатов в памяти; размер — число участников теста.
+  const consentedChats = new Set();
   const consentMarks = new Map(); // chatId → { [step]: { waiting, inflight, accepted, dirty } }
   // Отзыв или новое прохождение (/start): засчитанные шаги больше не действуют — поздняя запись «да» по ним получит
   // отзыв (settle), если шаг не засчитан снова.
@@ -686,7 +690,7 @@ export function createBot({
     if (answer === 'next' || answer === 'yes') {
       if (step === 'pd' || step === 'abroad') c.given[step] = { at: now().toISOString(), version: CONSENT_VERSION };
       // Согласие в этой сессии было дано (для ответа на отказ после /start): с «Да» на 6Б — оно остаётся и после отказа на 6В.
-      if (step === 'pd' || next === 'done') s.consentedBefore = true;
+      if (step === 'pd' || next === 'done') { s.consentedBefore = true; consentedChats.add(chatId); }
       return consentScreen(chatId, s, next);
     }
     c.step = 'declined'; // отказ без прежнего согласия не храним; дальше бот ничего не спрашивает и не напоминает
@@ -703,6 +707,7 @@ export function createBot({
     // повторный отказ до нового согласия не сообщает об удалении снова (QA PR 34 324cc87). Синхронно, до отправок.
     const had = Object.keys(c.given).length > 0 || !!s.consentedBefore; // «Да», которое ещё пишется, отзовёт settle()
     s.consentedBefore = false;
+    consentedChats.delete(chatId);
     revokeMarks(chatId); // поздняя «да» просроченной попытки после этого отказа будет отозвана
     // Отказ после данного согласия — отзыв: отметка в хранилище (А7). Сбой записи отказ не задерживает.
     if (had) mark(chatId, step, 'withdraw').catch((e) => logError('consent.withdraw', e));
@@ -1168,7 +1173,8 @@ export function createBot({
     if (bare === 'delete') {
       // Согласие в этой сессии было — запрос удаления пишется как отзыв (А7); /delete отметки не стирает.
       // Без согласия в сессии (или после перезапуска) записи нет. Сбой записи удаление не задерживает.
-      const consented = !!(s.consentedBefore || Object.keys(s.consent?.given || {}).length || s.consent?.marking);
+      const consented = !!(s.consentedBefore || Object.keys(s.consent?.given || {}).length || s.consent?.marking || consentedChats.has(chatId));
+      consentedChats.delete(chatId);
       sessions.delete(chatId);
       revokeMarks(chatId);
       if (consented) mark(chatId, 'delete', 'withdraw').catch((e) => logError('consent.withdraw', e));
