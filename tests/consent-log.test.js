@@ -312,16 +312,18 @@ test('модуль: запись висит дольше предела — но
   let t = 1;
   const log = makeConsentLog(file, { hash: () => 'participant-a', stuckMs: 1000, clock: () => t });
   await log.record(1, { step: 'age', answer: 'yes', version: 'v' });
-  const orig = fs.appendFile; let release;
+  const orig = fs.appendFile; let release = null;
   fs.appendFile = async (...a) => { await new Promise((r) => { release = r; }); return orig(...a); };
+  const held = async () => { for (let i = 0; i < 1000 && !release; i++) await new Promise((r) => setImmediate(r)); const r = release; release = null; assert.ok(r, 'запись дошла до appendFile'); return r; };
   try {
     const hung = log.record(1, { step: 'pd', answer: 'yes', version: 'v' });
-    await flush();
+    const first = await held();
     t = 500;
     const queued = log.record(1, { step: 'pd', answer: 'withdraw', version: 'v' }); // ещё не зависла — встаёт в очередь
     t = 2000;
     await assert.rejects(log.record(1, { step: 'abroad', answer: 'yes', version: 'v' }), { code: 'consent_log_stuck' });
-    release(); await hung; await flush(); release(); await queued;
+    first(); await hung;
+    (await held())(); await queued;
   } finally { fs.appendFile = orig; }
   assert.deepEqual((await read(file)).map((r) => `${r.step}:${r.answer}`), ['age:yes', 'pd:yes', 'pd:withdraw']);
   await log.record(1, { step: 'delete', answer: 'withdraw', version: 'v' }); // после освобождения — снова пишет
