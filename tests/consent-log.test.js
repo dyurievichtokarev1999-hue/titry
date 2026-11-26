@@ -290,9 +290,9 @@ test('просрочка «Да» на 6Б, /delete, новое прохожде
   l.release(); await a; await flush();
   await t.press('intro', 'next'); await t.press('pd', 'yes'); await flush();
   assert.equal(t.step(), 'abroad');
-  assert.equal(l.rows.filter((r) => r.startsWith('pd:')).at(-1), 'pd:yes');
+  assert.deepEqual(l.rows.filter((r) => r.startsWith('pd:')), ['pd:yes', 'pd:withdraw', 'pd:yes'], 'поздняя «да» удалённой сессии отозвана до нового согласия');
 });
-test('просрочка «Да» на 6В, /delete, повтор в новой сессии принят до поздней записи — последняя отметка 6В «да»', async (ctx) => {
+test('просрочка «Да» на 6В, /delete, новое прохождение до 6В, поздняя запись — последняя отметка 6В «да»', async (ctx) => {
   ctx.mock.timers.enable({ apis: ['setTimeout'] });
   const l = slowPd('abroad');
   const t = bot({ record: l.record });

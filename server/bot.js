@@ -653,8 +653,7 @@ export function createBot({
       // Итог по шагу, а не по попытке (QA PR 39 c0d69be): «да» просроченной попытки может записаться позже повторной.
       // Отзыв пишется, когда шаг не засчитан, его никто не ждёт и после последнего отзыва записалась хоть одна «да»:
       // поздняя запись первой попытки не отменит принятое повторное согласие, а одинокая просроченная — отзывается.
-      if (!consentMarks.has(chatId)) consentMarks.set(chatId, {});
-      const marks = consentMarks.get(chatId);
+      const marks = consentMarks.get(chatId) ?? consentMarks.set(chatId, {}).get(chatId);
       const r = marks[step] ||= { waiting: 0, inflight: 0, accepted: false, dirty: false };
       const settle = () => {
         if (!r.waiting && !r.accepted && r.dirty) {
