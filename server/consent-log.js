@@ -28,6 +28,23 @@ export function makeConsentLog(file, { hash, now = () => new Date(), stuckMs = C
   let ops = Promise.resolve();
   let busySince = 0; // время начала текущей записи; 0 — записи нет
   return {
+    /** Действует ли согласие 6Б участника по журналу: после последнего отзыва есть «да» на шаге pd. Читается после
+     *  записей, уже стоящих в очереди. Нужен /delete после перезапуска, когда память процесса пуста. */
+    active(chatId) {
+      const who = hash(chatId);
+      return ops.then(async () => {
+        const text = await fs.readFile(file, 'utf8').catch((e) => { if (e.code === 'ENOENT') return ''; throw e; });
+        let on = false;
+        for (const line of text.split('\n')) {
+          if (!line) continue;
+          let r; try { r = JSON.parse(line); } catch { continue; }
+          if (r.participant !== who) continue;
+          if (r.answer === 'withdraw') on = false;
+          else if (r.step === 'pd' && r.answer === 'yes') on = true;
+        }
+        return on;
+      });
+    },
     /** Записать отметку. Промис отклоняется при сбое записи: вызывающий решает, засчитывать ли шаг. */
     record(chatId, { step, answer, version }) {
       if (!STEPS.has(step) || !ANSWERS.has(answer)) return Promise.reject(Object.assign(new Error('consent-log: неизвестная отметка'), { code: 'consent_bad_mark' }));
