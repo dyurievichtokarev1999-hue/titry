@@ -450,6 +450,16 @@ test('журнал: оборванный хвост без перевода ст
   assert.equal(`${last.step}:${last.answer}`, 'pd:yes');
   assert.equal(await log.active(1), true, 'согласие 6Б видно по журналу');
 });
+test('сбой записи «Да» на 6Б (могла лечь без перевода строки) — шаг не засчитан, служебный отзыв pd:withdraw', async () => {
+  const rows = []; let fail = true;
+  const t = bot({ record: async (id, m) => { if (fail && m.step === 'pd' && m.answer === 'yes') { fail = false; throw Object.assign(new Error('диск'), { code: 'ENOSPC' }); } rows.push(`${m.step}:${m.answer}`); } });
+  await t.say('/start'); await t.press('age', 'yes'); await t.press('intro', 'next'); await t.press('pd', 'yes'); await flush();
+  assert.equal(t.step(), 'pd');
+  assert.equal(rows.at(-1), 'pd:withdraw');
+  await t.press('pd', 'yes'); await flush();
+  assert.equal(t.step(), 'abroad', 'повтор засчитан');
+  assert.equal(rows.at(-1), 'pd:yes');
+});
 // Граница защиты чтения вне списка (критика PR 45, принято частично): в пределах кеша; при 10 000 записях — сброс.
 test('чат вне списка: «не чаще раза в 10 минут» — в пределах кеша; при заполнении кеша защита сбрасывается', async () => {
   const { makeAdmission } = await import('../server/admission.js');

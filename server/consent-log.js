@@ -44,9 +44,11 @@ export function makeConsentLog(file, { hash, now = () => new Date(), stuckMs = C
   };
   // Файл кончается не переводом строки (процесс упал или диск кончился посреди дозаписи) — новая строка начинается с
   // перевода строки: иначе она склеилась бы с обрывком, и при разборе журнала пропали бы обе (решение Claude 27.11).
+  // Пишет журнал один процесс (Telegram и так не отдаёт обновления двум сразу): проверка и дозапись не атомарны между процессами.
   const endsClean = async () => {
     let fh;
-    try { fh = await fs.open(file, 'r'); } catch (e) { if (e.code === 'ENOENT') return true; throw e; }
+    // Нет файла — чисто; не прочитать хвост (права) — считаем оборванным: лишний перевод строки безвреден.
+    try { fh = await fs.open(file, 'r'); } catch (e) { return e.code === 'ENOENT'; }
     try {
       const { size } = await fh.stat();
       if (!size) return true;

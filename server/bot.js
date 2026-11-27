@@ -703,7 +703,9 @@ export function createBot({
       };
       r.waiting++; r.inflight++;
       const write = mark(chatId, step, 'yes');
-      write.then(() => { r.inflight--; r.dirty = true; settle(); }, () => { r.inflight--; settle(); });
+      // Сбой записи «да» — тоже dirty: строка могла лечь в файл целиком без перевода строки, а следующая запись сделает её
+      // читаемой (consent-log, перевод строки перед дозаписью). Шаг не засчитан — отзыв; лишний отзыв безвреден.
+      write.then(() => { r.inflight--; r.dirty = true; settle(); }, () => { r.inflight--; r.dirty = true; settle(); });
       let timer;
       const limit = new Promise((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error('consent-log: нет ответа'), { code: 'timeout' })), CONSENT_RECORD_MS); });
       try { await Promise.race([write, limit]); } catch (e) {
