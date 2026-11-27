@@ -1185,6 +1185,16 @@ export function createBot({
   }
 
   // Ответ на /delete — и для чатов вне списка закрытого теста.
+  // /delete — отзыв согласия (решение Дмитрия): отметка withdraw, если согласие давали — в этой сессии или в этом процессе
+  // (consentedChats). Одинаково для участника и для чата, убранного из списка допуска (решение Claude 27.11).
+  function deleteRequest(chatId, s = sessions.get(chatId)) {
+    const consented = !!(s?.consentedBefore || Object.keys(s?.consent?.given || {}).length || s?.consent?.marking || consentedChats.has(chatId));
+    consentedChats.delete(chatId);
+    sessions.delete(chatId);
+    revokeMarks(chatId);
+    if (consented) mark(chatId, 'delete', 'withdraw').catch((e) => logError('consent.withdraw', e));
+    return deleteReply(chatId);
+  }
   async function deleteReply(chatId) {
     // Честный ответ (редактор 16:24): «удалены» — только если удаление сессии и статистики подтверждено.
     // Запрет safety по /delete не снимается; если они есть, полное удаление не подтверждается.
@@ -1209,7 +1219,7 @@ export function createBot({
     const text = cleanInput(msg.text || msg.caption || '').trim();
     const cmd = parseCommand(text);
     const bare = cmd && !cmd.tail && KNOWN_COMMANDS.has(cmd.name) ? cmd.name : null;
-    if (bare === 'delete') return deleteReply(chatId);
+    if (bare === 'delete') return deleteRequest(chatId);
     if (bare === 'help') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });
     const level = text ? assessRisk(cmd ? cmd.tail || text : text).level : 'none';
     if (level === 'urgent') return tg.send(chatId, helpMessage('urgent'));
@@ -1244,12 +1254,7 @@ export function createBot({
     if (bare === 'delete') {
       // Согласие в этой сессии было — запрос удаления пишется как отзыв (А7); /delete отметки не стирает.
       // Без согласия в сессии (или после перезапуска) записи нет. Сбой записи удаление не задерживает.
-      const consented = !!(s.consentedBefore || Object.keys(s.consent?.given || {}).length || s.consent?.marking || consentedChats.has(chatId));
-      consentedChats.delete(chatId);
-      sessions.delete(chatId);
-      revokeMarks(chatId);
-      if (consented) mark(chatId, 'delete', 'withdraw').catch((e) => logError('consent.withdraw', e));
-      return deleteReply(chatId);
+      return deleteRequest(chatId, s);
     }
     if (bare === 'help') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });
     // До 6Ж и после отказа — ничего из сообщения не обрабатывается. Исключение — уже идущая доставка ролика

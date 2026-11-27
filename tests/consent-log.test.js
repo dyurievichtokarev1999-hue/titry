@@ -14,11 +14,11 @@ const STORY = 'Утром убежал кофе, днём полчаса иск�
 const tmpFile = async () => path.join(await fs.mkdtemp(path.join(os.tmpdir(), 'titry-consent-')), 'data', 'consent.jsonl');
 const read = async (file) => (await fs.readFile(file, 'utf8').catch(() => '')).split('\n').filter(Boolean).map((l) => JSON.parse(l));
 
-function bot(consentLog) {
+function bot(consentLog, extra = {}) {
   const sent = []; let forgot = 0;
   const tg = { send: async (c, text, extra) => { sent.push({ text, extra }); }, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''), sendVideo: async () => {} };
   const metrics = { hash: () => 'participant-a', log: async () => {}, forget: async () => { forgot++; } };
-  const b = createBot({ tg, metrics, consentLog, safetyCheck: async () => false, checkRetryMs: 0, draft: async () => ({ episode: null }), render: async () => ({}) });
+  const b = createBot({ tg, metrics, consentLog, safetyCheck: async () => false, checkRetryMs: 0, draft: async () => ({ episode: null }), render: async () => ({}), ...extra });
   const chat = { id: 93201, type: 'private' };
   const cycle = () => b.sessions.get(chat.id).consent.cycle;
   const press = (step, a) => b.handleUpdate({ callback_query: { id: 'q', data: `cs:${step}:${a}:${cycle()}`, message: { chat } } });
@@ -350,6 +350,30 @@ test('после истечения сессии /start → «Нет» на во
   await t.say('/start'); await t.press('age', 'no'); await flush();
   assert.equal(rows.at(-1), 'age:withdraw');
   assert.equal(t.sent.at(-1).text, CONSENT_TEXT.ageDeleted);
+});
+
+// Решение Claude 27.11 (стык PR 40 и PR 44): /delete — отзыв и для чата, убранного из списка допуска после согласия.
+test('согласился → убран из списка закрытого теста → /delete → отзыв записан; сессия удалена', async () => {
+  const { makeAdmission } = await import('../server/admission.js');
+  const allowed = new Set(['93201']);
+  const rows = [];
+  const t = bot({ record: async (id, m) => { rows.push(`${m.step}:${m.answer}`); } }, { admission: makeAdmission({ allowed, perDay: 5, concurrency: 1 }) });
+  await t.consent();
+  assert.equal(t.step(), 'done');
+  allowed.delete('93201'); // организатор убрал чат из TITRY_ALLOWED_CHATS (в тесте — без перезапуска)
+  await t.say('/delete'); await flush();
+  assert.equal(rows.at(-1), 'delete:withdraw');
+  assert.equal(t.b.sessions.has(93201), false, 'сессия удалена');
+  const n = rows.length;
+  await t.say('/delete'); await flush();
+  assert.equal(rows.length, n, 'повторный /delete без согласия — без записи');
+});
+test('чат вне списка, согласия не давал — /delete без отметки', async () => {
+  const { makeAdmission } = await import('../server/admission.js');
+  const rows = [];
+  const t = bot({ record: async (id, m) => { rows.push(`${m.step}:${m.answer}`); } }, { admission: makeAdmission({ allowed: new Set(['1']), perDay: 5, concurrency: 1 }) });
+  await t.say('/delete'); await flush();
+  assert.deepEqual(rows, []);
 });
 
 test('ответ «отметки удалены» помечен на согласование: проверка выпуска не пропускает', async () => {
