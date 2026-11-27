@@ -19,7 +19,7 @@ export async function probeConsentLog(file) {
 
 /** Запись дольше этого — зависла (диск, сеть). После этого новые подтверждения («да») не добавляются — отклоняются сразу.
  *  Отказы и отзывы по-прежнему ждут в очереди в памяти процесса и запишутся после освобождения; при перезапуске
- *  во время зависания они теряются. Очередь ограничена действиями участников закрытого теста. Признак зависания —
+ *  во время зависания они теряются. Очередь растёт от действий участников закрытого теста и /delete (его может прислать и чат вне списка). Признак зависания —
  *  код consent_log_stuck в журнале ошибок. */
 export const CONSENT_STUCK_MS = 30 * 1000;
 
@@ -27,7 +27,42 @@ export function makeConsentLog(file, { hash, now = () => new Date(), stuckMs = C
   if (typeof hash !== 'function') throw new Error('consent-log: нужна функция кода участника');
   let ops = Promise.resolve();
   let busySince = 0; // время начала текущей записи; 0 — записи нет
+  // Действует ли согласие 6Б участника по журналу: после последнего отзыва 6Б, 6Г («Нет» на возрасте) или /delete есть
+  // «да» на 6Б. Отзыв 6В — служебный, за поздней «да» на передачу — согласие 6Б не снимает. Вызывается внутри очереди.
+  const activeNow = async (who) => {
+    busySince = clock(); // зависшее чтение — тоже зависание: новые «да» отклоняются сразу
+    const text = await fs.readFile(file, 'utf8').catch((e) => { if (e.code === 'ENOENT') return ''; throw e; }).finally(() => { busySince = 0; });
+    let on = false;
+    for (const line of text.split('\n')) {
+      if (!line) continue;
+      let r; try { r = JSON.parse(line); } catch { continue; }
+      if (r.participant !== who) continue;
+      if (r.answer === 'withdraw' && r.step !== 'abroad') on = false;
+      else if (r.step === 'pd' && r.answer === 'yes') on = true;
+    }
+    return on;
+  };
+  const append = async (line) => {
+    busySince = clock();
+    try {
+      await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+      await fs.appendFile(file, line, { mode: 0o600 });
+    } finally { busySince = 0; }
+  };
+  const lineOf = (chatId, step, answer, version) => `${JSON.stringify({ at: now().toISOString(), participant: hash(chatId), step, answer, version: String(version || '') })}\n`;
+  const queue = (fn) => { const run = ops.then(fn); ops = run.catch(() => {}); return run; };
   return {
+    active: (chatId) => queue(() => activeNow(hash(chatId))),
+    /** Отзыв, если согласие 6Б по журналу действует: проверка и запись — одним звеном очереди (два /delete подряд —
+     *  одна строка). Нужен после перезапуска, когда память процесса пуста. true — отзыв записан. */
+    withdrawIfActive(chatId, { step, version }) {
+      if (!STEPS.has(step)) return Promise.reject(Object.assign(new Error('consent-log: неизвестная отметка'), { code: 'consent_bad_mark' }));
+      return queue(async () => {
+        if (!(await activeNow(hash(chatId)))) return false;
+        await append(lineOf(chatId, step, 'withdraw', version));
+        return true;
+      });
+    },
     /** Записать отметку. Промис отклоняется при сбое записи: вызывающий решает, засчитывать ли шаг. */
     record(chatId, { step, answer, version }) {
       if (!STEPS.has(step) || !ANSWERS.has(answer)) return Promise.reject(Object.assign(new Error('consent-log: неизвестная отметка'), { code: 'consent_bad_mark' }));
@@ -35,16 +70,8 @@ export function makeConsentLog(file, { hash, now = () => new Date(), stuckMs = C
       // сразу — шаг не засчитывается, бот отвечает «не получилось сохранить». Отказ и отзыв встают в очередь, как раньше:
       // они запишутся после освобождения (человека это не задерживает — бот их не ждёт), отзыв не теряется.
       if (answer === 'yes' && busySince && clock() - busySince > stuckMs) return Promise.reject(Object.assign(new Error('consent-log: запись зависла'), { code: 'consent_log_stuck' }));
-      const line = `${JSON.stringify({ at: now().toISOString(), participant: hash(chatId), step, answer, version: String(version || '') })}\n`;
-      const run = ops.then(async () => {
-        busySince = clock();
-        try {
-          await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-          await fs.appendFile(file, line, { mode: 0o600 });
-        } finally { busySince = 0; }
-      });
-      ops = run.catch(() => {});
-      return run;
+      const line = lineOf(chatId, step, answer, version); // время — нажатия, а не записи
+      return queue(() => append(line));
     },
   };
 }

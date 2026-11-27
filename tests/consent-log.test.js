@@ -14,11 +14,11 @@ const STORY = 'Утром убежал кофе, днём полчаса иск�
 const tmpFile = async () => path.join(await fs.mkdtemp(path.join(os.tmpdir(), 'titry-consent-')), 'data', 'consent.jsonl');
 const read = async (file) => (await fs.readFile(file, 'utf8').catch(() => '')).split('\n').filter(Boolean).map((l) => JSON.parse(l));
 
-function bot(consentLog) {
+function bot(consentLog, opts = {}) {
   const sent = []; let forgot = 0;
   const tg = { send: async (c, text, extra) => { sent.push({ text, extra }); }, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''), sendVideo: async () => {} };
   const metrics = { hash: () => 'participant-a', log: async () => {}, forget: async () => { forgot++; } };
-  const b = createBot({ tg, metrics, consentLog, safetyCheck: async () => false, checkRetryMs: 0, draft: async () => ({ episode: null }), render: async () => ({}) });
+  const b = createBot({ tg, metrics, consentLog, safetyCheck: async () => false, checkRetryMs: 0, draft: async () => ({ episode: null }), render: async () => ({}), ...opts });
   const chat = { id: 93201, type: 'private' };
   const cycle = () => b.sessions.get(chat.id).consent.cycle;
   const press = (step, a) => b.handleUpdate({ callback_query: { id: 'q', data: `cs:${step}:${a}:${cycle()}`, message: { chat } } });
@@ -350,6 +350,98 @@ test('после истечения сессии /start → «Нет» на во
   await t.say('/start'); await t.press('age', 'no'); await flush();
   assert.equal(rows.at(-1), 'age:withdraw');
   assert.equal(t.sent.at(-1).text, CONSENT_TEXT.ageDeleted);
+});
+
+// Решение Claude 27.11 (стык PR 40 и PR 44): /delete — отзыв и для чата, убранного из списка допуска после согласия.
+test('согласился → убран из списка закрытого теста → /delete → отзыв записан; сессия удалена', async () => {
+  const { makeAdmission } = await import('../server/admission.js');
+  const allowed = new Set(['93201']);
+  const rows = [];
+  const t = bot({ record: async (id, m) => { rows.push(`${m.step}:${m.answer}`); } }, { admission: makeAdmission({ allowed, perDay: 5, concurrency: 1 }) });
+  await t.consent();
+  assert.equal(t.step(), 'done');
+  allowed.delete('93201'); // организатор убрал чат из TITRY_ALLOWED_CHATS (в тесте — без перезапуска)
+  await t.say('/delete'); await flush();
+  assert.equal(rows.at(-1), 'delete:withdraw');
+  assert.equal(t.b.sessions.has(93201), false, 'сессия удалена');
+  const n = rows.length;
+  await t.say('/delete'); await flush();
+  assert.equal(rows.length, n, 'повторный /delete без согласия — без записи');
+});
+test('согласился → перезапуск без чата в списке → /delete → отзыв записан по журналу отметок', async () => {
+  const { makeAdmission } = await import('../server/admission.js');
+  const file = await tmpFile();
+  const a = bot(makeConsentLog(file, { hash: () => 'participant-a' }));
+  await a.consent();
+  // перезапуск: новый процесс, память пуста, чата нет в списке; журнал тот же
+  const b = bot(makeConsentLog(file, { hash: () => 'participant-a' }), { admission: makeAdmission({ allowed: new Set(['1']), perDay: 5, concurrency: 1 }) });
+  await b.say('/delete');
+  for (let i = 0; i < 50 && (await read(file)).at(-1).step !== 'delete'; i++) await new Promise((r) => setTimeout(r, 5));
+  assert.equal(`${(await read(file)).at(-1).step}:${(await read(file)).at(-1).answer}`, 'delete:withdraw');
+  // повторный /delete — согласия по журналу уже нет, новой строки нет
+  const n = (await read(file)).length;
+  await b.say('/delete'); await flush(); await new Promise((r) => setTimeout(r, 20));
+  assert.equal((await read(file)).length, n);
+});
+test('журнал: согласие 6Б действует до отзыва; отказ на 6В его не снимает; только «да» на возрасте — не согласие', async () => {
+  const file = await tmpFile();
+  const log = makeConsentLog(file, { hash: (id) => `p${id}` });
+  assert.equal(await log.active(1), false, 'файла нет');
+  await log.record(1, { step: 'age', answer: 'yes', version: 'v' });
+  assert.equal(await log.active(1), false);
+  await log.record(1, { step: 'pd', answer: 'yes', version: 'v' });
+  await log.record(1, { step: 'abroad', answer: 'no', version: 'v' });
+  assert.equal(await log.active(1), true);
+  assert.equal(await log.active(2), false, 'другой участник');
+  await log.record(1, { step: 'delete', answer: 'withdraw', version: 'v' });
+  assert.equal(await log.active(1), false);
+});
+test('журнал: служебный отзыв поздней «да» на 6В не снимает согласие 6Б; два /delete после перезапуска — одна строка', async () => {
+  const file = await tmpFile();
+  const log = makeConsentLog(file, { hash: (id) => `p${id}` });
+  for (const [step, answer] of [['age', 'yes'], ['pd', 'yes'], ['abroad', 'yes'], ['abroad', 'withdraw']]) await log.record(1, { step, answer, version: 'v' });
+  assert.equal(await log.active(1), true, 'abroad:withdraw (settle) 6Б не снимает');
+  const [a, b] = await Promise.all([log.withdrawIfActive(1, { step: 'delete', version: 'v' }), log.withdrawIfActive(1, { step: 'delete', version: 'v' })]);
+  assert.deepEqual([a, b], [true, false]);
+  assert.equal((await read(file)).filter((r) => r.step === 'delete').length, 1);
+});
+test('согласие → перезапуск → /start → «Нет» на возрасте: отзыв по журналу и текст ageDeleted', async () => {
+  const file = await tmpFile();
+  const a = bot(makeConsentLog(file, { hash: () => 'participant-a' }));
+  await a.consent();
+  const b = bot(makeConsentLog(file, { hash: () => 'participant-a' }));
+  await b.say('/start'); await b.press('age', 'no'); await flush();
+  const last = (await read(file)).at(-1);
+  assert.equal(`${last.step}:${last.answer}`, 'age:withdraw');
+  assert.equal(b.sent.at(-1).text, CONSENT_TEXT.ageDeleted);
+  const n = (await read(file)).length;
+  await b.say('/start'); await b.press('age', 'no'); await flush();
+  assert.equal(b.sent.at(-1).text, CONSENT_TEXT.ageDeclined, 'повторный отказ — без «отозвано»');
+  assert.equal((await read(file)).length, n + 0, 'и без новой строки');
+});
+test('согласие → перезапуск → /start → «Нет» на 6Б: отзыв pd:withdraw по журналу', async () => {
+  const file = await tmpFile();
+  const a = bot(makeConsentLog(file, { hash: () => 'participant-a' }));
+  await a.consent();
+  const b = bot(makeConsentLog(file, { hash: () => 'participant-a' }));
+  await b.say('/start'); await b.press('age', 'yes'); await b.press('intro', 'next'); await b.press('pd', 'no');
+  for (let i = 0; i < 50 && (await read(file)).at(-1).answer !== 'withdraw'; i++) await new Promise((r) => setTimeout(r, 5));
+  const last = (await read(file)).at(-1);
+  assert.equal(`${last.step}:${last.answer}`, 'pd:withdraw');
+});
+test('чат вне списка: поток /delete читает журнал не чаще раза в 10 минут', async () => {
+  const { makeAdmission } = await import('../server/admission.js');
+  let reads = 0;
+  const t = bot({ record: async () => {}, withdrawIfActive: async () => { reads++; return false; } }, { admission: makeAdmission({ allowed: new Set(['1']), perDay: 5, concurrency: 1 }) });
+  for (let i = 0; i < 5; i++) await t.say('/delete');
+  assert.equal(reads, 1);
+});
+test('чат вне списка, согласия не давал — /delete без отметки', async () => {
+  const { makeAdmission } = await import('../server/admission.js');
+  const rows = [];
+  const t = bot({ record: async (id, m) => { rows.push(`${m.step}:${m.answer}`); } }, { admission: makeAdmission({ allowed: new Set(['1']), perDay: 5, concurrency: 1 }) });
+  await t.say('/delete'); await flush();
+  assert.deepEqual(rows, []);
 });
 
 test('ответ «отметки удалены» помечен на согласование: проверка выпуска не пропускает', async () => {
