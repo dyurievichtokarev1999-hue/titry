@@ -211,7 +211,7 @@ test('сбой записи render при отклике — отклик не �
 });
 
 // QA PR 35 на 1eb3f77: совпадение случайного номера двух роликов одного участника.
-// QA PR 35 на 1eb3f77 и 67f3133: номер не повторяется, даже если генератор выдаёт одно и то же; наружу — только случайная часть.
+// QA PR 35 на 1eb3f77 и 67f3133: номер не повторяется, даже если генератор выдаёт одно и то же (номер — makeVideoIds, ИТОГ совета 27.11).
 function constBot(chatId, videoIds) {
   const log = []; const offered = [];
   const tg = { send: async () => {}, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''),
@@ -229,7 +229,7 @@ function constBot(chatId, videoIds) {
   return { bot, chat, log, click, play, pairs, lastKeys };
 }
 
-test('генератор всегда выдаёт одно и то же — номера роликов различаются (16 hex); у каждого отклика свой render, раньше отклика', async () => {
+test('генератор всегда выдаёт одно и то же — номера роликов различаются; у каждого отклика свой render, раньше отклика', async () => {
   const t = constBot(94004);
   const fit1 = await t.play(); const fit2 = await t.play();
   const [v1, v2] = [fit1.split(':')[3], fit2.split(':')[3]];
