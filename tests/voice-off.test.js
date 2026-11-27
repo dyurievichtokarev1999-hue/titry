@@ -132,7 +132,9 @@ test('голос включён (по умолчанию): голосовое р
 });
 
 test('старт на реальных данных (TITRY_RELEASE_REAL_DATA=1) без TITRY_VOICE=off — отказ release_voice до очистки', async () => {
-  const env = { METRICS_SALT: 'test-salt-fictional-0001', TITRY_RELEASE_REAL_DATA: '1', ANTHROPIC_API_KEY: 'dummy-not-a-key' };
+  // Закрытый режим (Б6 п. 2) на реальных данных обязателен — вымышленный список.
+  const env = { METRICS_SALT: 'test-salt-fictional-0001', TITRY_RELEASE_REAL_DATA: '1', ANTHROPIC_API_KEY: 'dummy-not-a-key',
+    TITRY_CLOSED_TEST: '1', TITRY_ALLOWED_CHATS: '1001', TITRY_STORIES_PER_DAY: '3', TITRY_MODEL_CONCURRENCY: '2' };
   const texts = { CONSENT_TEXT: { pd: 'Окончательный вымышленный текст.' }, TEXT: { start: 'Привет.' } };
   let done = 0;
   const opts = { texts, log: () => {}, checkRender: async () => {}, cleanup: async () => { done++; }, cleanupTmp: async () => { done++; return 0; }, ledger: { load: async () => { done++; } } };
