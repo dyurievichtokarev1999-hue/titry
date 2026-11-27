@@ -460,6 +460,26 @@ test('сбой записи «Да» на 6Б (могла лечь без пер
   assert.equal(t.step(), 'abroad', 'повтор засчитан');
   assert.equal(rows.at(-1), 'pd:yes');
 });
+// QA PR 47 на 4093338: сбой stat() или read() после открытия файла не мешает записать отзыв.
+for (const fail of ['stat', 'read']) {
+  test(`журнал: сбой ${fail}() при проверке хвоста — отзыв записан отдельной строкой, согласия больше нет`, async () => {
+    const file = await tmpFile();
+    const log = makeConsentLog(file, { hash: (id) => `p${id}` });
+    await log.record(1, { step: 'pd', answer: 'yes', version: 'v' });
+    const origOpen = fs.open;
+    fs.open = async (...a) => {
+      const fh = await origOpen(...a);
+      if (a[1] === 'r') fh[fail] = async () => { throw Object.assign(new Error('сбой'), { code: 'EIO' }); };
+      return fh;
+    };
+    let ok;
+    try { ok = await log.withdrawIfActive(1, { step: 'delete', version: 'v' }); } finally { fs.open = origOpen; }
+    assert.equal(ok, true);
+    const lines = (await fs.readFile(file, 'utf8')).split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    assert.deepEqual(lines.map((r) => `${r.step}:${r.answer}`), ['pd:yes', 'delete:withdraw']);
+    assert.equal(await log.active(1), false);
+  });
+}
 // Граница защиты чтения вне списка (критика PR 45, принято частично): в пределах кеша; при 10 000 записях — сброс.
 test('чат вне списка: «не чаще раза в 10 минут» — в пределах кеша; при заполнении кеша защита сбрасывается', async () => {
   const { makeAdmission } = await import('../server/admission.js');

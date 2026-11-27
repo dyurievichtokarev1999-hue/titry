@@ -55,7 +55,9 @@ export function makeConsentLog(file, { hash, now = () => new Date(), stuckMs = C
       const b = Buffer.alloc(1);
       await fh.read(b, 0, 1, size - 1);
       return b[0] === 0x0a;
-    } finally { await fh.close(); }
+    } catch {
+      return false; // сбой stat/read после открытия — граница строки неизвестна: дозапись с «\n» (QA PR 47 4093338)
+    } finally { await fh.close().catch(() => {}); }
   };
   const append = async (line) => {
     busySince = clock();
