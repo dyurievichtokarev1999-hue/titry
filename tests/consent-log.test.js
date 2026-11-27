@@ -306,6 +306,52 @@ test('просрочка «Да» на 6В, /delete, новое прохожде
   assert.equal(t.step(), 'done');
   assert.equal(l.rows.filter((r) => r.startsWith('abroad:')).at(-1), 'abroad:yes');
 });
+// Зависшая запись журнала: очередь не копится, новые отметки отклоняются сразу (порядок строк сохраняется).
+test('модуль: запись висит дольше предела — новые отметки отклоняются сразу кодом consent_log_stuck', async () => {
+  const file = await tmpFile();
+  let t = 1;
+  const log = makeConsentLog(file, { hash: () => 'participant-a', stuckMs: 1000, clock: () => t });
+  await log.record(1, { step: 'age', answer: 'yes', version: 'v' });
+  const orig = fs.appendFile; let release = null;
+  fs.appendFile = async (...a) => { await new Promise((r) => { release = r; }); return orig(...a); };
+  const held = async () => { for (let i = 0; i < 1000 && !release; i++) await new Promise((r) => setImmediate(r)); const r = release; release = null; assert.ok(r, 'запись дошла до appendFile'); return r; };
+  try {
+    const hung = log.record(1, { step: 'pd', answer: 'yes', version: 'v' });
+    const first = await held();
+    t = 500;
+    const queued = log.record(1, { step: 'pd', answer: 'withdraw', version: 'v' }); // ещё не зависла — встаёт в очередь
+    t = 2000;
+    await assert.rejects(log.record(1, { step: 'abroad', answer: 'yes', version: 'v' }), { code: 'consent_log_stuck' });
+    const late = log.record(2, { step: 'delete', answer: 'withdraw', version: 'v' }); // отзыв при зависании — в очередь
+    first(); await hung;
+    (await held())(); await queued;
+    (await held())(); await late;
+  } finally { fs.appendFile = orig; }
+  assert.deepEqual((await read(file)).map((r) => `${r.step}:${r.answer}`), ['age:yes', 'pd:yes', 'pd:withdraw', 'delete:withdraw'], 'отзыв во время зависания не потерян');
+  await log.record(1, { step: 'delete', answer: 'withdraw', version: 'v' }); // после освобождения — снова пишет
+  assert.equal((await read(file)).at(-1).step, 'delete');
+});
+test('/delete после истечения сессии: отзыв пишется, если согласие давали в этом процессе', async () => {
+  const rows = [];
+  const t = bot({ record: async (id, m) => { rows.push(`${m.step}:${m.answer}`); } });
+  await t.consent();
+  t.b.sessions.delete(93201); // как sweep после 3 ч без сообщений
+  await t.say('/delete'); await flush();
+  assert.equal(rows.at(-1), 'delete:withdraw');
+  const n = rows.length;
+  await t.say('/delete'); await flush();
+  assert.equal(rows.length, n, 'повторный /delete без нового согласия — без записи');
+});
+test('после истечения сессии /start → «Нет» на возрасте — отзыв и текст ageDeleted, как при живой сессии', async () => {
+  const rows = [];
+  const t = bot({ record: async (id, m) => { rows.push(`${m.step}:${m.answer}`); } });
+  await t.consent();
+  t.b.sessions.delete(93201);
+  await t.say('/start'); await t.press('age', 'no'); await flush();
+  assert.equal(rows.at(-1), 'age:withdraw');
+  assert.equal(t.sent.at(-1).text, CONSENT_TEXT.ageDeleted);
+});
+
 test('ответ «отметки удалены» помечен на согласование: проверка выпуска не пропускает', async () => {
   const { unfinishedTexts } = await import('../server/release.js');
   assert.ok(unfinishedTexts({ CONSENT_TEXT }).includes('CONSENT_TEXT.ageDeleted'));
