@@ -291,11 +291,13 @@ export function draftKeyboard(ep, draftId = 0) {
 }
 
 // Значения кнопок — FEEDBACK_VALUES (менять вместе). Метка цикла согласия в кнопках отклика: отклик пишется в метрики, только если ролик отправлен при текущем согласии.
-const feedbackKeyboard = (cycle) => ({
+// video — номер ролика (makeVideoIds: <8 hex префикс><счётчик base36>-<16 hex>): связывает отклики с роликом в метриках render и feedback.
+const FEEDBACK_KEEP = 20; // сколько последних роликов сессии принимают отклик
+const feedbackKeyboard = (cycle, video) => ({
   inline_keyboard: [[
-    { text: 'Попало', callback_data: `fb:fit:${cycle}` },
-    { text: 'Не подходит', callback_data: `fb:miss:${cycle}` },
-    { text: 'Стало тяжелее', callback_data: `fb:heavier:${cycle}` },
+    { text: 'Попало', callback_data: `fb:fit:${cycle}:${video}` },
+    { text: 'Не подходит', callback_data: `fb:miss:${cycle}:${video}` },
+    { text: 'Стало тяжелее', callback_data: `fb:heavier:${cycle}:${video}` },
   ]],
 });
 
@@ -476,8 +478,23 @@ export const TEXT_ONLY = {
 
 // ── Логика бота (транспорт подменяется в тестах) ─────────────────────────────
 
+// Номер ролика (ИТОГ совета 27.11 по PR 35, решение Claude 25.11 п. 2): префикс процесса + счётчик процесса + случайная часть.
+// Внутри процесса номера различны по построению (счётчик), между перезапусками — по префиксу (4 случайных байта при старте).
+// Счётчик начинается со случайного смещения: число выпущенных роликов из кнопки не читается; разность двух номеров
+// показывает только число роликов процесса между ними (принято советом для закрытого теста). Номер без «:» — он в кнопке.
+export function makeVideoIds({ prefix = crypto.randomBytes(4).toString('hex'), start = crypto.randomBytes(4).readUInt32BE(0) } = {}) {
+  let seq = start;
+  return (random) => {
+    if (!Number.isSafeInteger(seq)) throw Object.assign(new Error('video id: счётчик исчерпан'), { code: 'video_id' });
+    return `${prefix}${(seq++).toString(36)}-${random}`;
+  };
+}
+const processVideoIds = makeVideoIds();
+
 export function createBot({
   tg, metrics = makeMetrics(), draft = makeDraft, render = renderEpisode, transcribe = transcribeOgg, now = () => new Date(),
+  newVideoId = () => crypto.randomBytes(8).toString('hex'), // случайная часть номера ролика (подменяется в тестах)
+  videoIds = processVideoIds, // выдача номеров роликов (makeVideoIds); общая для процесса, в тестах — своя
   // Допуск и пределы закрытого теста (server/admission.js, Б6 п. 2); null — без допуска и пределов. main передаёт из окружения.
   admission = null,
   // false — голос выключен (TITRY_VOICE=off, решение Дмитрия 24.11, А4: в G0 только текст; main передаёт флаг):
@@ -528,6 +545,11 @@ export function createBot({
   };
   // Метрики «как получится»: сбой записи (например, ENOSPC) не должен ломать ответ человеку. В журнал — только код.
   // Цикл берётся при вызове: событие относится к согласию, действовавшему в этот момент.
+  // Запись render ролика — ровно одна: общее обещание для подтверждения отправки и первого отклика (QA PR 35);
+  // сбой — обещание снимается, следующая попытка пишет заново.
+  // restored — запись сделана по нажатию (ответ Telegram на отправку ещё не пришёл или потерялся): её время — время нажатия,
+  // для расчёта задержек она не годится (QA PR 35 на 1eb3f77).
+  const renderOnce = (chatId, entry, restored = false) => (entry.renderP ||= writeMetric(chatId, 'render', restored ? { ...entry.render, restored: true } : entry.render, entry.cycle).catch((e) => { entry.renderP = null; throw e; }));
   const logMetric = (chatId, event, data, cycle = cycleOf(chatId)) => Promise.resolve().then(() => writeMetric(chatId, event, data, cycle)).catch((e) => logError('metrics', e));
   // Незавершённые черновики и отдельные проверки участника: их результат может создать запрет уже после /delete.
   const inFlight = new Map();
@@ -595,6 +617,8 @@ export function createBot({
   // вызываются, содержание в сессию не пишется (QA «Приём рассказа до подтверждений», критерии 1–3).
   const consentDone = (s) => s.consent?.step === 'done';
   // Отметка о согласии в отдельном хранилище (А7): код участника, шаг, кнопка, версия текста, время — без текстов.
+  // Отзыв по журналу отметок (память процесса пуста): проверка и запись — одним звеном очереди журнала. true — записан.
+  const withdrawIfLogged = (chatId, step) => (consentLog?.withdrawIfActive ? consentLog.withdrawIfActive(chatId, { step, version: CONSENT_VERSION }) : Promise.resolve(false));
   const mark = (chatId, step, answer) => (consentLog ? consentLog.record(chatId, { step, answer, version: CONSENT_VERSION }) : Promise.resolve());
   // Порядок экранов: заданный целиком (с 'intro') или прежний вид «6А, затем шаги» для тестов с явным порядком.
   const flow = consentOrder.includes('intro') ? consentOrder : ['intro', ...consentOrder];
@@ -636,7 +660,8 @@ export function createBot({
   // просроченной попыткой и повтором не должны давать отзыв после принятого повтора (QA PR 39 3548ae8).
   // Запись о чате живёт, пока по нему есть записи «да» в работе или ожидание; потом удаляется.
   // Чаты, где в этом процессе было дано согласие 6Б и не отозвано: /delete пишет отзыв и после того, как сессия
-  // истекла (3 ч без сообщений). После перезапуска программы набор пуст — тогда, как и раньше, отзыв не пишется.
+  // истекла (3 ч без сообщений). После перезапуска программы набор пуст — тогда признак берётся из журнала отметок
+  // (withdrawIfLogged: /delete и отказ на 6Б/6Г).
   // Только номера чатов в памяти; размер — число участников теста.
   const consentedChats = new Set();
   const consentMarks = new Map(); // chatId → { [step]: { waiting, inflight, accepted, dirty } }
@@ -718,7 +743,9 @@ export function createBot({
     consentedChats.delete(chatId);
     revokeMarks(chatId); // поздняя «да» просроченной попытки после этого отказа будет отозвана
     // Отказ после данного согласия — отзыв: отметка в хранилище (А7). Сбой записи отказ не задерживает.
-    if (had) mark(chatId, step, 'withdraw').catch((e) => logError('consent.withdraw', e));
+    // Памяти о согласии нет (перезапуск) — отзыв по журналу отметок; от него зависит и текст ageDeleted ниже.
+    const logged = had ? (mark(chatId, step, 'withdraw').catch((e) => logError('consent.withdraw', e)), Promise.resolve(true))
+      : withdrawIfLogged(chatId, step).catch((e) => { logError('consent.withdraw', e); return false; });
     // Отзыв согласия = удаление метрик, как /delete (решение Claude 20.11). Запуск — синхронно, до ответов: запись,
     // уже стоящая в очереди, отбрасывается барьером поколения. Сбой — код в журнал и честное сообщение после ответов.
     const forgot = (async () => metrics.forget(chatId))().then(() => true, (e) => { logError('metrics.forget.withdraw', e); return false; }); // тело — синхронно
@@ -729,7 +756,11 @@ export function createBot({
       // Возраст спрашивается первым (А8): отметок этого прохождения ещё нет, но согласие могло быть дано раньше в этой сессии.
       c.given = {};
       await tg.send(chatId, CONSENT_TEXT.ageDeclined);
-      if (had) await tg.send(chatId, CONSENT_TEXT.ageDeleted);
+      // Журнал завис — ответ не ждёт дольше 2 с (отказ не задерживается); отзыв допишется после освобождения.
+      let timer;
+      const shown = had || await Promise.race([logged, new Promise((r) => { timer = setTimeout(() => r(false), 2000); })]);
+      clearTimeout(timer);
+      if (shown) await tg.send(chatId, CONSENT_TEXT.ageDeleted);
     }
     if (!(await forgot)) return tg.send(chatId, TEXT.withdrawForgetFailed);
   }
@@ -1036,11 +1067,29 @@ export function createBot({
       if (!(await clearToSend())) return;
       // ready — та же проверка после чтения файла, прямо перед запросом (QA PR 27, п. 2). Загрузка, уже начатая,
       // не отзывается: Telegram не умеет отменить отправку; окно — время одного HTTP-запроса.
-      const sent = await tg.sendVideo(chatId, r.outPath, { caption: 'Конец сцены.', width: 720, height: 1280, duration: Math.round(r.duration), reply_markup: feedbackKeyboard(cycle) }, { ready: clearToSend });
+      // Номер ролика (QA PR 35): по нему отклики в метриках связаны с этим роликом и отделены от других роликов того же
+      // участника. makeVideoIds: истечение сессии, вытеснение из последних 20 и перезапуск номер не повторяют; что номер
+      // раскрывает (разность счётчиков, смену префикса при перезапуске) — в комментарии у makeVideoIds.
+      const video = videoIds(newVideoId());
+      // Запись render — один раз на ролик: после подтверждения отправки или, если ответ Telegram потерялся, перед первым
+      // откликом под этим роликом (нажатие кнопки доказывает доставку; QA PR 35 на d64c0e0).
+      const renderData = { seconds: Math.round(r.seconds), mood: ep.mood, music: ep.music, edits: s.edits || 0, video };
+      const sent = await tg.sendVideo(chatId, r.outPath, { caption: 'Конец сцены.', width: 720, height: 1280, duration: Math.round(r.duration), reply_markup: feedbackKeyboard(cycle, video) }, { ready: async () => {
+        const ok = await clearToSend();
+        // Отклик принимается только на отправляемый ролик (QA PR 35): номер регистрируется прямо перед запросом —
+        // отменённая доставка его не получает, а нажатие, пришедшее раньше ответа Telegram, уже принимается.
+        if (ok) {
+          const fb = (s.feedbackFor ||= new Map()); // номер ролика → цикл согласия доставки и записанные ответы
+          fb.set(video, { cycle, done: new Set(), render: renderData, renderP: null });
+          if (fb.size > FEEDBACK_KEEP) fb.delete(fb.keys().next().value); // хранятся последние ролики сессии
+        }
+        return ok;
+      } });
       if (sent === null) return; // отзыв или отмена во время чтения файла: ролика нет — и метрики render нет
       // /delete во время отправки: после metrics.forget новая запись о человеке не появляется.
       if (!alive(chatId, s)) return;
-      await logMetric(chatId, 'render', { seconds: Math.round(r.seconds), mood: ep.mood, music: ep.music, edits: s.edits || 0 }, cycle);
+      const entry = s.feedbackFor?.get(video);
+      try { await (entry ? renderOnce(chatId, entry) : writeMetric(chatId, 'render', renderData, cycle)); } catch (e) { logError('metrics', e); }
       if (current()) s.stage = 'watched';
     } catch (e) {
       release(); // следующая задача и новые запросы — сразу
@@ -1186,6 +1235,28 @@ export function createBot({
   }
 
   // Ответ на /delete — и для чатов вне списка закрытого теста.
+  // /delete — отзыв согласия (решение Дмитрия): отметка withdraw, если согласие давали — в этой сессии или в этом процессе
+  // (consentedChats). Одинаково для участника и для чата, убранного из списка допуска (решение Claude 27.11).
+  // Память процесса пуста (перезапуск, в том числе после правки списка допуска) — признак берётся из журнала отметок.
+  // Сессия и статистика удаляются сразу; отзыв пишется параллельно и ответ не задерживает. Сбой чтения — в журнал ошибок.
+  // Чат вне списка: журнал отметок для /delete читается не чаще раза в 10 минут на чат — иначе поток /delete занял бы
+  // общую очередь журнала и «Да» участников ждали бы дольше предела записи. Предел числа чатов — как у outsiders.
+  const outsiderChecks = new Map();
+  const outsiderMayCheck = (chatId) => {
+    const t = now().getTime();
+    if (t - (outsiderChecks.get(chatId) || -Infinity) < 10 * 60 * 1000) return false;
+    if (outsiderChecks.size >= 10000) outsiderChecks.clear();
+    outsiderChecks.set(chatId, t);
+    return true;
+  };
+  function deleteRequest(chatId, s = sessions.get(chatId), { checkLog = true } = {}) {
+    const known = !!(s?.consentedBefore || Object.keys(s?.consent?.given || {}).length || s?.consent?.marking || consentedChats.has(chatId));
+    consentedChats.delete(chatId);
+    sessions.delete(chatId);
+    revokeMarks(chatId);
+    (known ? mark(chatId, 'delete', 'withdraw') : checkLog ? withdrawIfLogged(chatId, 'delete') : Promise.resolve()).catch((e) => logError('consent.withdraw', e));
+    return deleteReply(chatId);
+  }
   async function deleteReply(chatId) {
     // Честный ответ (редактор 16:24): «удалены» — только если удаление сессии и статистики подтверждено.
     // Запрет safety по /delete не снимается; если они есть, полное удаление не подтверждается.
@@ -1210,7 +1281,7 @@ export function createBot({
     const text = cleanInput(msg.text || msg.caption || '').trim();
     const cmd = parseCommand(text);
     const bare = cmd && !cmd.tail && KNOWN_COMMANDS.has(cmd.name) ? cmd.name : null;
-    if (bare === 'delete') return deleteReply(chatId);
+    if (bare === 'delete') return deleteRequest(chatId, undefined, { checkLog: outsiderMayCheck(chatId) });
     if (bare === 'help') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });
     const level = text ? assessRisk(cmd ? cmd.tail || text : text).level : 'none';
     if (level === 'urgent') return tg.send(chatId, helpMessage('urgent'));
@@ -1243,14 +1314,9 @@ export function createBot({
       try { return await (consentDone(s) ? tg.send(chatId, say.year) : startConsent(chatId, s)); } finally { await logged; }
     }
     if (bare === 'delete') {
-      // Согласие в этой сессии было — запрос удаления пишется как отзыв (А7); /delete отметки не стирает.
-      // Без согласия в сессии (или после перезапуска) записи нет. Сбой записи удаление не задерживает.
-      const consented = !!(s.consentedBefore || Object.keys(s.consent?.given || {}).length || s.consent?.marking || consentedChats.has(chatId));
-      consentedChats.delete(chatId);
-      sessions.delete(chatId);
-      revokeMarks(chatId);
-      if (consented) mark(chatId, 'delete', 'withdraw').catch((e) => logError('consent.withdraw', e));
-      return deleteReply(chatId);
+      // Согласие было (в сессии, в этом процессе или по журналу отметок) — запрос удаления пишется как отзыв (А7);
+      // /delete отметки не стирает. Без согласия записи нет. Сбой записи удаление не задерживает.
+      return deleteRequest(chatId, s);
     }
     if (bare === 'help') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });
     // До 6Ж и после отказа — ничего из сообщения не обрабатывается. Исключение — уже идущая доставка ролика
@@ -1450,11 +1516,24 @@ export function createBot({
     const data = q.data || '';
     if (data.startsWith('cs:')) return onConsent(chatId, s, data);
     if (data.startsWith('fb:')) {
-      const [, v, cycle] = data.split(':');
+      const [, v, cycle, video] = data.split(':');
       // Только значения показанных кнопок (fit, miss, heavier): иное значение не пишется в метрики и ничего не отвечает.
       if (!FEEDBACK_VALUES.has(v)) return;
       // Отклик на ролик прежнего согласия (после /delete, /start, отказа) в метрики не пишется; ответ на одну из трёх кнопок — как обычно.
-      if (cycle && cycle === String(s.consent?.cycle)) await logMetric(chatId, 'feedback', { value: v });
+      // Один отклик на ролик: метрики «Попадание» и «Вред» считаются по роликам, поэтому под каждым роликом в метрики
+      // пишется первый ответ, а «Стало тяжелее» — ещё один раз, если первым был другой ответ (сигнал вреда не теряется).
+      // Номер ролика — тот же, что в метрике render. Кнопки без номера, с чужим номером или под недоставленным
+      // роликом (отмена перед отправкой) в метрики не пишутся.
+      // Цикл — и из кнопки, и сохранённый при доставке: подделанная кнопка «новый цикл + старый ролик» не пишется.
+      const entry = s.feedbackFor?.get(video || '');
+      const done = entry && entry.cycle === s.consent?.cycle && entry.done;
+      if (cycle && cycle === String(s.consent?.cycle) && done && (!done.size || (v === 'heavier' && !done.has('heavier')))) {
+        done.add(v); // до записи: двойное нажатие не пишет дважды
+        // Сначала запись render ролика (одна на ролик, общая с подтверждением отправки), затем feedback — обе в цикле
+        // согласия доставки. Ответ Telegram на отправку не дошёл, а отклик пришёл — ролик доставлен.
+        // Сбой любой записи — ответ снимается, следующее нажатие повторит обе (сигнал вреда не теряется).
+        try { await renderOnce(chatId, entry, true); await writeMetric(chatId, 'feedback', { value: v, video }, entry.cycle); } catch (e) { done.delete(v); logError('metrics', e); }
+      }
       if (v === 'heavier') { await tg.send(chatId, TEXT.heavier); return tg.send(chatId, helpMessage('concern')); }
       return tg.send(chatId, v === 'fit' ? TEXT.fit : TEXT.miss);
     }
