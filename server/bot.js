@@ -13,6 +13,8 @@ import { renderEpisode, checkRenderer, ROOT, RENDER_TIMEOUT_MS, KILL_GRACE_MS, r
 import { logError, safeCode, logRenderTimeout } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS, cleanupVoiceOrphans } from './stt.js';
 import { processLedger, KEY_ENV, KEY_VERSION_ENV } from './ledger.js';
+import { makeHealth, writeHealth } from './health.js';
+import { admissionFromEnv, makeAdmission } from './admission.js';
 import { makeConsentLog, probeConsentLog } from './consent-log.js';
 import { CONSENT_TEXT, CONSENT_VERSION, consentSteps } from './consent.js';
 import { unfinishedTexts } from './release.js';
@@ -93,6 +95,9 @@ export const TEXT = {
   consentRecordFailed: 'Не получилось сохранить ответ, поэтому дальше пока не идём. Нажми ту же кнопку ещё раз чуть позже.',
   renderFail: 'Не получилось собрать ролик. Попробуй ещё раз чуть позже.',
   draftFail: 'Не получилось собрать черновик. Попробуй ещё раз чуть позже.',
+  // Закрытый тест (Б6, п. 2). ТЕКСТЫ НА УТВЕРЖДЕНИЕ Редактору; параметры допуска и пределы не раскрываются.
+  notInvited: 'Сейчас «Титры» работают только для участников закрытого теста.',
+  limitReached: 'На сегодня рассказов достаточно. Можно вернуться позже.', // окно — скользящие 24 часа
   // Внутренняя причина insufficient_after_exclusion (редактор повествования), дословно: только эта реплика —
   // без черновика, ролика, просьбы дописать и кнопок. Показывается только после stop и технических исходов.
   insufficient: INSUFFICIENT_TEXT, // текст — в server/safety.js
@@ -490,6 +495,8 @@ export function createBot({
   tg, metrics = makeMetrics(), draft = makeDraft, render = renderEpisode, transcribe = transcribeOgg, now = () => new Date(),
   newVideoId = () => crypto.randomBytes(8).toString('hex'), // случайная часть номера ролика (подменяется в тестах)
   videoIds = processVideoIds, // выдача номеров роликов (makeVideoIds); общая для процесса, в тестах — своя
+  // Допуск и пределы закрытого теста (server/admission.js, Б6 п. 2); null — без допуска и пределов. main передаёт из окружения.
+  admission = null,
   // false — голос выключен (TITRY_VOICE=off, решение Дмитрия 24.11, А4: в G0 только текст; main передаёт флаг):
   // голосовое не скачивается и не распознаётся, ответ — «пока только текстом»; подпись к нему идёт как текст.
   voice = true,
@@ -499,7 +506,8 @@ export function createBot({
   ledger = null, // хранилище запретов (server/ledger.js); область — участник, производная HMAC на диске
   consentLog = null, // хранилище отметок о согласии (server/consent-log.js, А7); main передаёт файловое, без него — не пишется
   checkRetryMs = RETRY_DELAY_MS,
-  gate = makeGate({ check: safetyCheck || ((text) => modelSafetyCheck(text)), hasKey, ledger, retryDelayMs: checkRetryMs }),
+  // Проверки модели (и повтор) — в пределах общего числа мест обращений к модели (Б6 п. 2).
+  gate = makeGate({ check: ((c) => (admission ? (...a) => admission.run(() => c(...a)) : c))(safetyCheck || ((text) => modelSafetyCheck(text))), hasKey, ledger, retryDelayMs: checkRetryMs }),
   checkBudgetMs = CHECK_BUDGET_MS, // бюджет ожидания одной проверки сообщения в окне (вызов + повтор)
   holdWaitMs = HOLD_WAIT_MS, // жёсткий общий предел ожидания проверок сообщений, пришедших во время подготовки ролика
   renderTimeoutMs = RENDER_TIMEOUT_MS, // предел активного рендера от старта задачи в слоте (server/render.js)
@@ -649,6 +657,10 @@ export function createBot({
   // Состояние записей отметок — по участнику (чату), а не по сессии или прохождению: /start и /delete между
   // просроченной попыткой и повтором не должны давать отзыв после принятого повтора (QA PR 39 3548ae8).
   // Запись о чате живёт, пока по нему есть записи «да» в работе или ожидание; потом удаляется.
+  // Чаты, где в этом процессе было дано согласие 6Б и не отозвано: /delete пишет отзыв и после того, как сессия
+  // истекла (3 ч без сообщений). После перезапуска программы набор пуст — тогда, как и раньше, отзыв не пишется.
+  // Только номера чатов в памяти; размер — число участников теста.
+  const consentedChats = new Set();
   const consentMarks = new Map(); // chatId → { [step]: { waiting, inflight, accepted, dirty } }
   // Отзыв или новое прохождение (/start): засчитанные шаги больше не действуют — поздняя запись «да» по ним получит
   // отзыв (settle), если шаг не засчитан снова.
@@ -708,7 +720,7 @@ export function createBot({
     if (answer === 'next' || answer === 'yes') {
       if (step === 'pd' || step === 'abroad') c.given[step] = { at: now().toISOString(), version: CONSENT_VERSION };
       // Согласие в этой сессии было дано (для ответа на отказ после /start): с «Да» на 6Б — оно остаётся и после отказа на 6В.
-      if (step === 'pd' || next === 'done') s.consentedBefore = true;
+      if (step === 'pd' || next === 'done') { s.consentedBefore = true; consentedChats.add(chatId); }
       return consentScreen(chatId, s, next);
     }
     c.step = 'declined'; // отказ без прежнего согласия не храним; дальше бот ничего не спрашивает и не напоминает
@@ -723,8 +735,9 @@ export function createBot({
     }
     // Было ли согласие до этого отказа (в этом прохождении или раньше в сессии). После отказа признак сбрасывается:
     // повторный отказ до нового согласия не сообщает об удалении снова (QA PR 34 324cc87). Синхронно, до отправок.
-    const had = Object.keys(c.given).length > 0 || !!s.consentedBefore; // «Да», которое ещё пишется, отзовёт settle()
+    const had = Object.keys(c.given).length > 0 || !!s.consentedBefore || consentedChats.has(chatId); // «Да», которое ещё пишется, отзовёт settle()
     s.consentedBefore = false;
+    consentedChats.delete(chatId);
     revokeMarks(chatId); // поздняя «да» просроченной попытки после этого отказа будет отозвана
     // Отказ после данного согласия — отзыв: отметка в хранилище (А7). Сбой записи отказ не задерживает.
     if (had) mark(chatId, step, 'withdraw').catch((e) => logError('consent.withdraw', e));
@@ -773,6 +786,19 @@ export function createBot({
     const cont = continuationLevel(prevStory, story);
     // У предела длины склейка целиком не поместится в черновик: тогда — последняя фраза и обрывок (как в проверке).
     if (cont === 'concern') story = prevStory.length + story.length < STORY_MAX ? `${prevStory}\n${story}` : continuationContext(prevStory, story);
+    // Предел на участника (Б6 п. 2) — до сброса сессии и до дорогой работы: отклонённый рассказ не трогает черновик.
+    // Явная опасность модели не требует (остановка локально) и предел не расходует. Рассказ уровня «тяжело» получает
+    // контакты помощи и при исчерпании предела. ticket возвращается, если черновика не было.
+    const urgentLocal = cont === 'urgent' || assessRisk(story).level === 'urgent';
+    // Повтор рассказа, уже остановленного моделью, — экран остановки ниже, предел не расходуется.
+    const stopped = urgentLocal || isBlocked(s, story) || gate.status(s.scope, story).kind === 'safety';
+    const ticket = admission && !stopped ? admission.take(chatId) : null;
+    if (ticket === false) {
+      await tg.send(chatId, TEXT.limitReached);
+      if (cont === 'concern' || assessRisk(story).level === 'concern') await tg.send(chatId, helpMessage('concern'));
+      return;
+    }
+    const refund = () => { if (ticket) admission.untake(chatId, ticket); };
     // Новый рассказ сразу отменяет прежний черновик: его кнопки больше ничего не запускают.
     s.episode = null;
     s.skeleton = null;
@@ -793,6 +819,7 @@ export function createBot({
     if (prior.kind) {
       // Хранилище запретов недоступно: черновик не делается, без карточки помощи.
       logError('check', { code: prior.code });
+      refund(); // черновика нет — предел не расходуется
       s.stage = 'idle';
       return tg.send(chatId, TEXT.checkUnavailable);
     }
@@ -801,12 +828,15 @@ export function createBot({
     await tg.send(chatId, TEXT.working);
     // Согласие сменилось, пока шли ответы: модель не вызывается. Запрет, поставленный за это время, — ниже, после
     // черновика (поздняя остановка), как раньше.
-    if (!sameConsent(chatId, s, cycle) || s.draftId !== gen) return;
+    if (!sameConsent(chatId, s, cycle) || s.draftId !== gen) return refund();
     let r;
     try {
-      r = await track(chatId, draft(story, { date: todayIso(now()), period: s.period, tone: 'quiet' }));
+      const make = () => draft(story, { date: todayIso(now()), period: s.period, tone: 'quiet' });
+      // Черновик — в пределах общего числа мест; нет места за время ожидания — «не получилось собрать черновик».
+      r = await track(chatId, admission && !urgentLocal ? admission.run(make) : make());
     } catch (e) {
       logError('draft', e);
+      refund(); // черновика нет — предел не расходуется
       if (!current()) return;
       s.stage = 'idle';
       await tg.send(chatId, TEXT.draftFail);
@@ -821,6 +851,7 @@ export function createBot({
       // ИР-02: проверка не завершена — техническое состояние, не остановка: рассказ не запоминается
       // как запрещённый, карточка помощи не показывается, черновика и ролика нет.
       logError('draft', { code: r.code });
+      refund();
       if (!current()) return;
       s.stage = 'idle';
       return tg.send(chatId, TEXT.checkUnavailable);
@@ -828,6 +859,7 @@ export function createBot({
     if (r.draftFailed) {
       // Решение 16.11, п. 1.1: черновика нет и заготовка не собирается — техническая реплика, без контактов.
       logError('draft', { code: r.code });
+      refund();
       if (!current()) return;
       s.stage = 'idle';
       return tg.send(chatId, TEXT.renderFail);
@@ -940,6 +972,12 @@ export function createBot({
     const g = await track(chatId, gate.verify(s.scope, original, ep, text));
     if (!alive(chatId, s) || s.draftId !== gen) return; // удалённая или заменённая сессия не оживает
     if (g.kind === 'safety') return stopForSafety(chatId, s, 'urgent', { at: 'check', byModel: !!g.byModel }, cycle);
+    if (g.busy) {
+      // Места для проверки нет (Б6 п. 2): модель рассказ не видела — ролика нет при любом локальном уровне.
+      logError('check', { code: g.code });
+      s.stage = 'draft';
+      return tg.send(chatId, TEXT.busy);
+    }
     if (g.unknown) {
       // «Неизвестно» и после повтора, отказ модели проверять — ролика нет при любом локальном уровне (решение Дмитрия
       // 24.11, Б2 — вариант А, строгий, на время G0; матрица Б-4, строки 4–6). Обратимо правкой кода.
@@ -1118,6 +1156,7 @@ export function createBot({
         try {
           const g = await track(chatId, gate.verify(s.scope, body, null, ask));
           if (g.kind === 'safety') r = { kind: 'urgent', byModel: !!g.byModel };
+          else if (g.busy) r = { kind: 'unknown', code: g.code }; // места нет: сообщение не проверено — ролика нет
           else if (g.ok) r = { kind: level };
           // Модель не ответила или отказалась — доставка отменяется при любом локальном уровне (Б2, вариант А; матрица Б-4,
           // строка 9). help — контакты помощи в ответе: при локальном concern или отказе модели.
@@ -1186,9 +1225,47 @@ export function createBot({
     if (stillDelivering()) return sendSafe(chatId, TEXT.rendering);
   }
 
+  // Ответ на /delete — и для чатов вне списка закрытого теста.
+  async function deleteReply(chatId) {
+    // Честный ответ (редактор 16:24): «удалены» — только если удаление сессии и статистики подтверждено.
+    // Запрет safety по /delete не снимается; если они есть, полное удаление не подтверждается.
+    let forgot = true;
+    try { await metrics.forget(chatId); } catch { forgot = false; }
+    const kinds = gate.recordsFor(`chat:${chatId}`);
+    const lines = [forgot ? TEXT.deleted : TEXT.deleteFailed];
+    if (kinds === null) lines.push(TEXT.recordUnknown); // намеренное сохранение не утверждаем
+    else {
+      const fictional = process.env.TITRY_STAND === 'fictional';
+      if (fictional && kinds.has('safety')) lines.push(TEXT.keptSafety);
+      // Не вымышленный стенд (срок не утверждён) или черновик/проверка ещё идут и могут поставить запрет.
+      if ((kinds.size && !fictional) || inFlight.has(chatId)) lines.push(TEXT.deleteKept);
+    }
+    return tg.send(chatId, lines.join('\n'));
+  }
+
+  // Вне списка закрытого теста (Б6 п. 2): сессия не создаётся, модель не вызывается, метрик нет. /delete и /help работают;
+  // явная опасность — экран остановки (локальный фильтр); иначе — короткий ответ не чаще раза в 10 минут на чат.
+  const outsiders = new Map(); // номер чата → время последнего ответа (только для частоты ответа)
+  async function notInvited(chatId, msg) {
+    const text = cleanInput(msg.text || msg.caption || '').trim();
+    const cmd = parseCommand(text);
+    const bare = cmd && !cmd.tail && KNOWN_COMMANDS.has(cmd.name) ? cmd.name : null;
+    if (bare === 'delete') return deleteReply(chatId);
+    if (bare === 'help') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });
+    const level = text ? assessRisk(cmd ? cmd.tail || text : text).level : 'none';
+    if (level === 'urgent') return tg.send(chatId, helpMessage('urgent'));
+    if (level === 'concern') return tg.send(chatId, `${TEXT.notInvited}\n\n${helpMessage('concern')}`); // контакты — без ограничения частоты
+    const t = now().getTime();
+    if (t - (outsiders.get(chatId) || 0) < 10 * 60 * 1000) return;
+    if (outsiders.size >= 10000) outsiders.clear();
+    outsiders.set(chatId, t);
+    return tg.send(chatId, TEXT.notInvited);
+  }
+
   async function onMessage(msg) {
     const chatId = msg.chat.id;
     if (msg.chat.type !== 'private') return; // только личные чаты: истории не для групп
+    if (admission && !admission.allowed(chatId)) return notInvited(chatId, msg);
     const s = session(chatId);
     const cycle = cycleOf(chatId); // цикл согласия на момент прихода: метрики голосового — в нём, а не после распознавания
     // Подпись к фото, видео, файлу — такой же текст, как сообщение (условие 1: подписи попадают в ролик и проверяются).
@@ -1208,24 +1285,12 @@ export function createBot({
     if (bare === 'delete') {
       // Согласие в этой сессии было — запрос удаления пишется как отзыв (А7); /delete отметки не стирает.
       // Без согласия в сессии (или после перезапуска) записи нет. Сбой записи удаление не задерживает.
-      const consented = !!(s.consentedBefore || Object.keys(s.consent?.given || {}).length || s.consent?.marking);
+      const consented = !!(s.consentedBefore || Object.keys(s.consent?.given || {}).length || s.consent?.marking || consentedChats.has(chatId));
+      consentedChats.delete(chatId);
       sessions.delete(chatId);
       revokeMarks(chatId);
       if (consented) mark(chatId, 'delete', 'withdraw').catch((e) => logError('consent.withdraw', e));
-      // Честный ответ (редактор 16:24): «удалены» — только если удаление сессии и статистики подтверждено.
-      // Запрет safety по /delete не снимается; если они есть, полное удаление не подтверждается.
-      let forgot = true;
-      try { await metrics.forget(chatId); } catch { forgot = false; }
-      const kinds = gate.recordsFor(`chat:${chatId}`);
-      const lines = [forgot ? TEXT.deleted : TEXT.deleteFailed];
-      if (kinds === null) lines.push(TEXT.recordUnknown); // намеренное сохранение не утверждаем
-      else {
-        const fictional = process.env.TITRY_STAND === 'fictional';
-        if (fictional && kinds.has('safety')) lines.push(TEXT.keptSafety);
-        // Не вымышленный стенд (срок не утверждён) или черновик/проверка ещё идут и могут поставить запрет.
-        if ((kinds.size && !fictional) || inFlight.has(chatId)) lines.push(TEXT.deleteKept);
-      }
-      return tg.send(chatId, lines.join('\n'));
+      return deleteReply(chatId);
     }
     if (bare === 'help') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });
     // До 6Ж и после отказа — ничего из сообщения не обрабатывается. Исключение — уже идущая доставка ролика
@@ -1420,6 +1485,7 @@ export function createBot({
     const chatId = q.message && q.message.chat.id;
     await tg.answer(q.id);
     if (!chatId) return;
+    if (admission && !admission.allowed(chatId)) return; // вне закрытого теста кнопки ничего не делают
     const s = session(chatId);
     const data = q.data || '';
     if (data.startsWith('cs:')) return onConsent(chatId, s, data);
@@ -1590,6 +1656,11 @@ export async function prepareBot({ checkRender = checkRenderer, cleanup = cleanu
       throw Object.assign(new Error('startup'), { code: 'release_voice', stage: 'release.voice' });
     }
   }
+  // Допуск и пределы закрытого теста (Б6 п. 2): неверная конфигурация — отказ старта; на реальных данных — только закрытый режим.
+  try {
+    admissionFromEnv(env);
+    if (env.TITRY_RELEASE_REAL_DATA === '1' && env.TITRY_CLOSED_TEST !== '1') throw Object.assign(new Error('admission: нужен TITRY_CLOSED_TEST=1'), { code: 'admission_config' });
+  } catch (e) { logError('admission', e); throw Object.assign(new Error('startup'), { code: 'admission_config', stage: 'admission' }); }
   // Без Playwright или ffmpeg бот принял бы рассказы, но не собрал бы ни одного ролика.
   try { await checkRender({ env }); } catch (e) { logError('render.check', e); throw Object.assign(new Error('startup'), { code: safeCode(e), stage: 'render.check' }); }
   try { await cleanup(); } catch (e) { logError('voice.cleanup', e); throw Object.assign(new Error('startup'), { code: safeCode(e), stage: 'voice.cleanup' }); }
@@ -1601,7 +1672,8 @@ export async function prepareBot({ checkRender = checkRenderer, cleanup = cleanu
   // Хранилище отметок о согласии (А7): без записи отметки ни один участник не пройдёт подтверждения.
   try { await probeConsentLog(consentFile); } catch (e) { logError('consent.log', e); throw Object.assign(new Error('startup'), { code: safeCode(e), stage: 'consent.log' }); }
   const l = ledger || processLedger('bot', path.join(ROOT, 'data', 'state'));
-  try { await l.load(); } catch (e) { logError('ledger.load', e); throw Object.assign(new Error('startup'), { code: 'ledger', stage: 'ledger.load' }); }
+  // ledger_missing — файл запретов пропал после инициализации (план Критика 20.11, п. 5): старт закрыт до восстановления.
+  try { await l.load(); } catch (e) { logError('ledger.load', e); throw Object.assign(new Error('startup'), { code: e?.code === 'ledger_missing' ? 'ledger_missing' : 'ledger', stage: 'ledger.load' }); }
   return l;
 }
 
@@ -1609,8 +1681,12 @@ async function main() {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) { console.error('Задайте TELEGRAM_BOT_TOKEN (выдаёт @BotFather).'); process.exit(2); }
   let ledger;
-  try { ledger = await prepareBot(); } catch {
-    console.error(`Запуск остановлен: не задана METRICS_SALT (не короче ${METRICS_SALT_MIN} знаков), нет ключа модели или тексты для участника (согласие, реплики бота) не окончательные при TITRY_RELEASE_REAL_DATA=1, голос не выключен (TITRY_VOICE=off) при TITRY_RELEASE_REAL_DATA=1, не проверены контакты помощи (config/help.json), не найден Playwright, не запускается Chromium (TITRY_CHROMIUM) или ffmpeg (FFMPEG), не подтверждена очистка временных файлов, хранилище отметок о согласии (data/consent.jsonl) или хранилище запретов (${KEY_ENV}, ${KEY_VERSION_ENV}). Задачи не принимаются. Остатки tmp и файл хранилища не удаляйте вручную без владельца кода.`);
+  try { ledger = await prepareBot(); } catch (e) {
+    if (e?.code === 'ledger_missing') {
+      console.error('Запуск остановлен: файл запретов (data/state/blocked-v1.json) пропал после записи. Восстановите data/state из резервной копии. Удалять метку blocked-v1.json.init — только решением владельца: это снимает все остановки по безопасности.');
+      process.exit(3);
+    }
+    console.error(`Запуск остановлен: не задана METRICS_SALT (не короче ${METRICS_SALT_MIN} знаков), нет ключа модели или тексты для участника (согласие, реплики бота) не окончательные при TITRY_RELEASE_REAL_DATA=1, голос не выключен (TITRY_VOICE=off) при TITRY_RELEASE_REAL_DATA=1, неверный допуск закрытого теста (TITRY_CLOSED_TEST, TITRY_ALLOWED_CHATS, TITRY_STORIES_PER_DAY, TITRY_MODEL_CONCURRENCY, TITRY_MODEL_WAIT_MS; при TITRY_RELEASE_REAL_DATA=1 — обязателен закрытый режим), не проверены контакты помощи (config/help.json), не найден Playwright, не запускается Chromium (TITRY_CHROMIUM) или ffmpeg (FFMPEG), не подтверждена очистка временных файлов, хранилище отметок о согласии (data/consent.jsonl) или хранилище запретов (${KEY_ENV}, ${KEY_VERSION_ENV}). Задачи не принимаются. Остатки tmp и файл хранилища не удаляйте вручную без владельца кода.`);
     process.exit(3);
   }
   const tg = telegram(token);
@@ -1622,20 +1698,30 @@ async function main() {
     { command: 'delete', description: 'Запросить удаление данных' },
   ] }).catch(() => {});
   console.log(`Бот @${me.username} запущен. Распознавание речи: ${!voiceEnabled() ? 'голос выключен (TITRY_VOICE=off)' : sttAvailable() ? 'SpeechKit' : 'выключено'}.`);
+  const limits = admissionFromEnv();
+  const admission = limits && makeAdmission(limits);
   const metrics = makeMetrics();
   const consentLog = makeConsentLog(CONSENT_FILE, { hash: metrics.hash });
-  const bot = createBot({ tg, ledger, metrics, consentLog, renderTimeoutMs: renderTimeoutFromEnv(), botName: me.username, voice: voiceEnabled() });
-  setInterval(bot.sweep, 10 * 60 * 1000).unref();
+  const bot = createBot({ tg, ledger, metrics, consentLog, admission, renderTimeoutMs: renderTimeoutFromEnv(), botName: me.username, voice: voiceEnabled() });
+  setInterval(() => { bot.sweep(); if (admission) admission.sweep(); }, 10 * 60 * 1000).unref();
+  // Снимок состояния для внешнего наблюдателя (Б6 п. 5): раз в минуту, без номеров и текстов; отправок наружу нет.
+  const health = makeHealth();
+  const healthFile = path.join(ROOT, 'data', 'health.json');
+  const snap = () => writeHealth(healthFile, health.snapshot({ stateHealthy: ledger.healthy() })).catch((e) => logError('health', e));
+  snap();
+  setInterval(snap, 60 * 1000).unref();
   let offset = 0;
   for (;;) {
     try {
       const updates = await tg.call('getUpdates', { offset, timeout: 30, allowed_updates: ['message', 'edited_message', 'callback_query'] });
+      health.pollOk();
       for (const u of updates) {
         offset = u.update_id + 1;
         bot.handleUpdate(u); // не ждём: рендер одного пользователя не блокирует ответы другим
       }
     } catch (e) {
       logError('poll', e);
+      health.pollFailed(safeCode(e));
       await new Promise((r) => setTimeout(r, 3000));
     }
   }

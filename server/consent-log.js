@@ -17,17 +17,31 @@ export async function probeConsentLog(file) {
   await fs.chmod(file, 0o600);
 }
 
-export function makeConsentLog(file, { hash, now = () => new Date() }) {
+/** Запись дольше этого — зависла (диск, сеть). После этого новые подтверждения («да») не добавляются — отклоняются сразу.
+ *  Отказы и отзывы по-прежнему ждут в очереди в памяти процесса и запишутся после освобождения; при перезапуске
+ *  во время зависания они теряются. Очередь ограничена действиями участников закрытого теста. Признак зависания —
+ *  код consent_log_stuck в журнале ошибок. */
+export const CONSENT_STUCK_MS = 30 * 1000;
+
+export function makeConsentLog(file, { hash, now = () => new Date(), stuckMs = CONSENT_STUCK_MS, clock = () => performance.now() }) {
   if (typeof hash !== 'function') throw new Error('consent-log: нужна функция кода участника');
   let ops = Promise.resolve();
+  let busySince = 0; // время начала текущей записи; 0 — записи нет
   return {
     /** Записать отметку. Промис отклоняется при сбое записи: вызывающий решает, засчитывать ли шаг. */
     record(chatId, { step, answer, version }) {
       if (!STEPS.has(step) || !ANSWERS.has(answer)) return Promise.reject(Object.assign(new Error('consent-log: неизвестная отметка'), { code: 'consent_bad_mark' }));
+      // Очередь не обгоняет зависшую запись: порядок строк (да → отзыв) важнее. Пока она висит, новые «да» отклоняются
+      // сразу — шаг не засчитывается, бот отвечает «не получилось сохранить». Отказ и отзыв встают в очередь, как раньше:
+      // они запишутся после освобождения (человека это не задерживает — бот их не ждёт), отзыв не теряется.
+      if (answer === 'yes' && busySince && clock() - busySince > stuckMs) return Promise.reject(Object.assign(new Error('consent-log: запись зависла'), { code: 'consent_log_stuck' }));
       const line = `${JSON.stringify({ at: now().toISOString(), participant: hash(chatId), step, answer, version: String(version || '') })}\n`;
       const run = ops.then(async () => {
-        await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-        await fs.appendFile(file, line, { mode: 0o600 });
+        busySince = clock();
+        try {
+          await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+          await fs.appendFile(file, line, { mode: 0o600 });
+        } finally { busySince = 0; }
       });
       ops = run.catch(() => {});
       return run;

@@ -37,7 +37,7 @@ test('B05: на диске нет рассказа, области и ключа
     for (const s of [STORY.slice(0, 12), 'chat-123456', '123456', KEY, 'a'.repeat(64)]) assert.ok(!raw.includes(s), `нет ${s.slice(0, 8)}…`);
     assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
     assert.equal((await fs.stat(path.dirname(file))).mode & 0o777, 0o700);
-    assert.deepEqual(await fs.readdir(path.dirname(file)), ['blocked-v1.json']);
+    assert.deepEqual(await fs.readdir(path.dirname(file)), ['blocked-v1.json', 'blocked-v1.json.init'], 'файл и пустая метка «записывался»');
     const doc = JSON.parse(raw);
     assert.deepEqual(Object.keys(doc.records[0]).sort(), ['created_at', 'episode_digest', 'expires_at', 'key_version', 'kind', 'reason', 'retry_not_before_at', 'schema_version', 'scope_digest', 'story_digest']);
     assert.equal(doc.records[0].expires_at, null, 'производственный TTL не выбран — без срока');
@@ -81,7 +81,7 @@ test('B04: недописанный tmp после аварии — закрыт
     const r = open(dir); await r.load();
     assert.equal(r.lookup('studio', STORY).kind, 'safety');
     assert.equal(r.lookup('studio', 'первый вымышленный рассказ').kind, 'safety');
-    assert.deepEqual(await fs.readdir(sdir), ['blocked-v1.json'], 'tmp убран после подтверждённой записи');
+    assert.deepEqual(await fs.readdir(sdir), ['blocked-v1.json', 'blocked-v1.json.init'], 'tmp убран после подтверждённой записи');
     // Недописанный tmp.
     await fs.writeFile(path.join(sdir, 'blocked-v1.json.tmp-2-bbbb'), withTwo.slice(0, 40));
     const t = open(dir);

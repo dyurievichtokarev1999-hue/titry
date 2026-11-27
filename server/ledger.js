@@ -80,6 +80,14 @@ export function makeLedger({ file, alsoRead = [], key, keyVersion, ttlMs = null,
   const same = (a, b) => a.scope_digest === b.scope_digest && a.story_digest === b.story_digest && a.kind === b.kind;
 
   /** Загрузка до приёма задач. Недописанный tmp после аварии — восстановление объединением (только строже). */
+  // Метка «файл есть»: пустой файл рядом с файлом запретов. Метка есть, файла нет — файл пропал (план Критика 20.11, п. 5).
+  // shortcut: метка в том же каталоге — пропажа каталога целиком (новый том, восстановление только *.json) неотличима
+  // от первого запуска; закрывается внешней меткой или резервной копией после решения по инфраструктуре.
+  const markerOf = (f) => `${f}.init`;
+  const marker = markerOf(file);
+  const exists = async (f) => { try { await fsImpl.stat(f); return true; } catch (e) { if (e?.code === 'ENOENT') return false; throw e; } };
+  const ensureMarker = async () => { if (!(await exists(marker))) await fsImpl.writeFile(marker, '', { mode: 0o600 }); };
+  const missingError = () => Object.assign(ledgerError(), { code: 'ledger_missing' });
   async function load() {
     // Ключ — не короче 16 символов (пустой или случайно короткий ключ — закрытый отказ).
     if (!key || String(key).length < 16 || !keyVersion) { state = 'failed'; throw ledgerError(); }
@@ -89,13 +97,26 @@ export function makeLedger({ file, alsoRead = [], key, keyVersion, ttlMs = null,
       await fsImpl.chmod(dir, 0o700);
       try { await fsImpl.chmod(file, 0o600); } catch (e) { if (e?.code !== 'ENOENT') throw e; }
       let main = [];
-      try { main = parse(await fsImpl.readFile(file, 'utf8')); }
-      catch (e) { if (e?.code !== 'ENOENT') throw ledgerError(); }
+      let read = false;
+      try { main = parse(await fsImpl.readFile(file, 'utf8')); read = true; }
+      catch (e) {
+        if (e?.code !== 'ENOENT') throw ledgerError();
+        // Метка есть, файла нет и нет остатков tmp для восстановления — файл пропал: закрытый отказ, а не молчаливый
+        // старт с пустым хранилищем.
+        const ownTmp = (await fsImpl.readdir(dir)).some((n) => n.startsWith(`${base}.tmp-`));
+        if (!ownTmp && (await exists(marker))) throw missingError();
+      }
+      if (read) await ensureMarker(); // файл был до этой версии или метка не записалась — ставим сейчас
       // Чужие файлы (alsoRead) только читаются и объединяются (только строже); пишем всегда лишь в свой file.
       for (const f of alsoRead) {
         let extra = [];
         try { extra = parse(await fsImpl.readFile(f, 'utf8')); }
-        catch (e) { if (e?.code !== 'ENOENT') throw ledgerError(); }
+        catch (e) {
+          if (e?.code !== 'ENOENT') throw ledgerError();
+          // Файл другого процесса пропал после записи (метка есть, tmp для восстановления нет).
+          const tmp = (await fsImpl.readdir(dir)).some((n) => n.startsWith(`${path.basename(f)}.tmp-`));
+          if (!tmp && (await exists(markerOf(f)))) throw missingError();
+        }
         // Остатки tmp чужого файла тоже читаются (не удаляются — это делает владелец файла); недописанный — отказ.
         for (const n of (await fsImpl.readdir(dir)).filter((x) => x.startsWith(`${path.basename(f)}.tmp-`))) {
           extra.push(...parse(await fsImpl.readFile(path.join(dir, n), 'utf8')));
@@ -110,13 +131,14 @@ export function makeLedger({ file, alsoRead = [], key, keyVersion, ttlMs = null,
       }
       records = main.filter((r) => live(r, wallNow()));
       state = 'ready';
+
       if (tmps.length) {
         await write();
         for (const n of tmps) await fsImpl.rm(path.join(dir, n), { force: true });
       }
-    } catch {
+    } catch (e) {
       state = 'failed';
-      throw ledgerError();
+      throw e?.code === 'ledger_missing' ? e : ledgerError();
     }
   }
 
@@ -127,6 +149,8 @@ export function makeLedger({ file, alsoRead = [], key, keyVersion, ttlMs = null,
     const tmp = path.join(dir, `${base}.tmp-${process.pid}-${crypto.randomBytes(4).toString('hex')}`);
     const fh = await fsImpl.open(tmp, 'wx', 0o600);
     try { await fh.writeFile(JSON.stringify(doc)); await fh.sync(); } finally { await fh.close(); }
+    // Метка — до переименования: после аварии «метка есть, файла нет» остаётся tmp, и загрузка восстановит из него.
+    await ensureMarker();
     await fsImpl.rename(tmp, file);
     const d = await fsImpl.open(dir, 'r');
     try { await d.sync(); } finally { await d.close(); }
