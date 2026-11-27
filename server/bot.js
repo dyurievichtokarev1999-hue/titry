@@ -617,6 +617,8 @@ export function createBot({
   // вызываются, содержание в сессию не пишется (QA «Приём рассказа до подтверждений», критерии 1–3).
   const consentDone = (s) => s.consent?.step === 'done';
   // Отметка о согласии в отдельном хранилище (А7): код участника, шаг, кнопка, версия текста, время — без текстов.
+  // Отзыв по журналу отметок (память процесса пуста): проверка и запись — одним звеном очереди журнала. true — записан.
+  const withdrawIfLogged = (chatId, step) => (consentLog?.withdrawIfActive ? consentLog.withdrawIfActive(chatId, { step, version: CONSENT_VERSION }) : Promise.resolve(false));
   const mark = (chatId, step, answer) => (consentLog ? consentLog.record(chatId, { step, answer, version: CONSENT_VERSION }) : Promise.resolve());
   // Порядок экранов: заданный целиком (с 'intro') или прежний вид «6А, затем шаги» для тестов с явным порядком.
   const flow = consentOrder.includes('intro') ? consentOrder : ['intro', ...consentOrder];
@@ -658,7 +660,8 @@ export function createBot({
   // просроченной попыткой и повтором не должны давать отзыв после принятого повтора (QA PR 39 3548ae8).
   // Запись о чате живёт, пока по нему есть записи «да» в работе или ожидание; потом удаляется.
   // Чаты, где в этом процессе было дано согласие 6Б и не отозвано: /delete пишет отзыв и после того, как сессия
-  // истекла (3 ч без сообщений). После перезапуска программы набор пуст — тогда, как и раньше, отзыв не пишется.
+  // истекла (3 ч без сообщений). После перезапуска программы набор пуст — тогда признак берётся из журнала отметок
+  // (withdrawIfLogged: /delete и отказ на 6Б/6Г).
   // Только номера чатов в памяти; размер — число участников теста.
   const consentedChats = new Set();
   const consentMarks = new Map(); // chatId → { [step]: { waiting, inflight, accepted, dirty } }
@@ -740,7 +743,9 @@ export function createBot({
     consentedChats.delete(chatId);
     revokeMarks(chatId); // поздняя «да» просроченной попытки после этого отказа будет отозвана
     // Отказ после данного согласия — отзыв: отметка в хранилище (А7). Сбой записи отказ не задерживает.
-    if (had) mark(chatId, step, 'withdraw').catch((e) => logError('consent.withdraw', e));
+    // Памяти о согласии нет (перезапуск) — отзыв по журналу отметок; от него зависит и текст ageDeleted ниже.
+    const logged = had ? (mark(chatId, step, 'withdraw').catch((e) => logError('consent.withdraw', e)), Promise.resolve(true))
+      : withdrawIfLogged(chatId, step).catch((e) => { logError('consent.withdraw', e); return false; });
     // Отзыв согласия = удаление метрик, как /delete (решение Claude 20.11). Запуск — синхронно, до ответов: запись,
     // уже стоящая в очереди, отбрасывается барьером поколения. Сбой — код в журнал и честное сообщение после ответов.
     const forgot = (async () => metrics.forget(chatId))().then(() => true, (e) => { logError('metrics.forget.withdraw', e); return false; }); // тело — синхронно
@@ -751,7 +756,11 @@ export function createBot({
       // Возраст спрашивается первым (А8): отметок этого прохождения ещё нет, но согласие могло быть дано раньше в этой сессии.
       c.given = {};
       await tg.send(chatId, CONSENT_TEXT.ageDeclined);
-      if (had) await tg.send(chatId, CONSENT_TEXT.ageDeleted);
+      // Журнал завис — ответ не ждёт дольше 2 с (отказ не задерживается); отзыв допишется после освобождения.
+      let timer;
+      const shown = had || await Promise.race([logged, new Promise((r) => { timer = setTimeout(() => r(false), 2000); })]);
+      clearTimeout(timer);
+      if (shown) await tg.send(chatId, CONSENT_TEXT.ageDeleted);
     }
     if (!(await forgot)) return tg.send(chatId, TEXT.withdrawForgetFailed);
   }
@@ -1226,6 +1235,28 @@ export function createBot({
   }
 
   // Ответ на /delete — и для чатов вне списка закрытого теста.
+  // /delete — отзыв согласия (решение Дмитрия): отметка withdraw, если согласие давали — в этой сессии или в этом процессе
+  // (consentedChats). Одинаково для участника и для чата, убранного из списка допуска (решение Claude 27.11).
+  // Память процесса пуста (перезапуск, в том числе после правки списка допуска) — признак берётся из журнала отметок.
+  // Сессия и статистика удаляются сразу; отзыв пишется параллельно и ответ не задерживает. Сбой чтения — в журнал ошибок.
+  // Чат вне списка: журнал отметок для /delete читается не чаще раза в 10 минут на чат — иначе поток /delete занял бы
+  // общую очередь журнала и «Да» участников ждали бы дольше предела записи. Предел числа чатов — как у outsiders.
+  const outsiderChecks = new Map();
+  const outsiderMayCheck = (chatId) => {
+    const t = now().getTime();
+    if (t - (outsiderChecks.get(chatId) || -Infinity) < 10 * 60 * 1000) return false;
+    if (outsiderChecks.size >= 10000) outsiderChecks.clear();
+    outsiderChecks.set(chatId, t);
+    return true;
+  };
+  function deleteRequest(chatId, s = sessions.get(chatId), { checkLog = true } = {}) {
+    const known = !!(s?.consentedBefore || Object.keys(s?.consent?.given || {}).length || s?.consent?.marking || consentedChats.has(chatId));
+    consentedChats.delete(chatId);
+    sessions.delete(chatId);
+    revokeMarks(chatId);
+    (known ? mark(chatId, 'delete', 'withdraw') : checkLog ? withdrawIfLogged(chatId, 'delete') : Promise.resolve()).catch((e) => logError('consent.withdraw', e));
+    return deleteReply(chatId);
+  }
   async function deleteReply(chatId) {
     // Честный ответ (редактор 16:24): «удалены» — только если удаление сессии и статистики подтверждено.
     // Запрет safety по /delete не снимается; если они есть, полное удаление не подтверждается.
@@ -1250,7 +1281,7 @@ export function createBot({
     const text = cleanInput(msg.text || msg.caption || '').trim();
     const cmd = parseCommand(text);
     const bare = cmd && !cmd.tail && KNOWN_COMMANDS.has(cmd.name) ? cmd.name : null;
-    if (bare === 'delete') return deleteReply(chatId);
+    if (bare === 'delete') return deleteRequest(chatId, undefined, { checkLog: outsiderMayCheck(chatId) });
     if (bare === 'help') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });
     const level = text ? assessRisk(cmd ? cmd.tail || text : text).level : 'none';
     if (level === 'urgent') return tg.send(chatId, helpMessage('urgent'));
@@ -1283,14 +1314,9 @@ export function createBot({
       try { return await (consentDone(s) ? tg.send(chatId, say.year) : startConsent(chatId, s)); } finally { await logged; }
     }
     if (bare === 'delete') {
-      // Согласие в этой сессии было — запрос удаления пишется как отзыв (А7); /delete отметки не стирает.
-      // Без согласия в сессии (или после перезапуска) записи нет. Сбой записи удаление не задерживает.
-      const consented = !!(s.consentedBefore || Object.keys(s.consent?.given || {}).length || s.consent?.marking || consentedChats.has(chatId));
-      consentedChats.delete(chatId);
-      sessions.delete(chatId);
-      revokeMarks(chatId);
-      if (consented) mark(chatId, 'delete', 'withdraw').catch((e) => logError('consent.withdraw', e));
-      return deleteReply(chatId);
+      // Согласие было (в сессии, в этом процессе или по журналу отметок) — запрос удаления пишется как отзыв (А7);
+      // /delete отметки не стирает. Без согласия записи нет. Сбой записи удаление не задерживает.
+      return deleteRequest(chatId, s);
     }
     if (bare === 'help') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });
     // До 6Ж и после отказа — ничего из сообщения не обрабатывается. Исключение — уже идущая доставка ролика
