@@ -173,6 +173,10 @@ test('TITRY_RENDER_TIMEOUT_MS: «0», «-5», «abc» → 180000 и одна с�
   }
   const lines = [];
   assert.equal(renderTimeoutFromEnv({ env: { TITRY_RENDER_TIMEOUT_MS: '90000' }, log: (l) => lines.push(l) }), 90000);
+  // Предел setTimeout (решение Claude 27.11): больше 2^31−1 мс Node превращает в 1 мс — значение по умолчанию.
+  assert.equal(renderTimeoutFromEnv({ env: { TITRY_RENDER_TIMEOUT_MS: '2147483648' }, log: () => {} }), 180000);
+  assert.equal(renderTimeoutFromEnv({ env: { TITRY_RENDER_TIMEOUT_MS: '2147483647' }, log: () => {} }), 180000, 'с запасом на два KILL_GRACE_MS');
+  assert.equal(renderTimeoutFromEnv({ env: { TITRY_RENDER_TIMEOUT_MS: '2147473647' }, log: () => {} }), 2147473647);
   assert.equal(renderTimeoutFromEnv({ env: {}, log: (l) => lines.push(l) }), 180000);
   assert.equal(lines.length, 0);
 });

@@ -97,11 +97,16 @@ test('конфигурация: открытый режим без предел�
   assert.equal(admissionFromEnv({}), null);
   const ok = admissionFromEnv({ TITRY_CLOSED_TEST: '1', TITRY_ALLOWED_CHATS: '1001, 1003', TITRY_STORIES_PER_DAY: '3', TITRY_MODEL_CONCURRENCY: '2' });
   assert.deepEqual([...ok.allowed], ['1001', '1003']);
+  assert.deepEqual([...admissionFromEnv({ TITRY_CLOSED_TEST: '1', TITRY_ALLOWED_CHATS: '-1001234567890', TITRY_STORIES_PER_DAY: '3', TITRY_MODEL_CONCURRENCY: '2' }).allowed], ['-1001234567890'], 'номер группы');
   assert.deepEqual([ok.perDay, ok.concurrency, ok.waitMs], [3, 2, 30000]);
   for (const env of [
     { TITRY_CLOSED_TEST: '1' },
     { TITRY_CLOSED_TEST: '1', TITRY_ALLOWED_CHATS: '', TITRY_STORIES_PER_DAY: '3', TITRY_MODEL_CONCURRENCY: '2' },
     { TITRY_CLOSED_TEST: '1', TITRY_ALLOWED_CHATS: 'анна', TITRY_STORIES_PER_DAY: '3', TITRY_MODEL_CONCURRENCY: '2' },
+    // ведущий ноль: «01001» не совпал бы с номером из Telegram (решение Claude 27.11)
+    { TITRY_CLOSED_TEST: '1', TITRY_ALLOWED_CHATS: '1001, 01001', TITRY_STORIES_PER_DAY: '3', TITRY_MODEL_CONCURRENCY: '2' },
+    { TITRY_CLOSED_TEST: '1', TITRY_ALLOWED_CHATS: '-0100123', TITRY_STORIES_PER_DAY: '3', TITRY_MODEL_CONCURRENCY: '2' },
+    { TITRY_CLOSED_TEST: '1', TITRY_ALLOWED_CHATS: '0', TITRY_STORIES_PER_DAY: '3', TITRY_MODEL_CONCURRENCY: '2' },
     { TITRY_CLOSED_TEST: '1', TITRY_ALLOWED_CHATS: '1001', TITRY_STORIES_PER_DAY: '0', TITRY_MODEL_CONCURRENCY: '2' },
     { TITRY_CLOSED_TEST: '1', TITRY_ALLOWED_CHATS: '1001', TITRY_STORIES_PER_DAY: '3' },
     { TITRY_ALLOWED_CHATS: '1001' },
