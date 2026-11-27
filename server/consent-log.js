@@ -75,7 +75,8 @@ export function makeConsentLog(file, { hash, now = () => new Date(), stuckMs = C
     withdrawIfActive(chatId, { step, version }) {
       if (!STEPS.has(step)) return Promise.reject(Object.assign(new Error('consent-log: неизвестная отметка'), { code: 'consent_bad_mark' }));
       return queue(async () => {
-        if (!(await activeNow(hash(chatId)))) return false;
+        // Журнал не прочитать (не ENOENT) — согласие неизвестно: отзыв всё равно пишется, лишний отзыв безвреден (разбор PR 47).
+        if (!(await activeNow(hash(chatId)).catch(() => true))) return false;
         await append(lineOf(chatId, step, 'withdraw', version));
         return true;
       });

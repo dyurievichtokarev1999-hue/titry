@@ -475,11 +475,23 @@ for (const fail of ['stat', 'read']) {
     let ok;
     try { ok = await log.withdrawIfActive(1, { step: 'delete', version: 'v' }); } finally { fs.open = origOpen; }
     assert.equal(ok, true);
+    assert.match(await fs.readFile(file, 'utf8'), /}\n\n\{/, 'граница неизвестна — дозапись с начальным «\\n»');
     const lines = (await fs.readFile(file, 'utf8')).split('\n').filter(Boolean).map((l) => JSON.parse(l));
     assert.deepEqual(lines.map((r) => `${r.step}:${r.answer}`), ['pd:yes', 'delete:withdraw']);
     assert.equal(await log.active(1), false);
   });
 }
+test('журнал: сбой чтения всего файла при /delete — отзыв всё равно записан', async () => {
+  const file = await tmpFile();
+  const log = makeConsentLog(file, { hash: (id) => `p${id}` });
+  await log.record(1, { step: 'pd', answer: 'yes', version: 'v' });
+  const orig = fs.readFile;
+  fs.readFile = async (f, ...a) => (f === file ? Promise.reject(Object.assign(new Error('сбой'), { code: 'EIO' })) : orig(f, ...a));
+  let ok;
+  try { ok = await log.withdrawIfActive(1, { step: 'delete', version: 'v' }); } finally { fs.readFile = orig; }
+  assert.equal(ok, true);
+  assert.equal(await log.active(1), false);
+});
 // Граница защиты чтения вне списка (критика PR 45, принято частично): в пределах кеша; при 10 000 записях — сброс.
 test('чат вне списка: «не чаще раза в 10 минут» — в пределах кеша; при заполнении кеша защита сбрасывается', async () => {
   const { makeAdmission } = await import('../server/admission.js');
