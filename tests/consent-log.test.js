@@ -396,6 +396,29 @@ test('журнал: согласие 6Б действует до отзыва; �
   await log.record(1, { step: 'delete', answer: 'withdraw', version: 'v' });
   assert.equal(await log.active(1), false);
 });
+test('журнал: служебный отзыв поздней «да» на 6В не снимает согласие 6Б; два /delete после перезапуска — одна строка', async () => {
+  const file = await tmpFile();
+  const log = makeConsentLog(file, { hash: (id) => `p${id}` });
+  for (const [step, answer] of [['age', 'yes'], ['pd', 'yes'], ['abroad', 'yes'], ['abroad', 'withdraw']]) await log.record(1, { step, answer, version: 'v' });
+  assert.equal(await log.active(1), true, 'abroad:withdraw (settle) 6Б не снимает');
+  const [a, b] = await Promise.all([log.withdrawIfActive(1, { step: 'delete', version: 'v' }), log.withdrawIfActive(1, { step: 'delete', version: 'v' })]);
+  assert.deepEqual([a, b], [true, false]);
+  assert.equal((await read(file)).filter((r) => r.step === 'delete').length, 1);
+});
+test('согласие → перезапуск → /start → «Нет» на возрасте: отзыв по журналу и текст ageDeleted', async () => {
+  const file = await tmpFile();
+  const a = bot(makeConsentLog(file, { hash: () => 'participant-a' }));
+  await a.consent();
+  const b = bot(makeConsentLog(file, { hash: () => 'participant-a' }));
+  await b.say('/start'); await b.press('age', 'no'); await flush();
+  const last = (await read(file)).at(-1);
+  assert.equal(`${last.step}:${last.answer}`, 'age:withdraw');
+  assert.equal(b.sent.at(-1).text, CONSENT_TEXT.ageDeleted);
+  const n = (await read(file)).length;
+  await b.say('/start'); await b.press('age', 'no'); await flush();
+  assert.equal(b.sent.at(-1).text, CONSENT_TEXT.ageDeclined, 'повторный отказ — без «отозвано»');
+  assert.equal((await read(file)).length, n + 0, 'и без новой строки');
+});
 test('чат вне списка, согласия не давал — /delete без отметки', async () => {
   const { makeAdmission } = await import('../server/admission.js');
   const rows = [];
