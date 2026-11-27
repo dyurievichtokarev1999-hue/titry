@@ -32,7 +32,9 @@ export function admissionFromEnv(env = process.env) {
   let allowed = null;
   if (closed) {
     const ids = String(env.TITRY_ALLOWED_CHATS || '').split(',').map((x) => x.trim()).filter(Boolean);
-    if (!ids.length || ids.some((x) => !/^-?\d{1,20}$/.test(x))) throw bad('TITRY_ALLOWED_CHATS — номера чатов через запятую');
+    // Без ведущего нуля: «01001» никогда не совпадёт с номером из Telegram — участник молча не получил бы доступа.
+    // Сверх MAX_SAFE_INTEGER — тоже: номер из Telegram (число) с такой строкой не совпадёт.
+    if (!ids.length || ids.some((x) => !/^-?[1-9]\d*$/.test(x) || !Number.isSafeInteger(Number(x)))) throw bad('TITRY_ALLOWED_CHATS — номера чатов через запятую, без ведущих нулей');
     allowed = new Set(ids);
   }
   const perDay = closed || set('TITRY_STORIES_PER_DAY') ? positive(env.TITRY_STORIES_PER_DAY, 'TITRY_STORIES_PER_DAY') : Infinity;

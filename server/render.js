@@ -81,12 +81,14 @@ export const RENDER_TIMEOUT_MS = 180 * 1000;
 // Сколько ждать выхода FFmpeg после SIGTERM, прежде чем послать SIGKILL.
 export const KILL_GRACE_MS = 5000;
 
-/** Предел из окружения. Неположительное или нечисловое значение — значение по умолчанию и одна строка в журнал. */
+/** Предел из окружения. Неположительное, нечисловое или слишком большое значение — значение по умолчанию и одна строка в журнал. */
 export function renderTimeoutFromEnv({ env = process.env, log = console.error } = {}) {
   const raw = env.TITRY_RENDER_TIMEOUT_MS;
   if (raw === undefined || raw === '') return RENDER_TIMEOUT_MS;
   const n = Number(raw);
-  if (Number.isFinite(n) && Math.round(n) > 0) return Math.round(n); // «0.4» округлилось бы до 0 — как неверное
+  // «0.4» округлилось бы до 0 — как неверное. Сверху — предел setTimeout (2^31−1 мс) с запасом на два KILL_GRACE_MS:
+  // больше Node превращает в 1 мс, и каждый рендер обрывался бы сразу.
+  if (Number.isFinite(n) && Math.round(n) > 0 && Math.round(n) <= 2147483647 - 2 * KILL_GRACE_MS) return Math.round(n);
   // Только этап и код, без значения переменной.
   log(JSON.stringify({ at: new Date().toISOString(), level: 'warn', stage: 'render.timeout', code: 'render_timeout_config', ms: RENDER_TIMEOUT_MS }));
   return RENDER_TIMEOUT_MS;
