@@ -436,6 +436,75 @@ test('чат вне списка: поток /delete читает журнал �
   for (let i = 0; i < 5; i++) await t.say('/delete');
   assert.equal(reads, 1);
 });
+// Решение Claude 27.11: оборванная последняя строка (падение посреди дозаписи) не скрывает следующую запись.
+test('журнал: оборванный хвост без перевода строки — следующая запись читается', async () => {
+  const file = await tmpFile();
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  const log = makeConsentLog(file, { hash: (id) => `p${id}` });
+  await log.record(1, { step: 'age', answer: 'yes', version: 'v' });
+  await fs.appendFile(file, '{"at":"2026-11-27T00:00:00.000Z","partic'); // обрыв без \n
+  await log.record(1, { step: 'pd', answer: 'yes', version: 'v' });
+  const lines = (await fs.readFile(file, 'utf8')).split('\n').filter(Boolean);
+  assert.equal(lines.length, 3);
+  const last = JSON.parse(lines[2]);
+  assert.equal(`${last.step}:${last.answer}`, 'pd:yes');
+  assert.equal(await log.active(1), true, 'согласие 6Б видно по журналу');
+});
+test('сбой записи «Да» на 6Б (могла лечь без перевода строки) — шаг не засчитан, служебный отзыв pd:withdraw', async () => {
+  const rows = []; let fail = true;
+  const t = bot({ record: async (id, m) => { if (fail && m.step === 'pd' && m.answer === 'yes') { fail = false; throw Object.assign(new Error('диск'), { code: 'ENOSPC' }); } rows.push(`${m.step}:${m.answer}`); } });
+  await t.say('/start'); await t.press('age', 'yes'); await t.press('intro', 'next'); await t.press('pd', 'yes'); await flush();
+  assert.equal(t.step(), 'pd');
+  assert.equal(rows.at(-1), 'pd:withdraw');
+  await t.press('pd', 'yes'); await flush();
+  assert.equal(t.step(), 'abroad', 'повтор засчитан');
+  assert.equal(rows.at(-1), 'pd:yes');
+});
+// QA PR 47 на 4093338: сбой stat() или read() после открытия файла не мешает записать отзыв.
+for (const fail of ['stat', 'read']) {
+  test(`журнал: сбой ${fail}() при проверке хвоста — отзыв записан отдельной строкой, согласия больше нет`, async () => {
+    const file = await tmpFile();
+    const log = makeConsentLog(file, { hash: (id) => `p${id}` });
+    await log.record(1, { step: 'pd', answer: 'yes', version: 'v' });
+    const origOpen = fs.open;
+    fs.open = async (...a) => {
+      const fh = await origOpen(...a);
+      if (a[1] === 'r') fh[fail] = async () => { throw Object.assign(new Error('сбой'), { code: 'EIO' }); };
+      return fh;
+    };
+    let ok;
+    try { ok = await log.withdrawIfActive(1, { step: 'delete', version: 'v' }); } finally { fs.open = origOpen; }
+    assert.equal(ok, true);
+    assert.match(await fs.readFile(file, 'utf8'), /}\n\n\{/, 'граница неизвестна — дозапись с начальным «\\n»');
+    const lines = (await fs.readFile(file, 'utf8')).split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    assert.deepEqual(lines.map((r) => `${r.step}:${r.answer}`), ['pd:yes', 'delete:withdraw']);
+    assert.equal(await log.active(1), false);
+  });
+}
+test('журнал: сбой чтения всего файла при /delete — отзыв всё равно записан', async () => {
+  const file = await tmpFile();
+  const log = makeConsentLog(file, { hash: (id) => `p${id}` });
+  await log.record(1, { step: 'pd', answer: 'yes', version: 'v' });
+  const orig = fs.readFile;
+  fs.readFile = async (f, ...a) => (f === file ? Promise.reject(Object.assign(new Error('сбой'), { code: 'EIO' })) : orig(f, ...a));
+  let ok;
+  try { ok = await log.withdrawIfActive(1, { step: 'delete', version: 'v' }); } finally { fs.readFile = orig; }
+  assert.equal(ok, true);
+  assert.equal(await log.active(1), false);
+});
+// Граница защиты чтения вне списка (критика PR 45, принято частично): в пределах кеша; при 10 000 записях — сброс.
+test('чат вне списка: «не чаще раза в 10 минут» — в пределах кеша; при заполнении кеша защита сбрасывается', async () => {
+  const { makeAdmission } = await import('../server/admission.js');
+  let reads = 0;
+  const t = bot({ record: async () => {}, withdrawIfActive: async () => { reads++; return false; } }, { admission: makeAdmission({ allowed: new Set(['1']), perDay: 5, concurrency: 1 }) });
+  await t.say('/delete'); await t.say('/delete');
+  assert.equal(reads, 1, 'повтор того же чата — без чтения');
+  for (let i = 0; i < 10000; i++) await t.b.handleUpdate({ message: { chat: { id: 500000 + i, type: 'private' }, text: '/delete' } });
+  const before = reads;
+  await t.say('/delete');
+  assert.equal(reads, before + 1, 'кеш очищен — тот же чат снова читает журнал (глобального предела нет)');
+});
+
 test('чат вне списка, согласия не давал — /delete без отметки', async () => {
   const { makeAdmission } = await import('../server/admission.js');
   const rows = [];

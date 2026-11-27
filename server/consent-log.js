@@ -42,11 +42,28 @@ export function makeConsentLog(file, { hash, now = () => new Date(), stuckMs = C
     }
     return on;
   };
+  // Файл кончается не переводом строки (процесс упал или диск кончился посреди дозаписи) — новая строка начинается с
+  // перевода строки: иначе она склеилась бы с обрывком, и при разборе журнала пропали бы обе (решение Claude 27.11).
+  // Пишет журнал один процесс (Telegram и так не отдаёт обновления двум сразу): проверка и дозапись не атомарны между процессами.
+  const endsClean = async () => {
+    let fh;
+    // Нет файла — чисто; не прочитать хвост (права) — считаем оборванным: лишний перевод строки безвреден.
+    try { fh = await fs.open(file, 'r'); } catch (e) { return e.code === 'ENOENT'; }
+    try {
+      const { size } = await fh.stat();
+      if (!size) return true;
+      const b = Buffer.alloc(1);
+      await fh.read(b, 0, 1, size - 1);
+      return b[0] === 0x0a;
+    } catch {
+      return false; // сбой stat/read после открытия — граница строки неизвестна: дозапись с «\n» (QA PR 47 4093338)
+    } finally { await fh.close().catch(() => {}); }
+  };
   const append = async (line) => {
     busySince = clock();
     try {
       await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-      await fs.appendFile(file, line, { mode: 0o600 });
+      await fs.appendFile(file, (await endsClean()) ? line : `\n${line}`, { mode: 0o600 });
     } finally { busySince = 0; }
   };
   const lineOf = (chatId, step, answer, version) => `${JSON.stringify({ at: now().toISOString(), participant: hash(chatId), step, answer, version: String(version || '') })}\n`;
@@ -58,7 +75,8 @@ export function makeConsentLog(file, { hash, now = () => new Date(), stuckMs = C
     withdrawIfActive(chatId, { step, version }) {
       if (!STEPS.has(step)) return Promise.reject(Object.assign(new Error('consent-log: неизвестная отметка'), { code: 'consent_bad_mark' }));
       return queue(async () => {
-        if (!(await activeNow(hash(chatId)))) return false;
+        // Журнал не прочитать (не ENOENT) — согласие неизвестно: отзыв всё равно пишется, лишний отзыв безвреден (разбор PR 47).
+        if (!(await activeNow(hash(chatId)).catch(() => true))) return false;
         await append(lineOf(chatId, step, 'withdraw', version));
         return true;
       });
