@@ -13,6 +13,7 @@ import { renderEpisode, checkRenderer, ROOT, RENDER_TIMEOUT_MS, KILL_GRACE_MS, r
 import { logError, safeCode, logRenderTimeout } from './errlog.js';
 import { transcribeOgg, sttAvailable, MAX_VOICE_SECONDS, cleanupVoiceOrphans } from './stt.js';
 import { processLedger, KEY_ENV, KEY_VERSION_ENV } from './ledger.js';
+import { makeHealth, writeHealth } from './health.js';
 import { admissionFromEnv, makeAdmission } from './admission.js';
 import { makeConsentLog, probeConsentLog } from './consent-log.js';
 import { CONSENT_TEXT, CONSENT_VERSION, consentSteps } from './consent.js';
@@ -1626,7 +1627,8 @@ export async function prepareBot({ checkRender = checkRenderer, cleanup = cleanu
   // Хранилище отметок о согласии (А7): без записи отметки ни один участник не пройдёт подтверждения.
   try { await probeConsentLog(consentFile); } catch (e) { logError('consent.log', e); throw Object.assign(new Error('startup'), { code: safeCode(e), stage: 'consent.log' }); }
   const l = ledger || processLedger('bot', path.join(ROOT, 'data', 'state'));
-  try { await l.load(); } catch (e) { logError('ledger.load', e); throw Object.assign(new Error('startup'), { code: 'ledger', stage: 'ledger.load' }); }
+  // ledger_missing — файл запретов пропал после инициализации (план Критика 20.11, п. 5): старт закрыт до восстановления.
+  try { await l.load(); } catch (e) { logError('ledger.load', e); throw Object.assign(new Error('startup'), { code: e?.code === 'ledger_missing' ? 'ledger_missing' : 'ledger', stage: 'ledger.load' }); }
   return l;
 }
 
@@ -1634,7 +1636,11 @@ async function main() {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) { console.error('Задайте TELEGRAM_BOT_TOKEN (выдаёт @BotFather).'); process.exit(2); }
   let ledger;
-  try { ledger = await prepareBot(); } catch {
+  try { ledger = await prepareBot(); } catch (e) {
+    if (e?.code === 'ledger_missing') {
+      console.error('Запуск остановлен: файл запретов (data/state/blocked-v1.json) пропал после записи. Восстановите data/state из резервной копии. Удалять метку blocked-v1.json.init — только решением владельца: это снимает все остановки по безопасности.');
+      process.exit(3);
+    }
     console.error(`Запуск остановлен: не задана METRICS_SALT (не короче ${METRICS_SALT_MIN} знаков), нет ключа модели или тексты для участника (согласие, реплики бота) не окончательные при TITRY_RELEASE_REAL_DATA=1, голос не выключен (TITRY_VOICE=off) при TITRY_RELEASE_REAL_DATA=1, неверный допуск закрытого теста (TITRY_CLOSED_TEST, TITRY_ALLOWED_CHATS, TITRY_STORIES_PER_DAY, TITRY_MODEL_CONCURRENCY, TITRY_MODEL_WAIT_MS; при TITRY_RELEASE_REAL_DATA=1 — обязателен закрытый режим), не проверены контакты помощи (config/help.json), не найден Playwright, не запускается Chromium (TITRY_CHROMIUM) или ffmpeg (FFMPEG), не подтверждена очистка временных файлов, хранилище отметок о согласии (data/consent.jsonl) или хранилище запретов (${KEY_ENV}, ${KEY_VERSION_ENV}). Задачи не принимаются. Остатки tmp и файл хранилища не удаляйте вручную без владельца кода.`);
     process.exit(3);
   }
@@ -1653,16 +1659,24 @@ async function main() {
   const consentLog = makeConsentLog(CONSENT_FILE, { hash: metrics.hash });
   const bot = createBot({ tg, ledger, metrics, consentLog, admission, renderTimeoutMs: renderTimeoutFromEnv(), botName: me.username, voice: voiceEnabled() });
   setInterval(() => { bot.sweep(); if (admission) admission.sweep(); }, 10 * 60 * 1000).unref();
+  // Снимок состояния для внешнего наблюдателя (Б6 п. 5): раз в минуту, без номеров и текстов; отправок наружу нет.
+  const health = makeHealth();
+  const healthFile = path.join(ROOT, 'data', 'health.json');
+  const snap = () => writeHealth(healthFile, health.snapshot({ stateHealthy: ledger.healthy() })).catch((e) => logError('health', e));
+  snap();
+  setInterval(snap, 60 * 1000).unref();
   let offset = 0;
   for (;;) {
     try {
       const updates = await tg.call('getUpdates', { offset, timeout: 30, allowed_updates: ['message', 'edited_message', 'callback_query'] });
+      health.pollOk();
       for (const u of updates) {
         offset = u.update_id + 1;
         bot.handleUpdate(u); // не ждём: рендер одного пользователя не блокирует ответы другим
       }
     } catch (e) {
       logError('poll', e);
+      health.pollFailed(safeCode(e));
       await new Promise((r) => setTimeout(r, 3000));
     }
   }
