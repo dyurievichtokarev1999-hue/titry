@@ -735,7 +735,10 @@ export function createBot({
       c.given = {};
       await tg.send(chatId, CONSENT_TEXT.ageDeclined);
       // Журнал завис — ответ не ждёт дольше 2 с (отказ не задерживается); отзыв допишется после освобождения.
-      if (await Promise.race([logged, new Promise((r) => setTimeout(() => r(false), 2000).unref?.())])) await tg.send(chatId, CONSENT_TEXT.ageDeleted);
+      let timer;
+      const shown = had || await Promise.race([logged, new Promise((r) => { timer = setTimeout(() => r(false), 2000); })]);
+      clearTimeout(timer);
+      if (shown) await tg.send(chatId, CONSENT_TEXT.ageDeleted);
     }
     if (!(await forgot)) return tg.send(chatId, TEXT.withdrawForgetFailed);
   }
@@ -1196,12 +1199,22 @@ export function createBot({
   // (consentedChats). Одинаково для участника и для чата, убранного из списка допуска (решение Claude 27.11).
   // Память процесса пуста (перезапуск, в том числе после правки списка допуска) — признак берётся из журнала отметок.
   // Сессия и статистика удаляются сразу; отзыв пишется параллельно и ответ не задерживает. Сбой чтения — в журнал ошибок.
-  function deleteRequest(chatId, s = sessions.get(chatId)) {
+  // Чат вне списка: журнал отметок для /delete читается не чаще раза в 10 минут на чат — иначе поток /delete занял бы
+  // общую очередь журнала и «Да» участников ждали бы дольше предела записи. Предел числа чатов — как у outsiders.
+  const outsiderChecks = new Map();
+  const outsiderMayCheck = (chatId) => {
+    const t = now().getTime();
+    if (t - (outsiderChecks.get(chatId) || -Infinity) < 10 * 60 * 1000) return false;
+    if (outsiderChecks.size >= 10000) outsiderChecks.clear();
+    outsiderChecks.set(chatId, t);
+    return true;
+  };
+  function deleteRequest(chatId, s = sessions.get(chatId), { checkLog = true } = {}) {
     const known = !!(s?.consentedBefore || Object.keys(s?.consent?.given || {}).length || s?.consent?.marking || consentedChats.has(chatId));
     consentedChats.delete(chatId);
     sessions.delete(chatId);
     revokeMarks(chatId);
-    (known ? mark(chatId, 'delete', 'withdraw') : withdrawIfLogged(chatId, 'delete')).catch((e) => logError('consent.withdraw', e));
+    (known ? mark(chatId, 'delete', 'withdraw') : checkLog ? withdrawIfLogged(chatId, 'delete') : Promise.resolve()).catch((e) => logError('consent.withdraw', e));
     return deleteReply(chatId);
   }
   async function deleteReply(chatId) {
@@ -1228,7 +1241,7 @@ export function createBot({
     const text = cleanInput(msg.text || msg.caption || '').trim();
     const cmd = parseCommand(text);
     const bare = cmd && !cmd.tail && KNOWN_COMMANDS.has(cmd.name) ? cmd.name : null;
-    if (bare === 'delete') return deleteRequest(chatId);
+    if (bare === 'delete') return deleteRequest(chatId, undefined, { checkLog: outsiderMayCheck(chatId) });
     if (bare === 'help') return tg.send(chatId, TEXT.editHelp, { parse_mode: 'HTML' });
     const level = text ? assessRisk(cmd ? cmd.tail || text : text).level : 'none';
     if (level === 'urgent') return tg.send(chatId, helpMessage('urgent'));

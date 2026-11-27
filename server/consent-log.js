@@ -30,7 +30,8 @@ export function makeConsentLog(file, { hash, now = () => new Date(), stuckMs = C
   // Действует ли согласие 6Б участника по журналу: после последнего отзыва 6Б, 6Г («Нет» на возрасте) или /delete есть
   // «да» на 6Б. Отзыв 6В — служебный, за поздней «да» на передачу — согласие 6Б не снимает. Вызывается внутри очереди.
   const activeNow = async (who) => {
-    const text = await fs.readFile(file, 'utf8').catch((e) => { if (e.code === 'ENOENT') return ''; throw e; });
+    busySince = clock(); // зависшее чтение — тоже зависание: новые «да» отклоняются сразу
+    const text = await fs.readFile(file, 'utf8').catch((e) => { if (e.code === 'ENOENT') return ''; throw e; }).finally(() => { busySince = 0; });
     let on = false;
     for (const line of text.split('\n')) {
       if (!line) continue;
