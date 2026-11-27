@@ -473,14 +473,23 @@ export const TEXT_ONLY = {
 
 // ── Логика бота (транспорт подменяется в тестах) ─────────────────────────────
 
-// Номера роликов, выданные процессом (QA PR 35 на 67f3133): уникальность не зависит от сессии и её истечения.
-// Наружу (в кнопки и метрики) идёт только случайная часть — ни счётчика, ни времени запуска (code-review f860176).
-const issuedVideoIds = new Set();
-const ISSUED_KEEP = 100000; // предел памяти; столько роликов в процессе G0 не будет
+// Номер ролика (ИТОГ совета 27.11 по PR 35, решение Claude 25.11 п. 2): префикс процесса + счётчик процесса + случайная часть.
+// Внутри процесса номера различны по построению (счётчик), между перезапусками — по префиксу (4 случайных байта при старте).
+// Счётчик начинается со случайного смещения: число выпущенных роликов из кнопки не читается; разность двух номеров
+// показывает только число роликов процесса между ними (принято советом для закрытого теста). Номер без «:» — он в кнопке.
+export function makeVideoIds({ prefix = crypto.randomBytes(4).toString('hex'), start = crypto.randomBytes(4).readUInt32BE(0) } = {}) {
+  let seq = start;
+  return (random) => {
+    if (!Number.isSafeInteger(seq)) throw Object.assign(new Error('video id: счётчик исчерпан'), { code: 'video_id' });
+    return `${prefix}${(seq++).toString(36)}-${random}`;
+  };
+}
+const processVideoIds = makeVideoIds();
 
 export function createBot({
   tg, metrics = makeMetrics(), draft = makeDraft, render = renderEpisode, transcribe = transcribeOgg, now = () => new Date(),
-  newVideoId = () => crypto.randomBytes(8).toString('hex'), // номер ролика в кнопках отклика и метриках (подменяется в тестах)
+  newVideoId = () => crypto.randomBytes(8).toString('hex'), // случайная часть номера ролика (подменяется в тестах)
+  videoIds = processVideoIds, // выдача номеров роликов (makeVideoIds); общая для процесса, в тестах — своя
   // false — голос выключен (TITRY_VOICE=off, решение Дмитрия 24.11, А4: в G0 только текст; main передаёт флаг):
   // голосовое не скачивается и не распознаётся, ответ — «пока только текстом»; подпись к нему идёт как текст.
   voice = true,
@@ -1013,13 +1022,8 @@ export function createBot({
       // не отзывается: Telegram не умеет отменить отправку; окно — время одного HTTP-запроса.
       // Случайный номер ролика (QA PR 35): по нему отклики в метриках связаны с этим роликом и отделены от других
       // роликов того же участника (номер в сессии сбрасывался бы с сессией). Сам по себе ничего не раскрывает.
-      // Номер ролика: 8 случайных байт, при совпадении с уже выданным процессом — новый (после 8 попыток внедрённого
-      // генератора — из crypto). Истечение сессии и вытеснение из последних 20 номер не повторяют; между перезапусками
-      // совпадение 64 случайных бит практически исключено.
-      let video;
-      for (let i = 0; !video || issuedVideoIds.has(video); i++) video = i < 8 ? newVideoId() : crypto.randomBytes(8).toString('hex');
-      issuedVideoIds.add(video);
-      if (issuedVideoIds.size > ISSUED_KEEP) issuedVideoIds.delete(issuedVideoIds.values().next().value);
+      // Номер ролика — makeVideoIds: истечение сессии, вытеснение из последних 20 и перезапуск номер не повторяют.
+      const video = videoIds(newVideoId());
       // Запись render — один раз на ролик: после подтверждения отправки или, если ответ Telegram потерялся, перед первым
       // откликом под этим роликом (нажатие кнопки доказывает доставку; QA PR 35 на d64c0e0).
       const renderData = { seconds: Math.round(r.seconds), mood: ep.mood, music: ep.music, edits: s.edits || 0, video };

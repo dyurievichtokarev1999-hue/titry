@@ -77,7 +77,7 @@ test('сквозной: два ролика одного участника — 
   // Только сохранённые записи: render и feedback с номером ролика.
   const renders = t.log.filter((r) => r.e === 'render').map((r) => r.video);
   assert.equal(renders.length, 2);
-  assert.match(renders[0], /^[0-9a-f]{16}$/, 'наружу — только случайная часть');
+  assert.match(renders[0], /^[0-9a-f]{8}[0-9a-z]+-[0-9a-f]{16}$/, 'номер: префикс процесса, счётчик, случайная часть');
   assert.notEqual(renders[0], renders[1], 'у роликов разные номера');
   const byVideo = (id) => t.fb().filter((r) => r.video === id).map((r) => r.value);
   assert.deepEqual(byVideo(renders[0]), ['fit', 'heavier'], 'первый ролик: отклик и сигнал вреда');
@@ -212,12 +212,13 @@ test('сбой записи render при отклике — отклик не �
 
 // QA PR 35 на 1eb3f77: совпадение случайного номера двух роликов одного участника.
 // QA PR 35 на 1eb3f77 и 67f3133: номер не повторяется, даже если генератор выдаёт одно и то же; наружу — только случайная часть.
-function constBot(chatId) {
+function constBot(chatId, videoIds) {
   const log = []; const offered = [];
   const tg = { send: async () => {}, action: async () => {}, answer: async () => {}, fileBuffer: async () => Buffer.from(''),
     sendVideo: async (c, f, extra, o = {}) => { offered.push(extra); if (o.ready && !(await o.ready())) return null; return {}; } };
   const metrics = { hash: () => 'qa-fictional', forget: async () => {}, log: async (c, e, x) => { if (e === 'feedback' || e === 'render') log.push({ e, v: x.value || '', video: x.video }); } };
   const bot = createBot({ tg, metrics, safetyCheck: async () => false, checkRetryMs: 0, newVideoId: () => 'aaaaaaaaaaaaaaaa', // всегда одно и то же
+    ...(videoIds ? { videoIds } : {}),
     draft: async () => ({ episode: structuredClone(ex.episode), risk: { level: 'none' }, provider: 'claude', dropped: [] }),
     render: async (e, o) => ({ seconds: 1, duration: 24, outPath: o.outPath }) });
   const chat = { id: chatId, type: 'private' };
@@ -262,4 +263,24 @@ test('регрессия QA: кнопка ролика, вытесненного
   const before = t.log.filter((r) => r.e === 'feedback').length;
   await t.click(first); // вытеснен
   assert.equal(t.log.filter((r) => r.e === 'feedback').length, before, 'число откликов прежнее');
+});
+
+// ИТОГ совета 27.11 по PR 35: номер = префикс процесса + счётчик + случайная часть — различен по построению.
+test('номер ролика: граница счётчика, перезапуск (новый префикс), длина кнопки на максимуме', async () => {
+  const { makeVideoIds } = await import('../server/bot.js');
+  // перезапуск: тот же старт счётчика и та же случайная часть — номера различаются префиксом процесса
+  const a = makeVideoIds({ start: 7 }); const b = makeVideoIds({ start: 7 });
+  assert.notEqual(a('r'), b('r'));
+  // граница: последний безопасный номер выдаётся, следующий — отказ, а не повтор
+  const end = makeVideoIds({ prefix: 'deadbeef', start: Number.MAX_SAFE_INTEGER });
+  assert.match(end('aaaaaaaaaaaaaaaa'), /^deadbeef[0-9a-z]+-a{16}$/);
+  assert.throws(() => end('aaaaaaaaaaaaaaaa'), { code: 'video_id' });
+  // кнопки на максимуме счётчика — в пределе Telegram (64 байта), отклик связан со своим render
+  const t = constBot(94007, makeVideoIds({ prefix: 'deadbeef', start: Number.MAX_SAFE_INTEGER - 1 }));
+  const fit = await t.play();
+  for (const k of t.lastKeys()) assert.ok(Buffer.byteLength(k) <= 64, `callback_data в пределе: ${k} (${Buffer.byteLength(k)})`);
+  const v = fit.split(':')[3];
+  assert.equal(v, `deadbeef${(Number.MAX_SAFE_INTEGER - 1).toString(36)}-aaaaaaaaaaaaaaaa`);
+  await t.click(fit);
+  assert.deepEqual(t.pairs(v), ['render', 'feedback']);
 });
