@@ -42,11 +42,24 @@ export function makeConsentLog(file, { hash, now = () => new Date(), stuckMs = C
     }
     return on;
   };
+  // Файл кончается не переводом строки (процесс упал или диск кончился посреди дозаписи) — новая строка начинается с
+  // перевода строки: иначе она склеилась бы с обрывком, и при разборе журнала пропали бы обе (решение Claude 27.11).
+  const endsClean = async () => {
+    let fh;
+    try { fh = await fs.open(file, 'r'); } catch (e) { if (e.code === 'ENOENT') return true; throw e; }
+    try {
+      const { size } = await fh.stat();
+      if (!size) return true;
+      const b = Buffer.alloc(1);
+      await fh.read(b, 0, 1, size - 1);
+      return b[0] === 0x0a;
+    } finally { await fh.close(); }
+  };
   const append = async (line) => {
     busySince = clock();
     try {
       await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-      await fs.appendFile(file, line, { mode: 0o600 });
+      await fs.appendFile(file, (await endsClean()) ? line : `\n${line}`, { mode: 0o600 });
     } finally { busySince = 0; }
   };
   const lineOf = (chatId, step, answer, version) => `${JSON.stringify({ at: now().toISOString(), participant: hash(chatId), step, answer, version: String(version || '') })}\n`;

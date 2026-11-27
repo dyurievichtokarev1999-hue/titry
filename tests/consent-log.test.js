@@ -436,6 +436,33 @@ test('чат вне списка: поток /delete читает журнал �
   for (let i = 0; i < 5; i++) await t.say('/delete');
   assert.equal(reads, 1);
 });
+// Решение Claude 27.11: оборванная последняя строка (падение посреди дозаписи) не скрывает следующую запись.
+test('журнал: оборванный хвост без перевода строки — следующая запись читается', async () => {
+  const file = await tmpFile();
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  const log = makeConsentLog(file, { hash: (id) => `p${id}` });
+  await log.record(1, { step: 'age', answer: 'yes', version: 'v' });
+  await fs.appendFile(file, '{"at":"2026-11-27T00:00:00.000Z","partic'); // обрыв без \n
+  await log.record(1, { step: 'pd', answer: 'yes', version: 'v' });
+  const lines = (await fs.readFile(file, 'utf8')).split('\n').filter(Boolean);
+  assert.equal(lines.length, 3);
+  const last = JSON.parse(lines[2]);
+  assert.equal(`${last.step}:${last.answer}`, 'pd:yes');
+  assert.equal(await log.active(1), true, 'согласие 6Б видно по журналу');
+});
+// Граница защиты чтения вне списка (критика PR 45, принято частично): в пределах кеша; при 10 000 записях — сброс.
+test('чат вне списка: «не чаще раза в 10 минут» — в пределах кеша; при заполнении кеша защита сбрасывается', async () => {
+  const { makeAdmission } = await import('../server/admission.js');
+  let reads = 0;
+  const t = bot({ record: async () => {}, withdrawIfActive: async () => { reads++; return false; } }, { admission: makeAdmission({ allowed: new Set(['1']), perDay: 5, concurrency: 1 }) });
+  await t.say('/delete'); await t.say('/delete');
+  assert.equal(reads, 1, 'повтор того же чата — без чтения');
+  for (let i = 0; i < 10000; i++) await t.b.handleUpdate({ message: { chat: { id: 500000 + i, type: 'private' }, text: '/delete' } });
+  const before = reads;
+  await t.say('/delete');
+  assert.equal(reads, before + 1, 'кеш очищен — тот же чат снова читает журнал (глобального предела нет)');
+});
+
 test('чат вне списка, согласия не давал — /delete без отметки', async () => {
   const { makeAdmission } = await import('../server/admission.js');
   const rows = [];

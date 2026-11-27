@@ -692,6 +692,8 @@ export function createBot({
       // поздняя запись первой попытки не отменит принятое повторное согласие, а одинокая просроченная — отзывается.
       const marks = consentMarks.get(chatId) ?? consentMarks.set(chatId, {}).get(chatId);
       const r = marks[step] ||= { waiting: 0, inflight: 0, accepted: false, dirty: false };
+      // Служебный отзыв: строка того же вида, что отзыв человека (шаг + withdraw) — формат журнала не меняется до ответа
+      // юриста (решение Claude 27.11). По журналу служебный отзыв 6В согласие 6Б не снимает; 6Б и 6Г — снимает (consent-log).
       const settle = () => {
         if (!r.waiting && !r.accepted && r.dirty) {
           r.dirty = false;
