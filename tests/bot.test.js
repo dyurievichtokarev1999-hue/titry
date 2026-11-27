@@ -58,7 +58,8 @@ function fakeTelegram() {
     action: async () => {},
     answer: async () => {},
     fileBuffer: async () => Buffer.from('ogg'),
-    sendVideo: async (chat, file, extra) => { const st = await fs.stat(file); sent.push({ type: 'video', size: st.size, extra }); },
+    // Как telegram().sendVideo: ready() прямо перед запросом (false — ролик не уходит).
+    sendVideo: async (chat, file, extra, o = {}) => { const st = await fs.stat(file); if (o.ready && !(await o.ready())) return null; sent.push({ type: 'video', size: st.size, extra }); },
   };
 }
 
